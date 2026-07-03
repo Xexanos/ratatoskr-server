@@ -9,15 +9,16 @@
   },
   "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "generate": "pnpm --filter @ratatoskr/app run generate",
+    "generate": "pnpm --filter @ratatoskr/contract run generate",
     "build": "pnpm run generate && pnpm -r run build",
-    "test": "pnpm run generate && pnpm -r run test",
+    "test": "pnpm run build && pnpm -r run test",
     "lint": "eslint .",
-    "dev": "pnpm run generate && pnpm --filter @ratatoskr/app run dev"
+    "dev": "pnpm run build && pnpm --filter @ratatoskr/app run dev"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
     "eslint": "^9.18.0",
+    "globals": "^15.14.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0"
   }

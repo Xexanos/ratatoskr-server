@@ -28,7 +28,7 @@ describe('GET /v1/health', () => {
       'fetch',
       vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
     )
-    const app = buildApp(testConfig())
+    const app = await buildApp(testConfig(), { validateResponses: true })
     const res = await app.inject({ method: 'GET', url: '/v1/health' })
 
     expect(res.statusCode).toBe(200)
@@ -36,14 +36,15 @@ describe('GET /v1/health', () => {
     expect(body.status).toBe('ok')
     expect(body.abs).toEqual({ reachable: true })
     expect(body.sonos.reachable).toBe(false)
-    expect(typeof body.version).toBe('string')
+    // SPEC section 14: /health must not leak the server version to unauthenticated callers.
+    expect(body.version).toBeUndefined()
 
     await app.close()
   })
 
   it('reports degraded and abs.reachable=false when Audiobookshelf is unreachable', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')))
-    const app = buildApp(testConfig())
+    const app = await buildApp(testConfig(), { validateResponses: true })
     const res = await app.inject({ method: 'GET', url: '/v1/health' })
 
     expect(res.statusCode).toBe(200)

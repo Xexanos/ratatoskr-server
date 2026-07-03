@@ -6,26 +6,26 @@
   "license": "GPL-3.0-or-later",
   "main": "./dist/main.js",
   "scripts": {
-    "generate": "openapi-typescript ../../contract/openapi.yaml -o src/contract/generated/openapi.d.ts",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "dev": "tsx watch src/main.ts",
-    "start": "node dist/main.js"
+    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
+    "start": "node --env-file-if-exists=../../.env dist/main.js"
   },
   "dependencies": {
-    "fastify": "^5.2.1",
-    "js-yaml": "^4.1.0"
+    "@ratatoskr/contract": "workspace:*",
+    "fastify": "^5.2.1"
   },
   "devDependencies": {
+    "@fastify/response-validation": "^3.0.3",
     "@types/js-yaml": "^4.0.9",
-    "ajv": "^8.17.1",
     "@types/node": "^22.10.7",
-    "@vitest/coverage-v8": "^3.0.4",
-    "openapi-typescript": "^7.6.1",
+    "ajv": "^8.17.1",
+    "js-yaml": "^4.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
-    "vitest": "^3.0.4"
+    "vitest": "^3.0.4",
+    "@vitest/coverage-v8": "^3.0.4"
   }
 }

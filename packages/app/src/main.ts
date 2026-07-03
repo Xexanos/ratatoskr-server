@@ -1,7 +1,7 @@
 import { buildApp } from './api/app.js'
 import { ConfigError, loadConfig } from './config/index.js'
 
-function main(): void {
+async function main(): Promise<void> {
   let config
   try {
     config = loadConfig()
@@ -13,8 +13,16 @@ function main(): void {
     throw err
   }
 
-  const app = buildApp(config)
-  void app.listen({ port: config.port, host: '0.0.0.0' })
+  const app = await buildApp(config)
+  // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
+  // rejects and does not log it itself, so without this the process would die with a raw
+  // unhandled rejection instead of the same clean, formatted exit the config path gives.
+  try {
+    await app.listen({ port: config.port, host: '0.0.0.0' })
+  } catch (err) {
+    app.log.error(err)
+    process.exit(1)
+  }
 }
 
-main()
+void main()

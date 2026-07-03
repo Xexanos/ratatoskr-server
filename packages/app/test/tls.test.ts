@@ -29,7 +29,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
 }
 
 describe('buildApp TLS wiring', () => {
-  let app: ReturnType<typeof buildApp> | undefined
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined
 
   afterEach(async () => {
     await app?.close()
@@ -37,15 +37,15 @@ describe('buildApp TLS wiring', () => {
     vi.unstubAllGlobals()
   })
 
-  it('serves over plain HTTP when no TLS is configured', () => {
-    app = buildApp(testConfig())
+  it('serves over plain HTTP when no TLS is configured', async () => {
+    app = await buildApp(testConfig())
     expect(app.server).not.toBeInstanceOf(HttpsServer)
   })
 
   it('serves real traffic over HTTPS when a certificate is configured', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unreachable in test')))
 
-    app = buildApp(
+    app = await buildApp(
       testConfig({
         tls: { certPath: `${FIXTURES}cert.pem`, keyPath: `${FIXTURES}key.pem` },
       }),

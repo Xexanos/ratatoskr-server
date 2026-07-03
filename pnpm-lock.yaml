@@ -14,6 +14,9 @@ importers:
       eslint:
         specifier: ^9.18.0
         version: 9.39.4(supports-color@10.2.2)
+      globals:
+        specifier: ^15.14.0
+        version: 15.15.0
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -23,13 +26,16 @@ importers:
 
   packages/app:
     dependencies:
+      '@ratatoskr/contract':
+        specifier: workspace:*
+        version: link:../contract
       fastify:
         specifier: ^5.2.1
         version: 5.9.0
-      js-yaml:
-        specifier: ^4.1.0
-        version: 4.3.0
     devDependencies:
+      '@fastify/response-validation':
+        specifier: ^3.0.3
+        version: 3.0.3
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9
@@ -42,9 +48,9 @@ importers:
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
-      openapi-typescript:
-        specifier: ^7.6.1
-        version: 7.13.0(typescript@5.9.3)
+      js-yaml:
+        specifier: ^4.1.0
+        version: 4.3.0
       tsx:
         specifier: ^4.19.2
         version: 4.22.5
@@ -54,6 +60,18 @@ importers:
       vitest:
         specifier: ^3.0.4
         version: 3.2.6(@types/node@22.20.0)(supports-color@10.2.2)(tsx@4.22.5)
+
+  packages/contract:
+    devDependencies:
+      js-yaml:
+        specifier: ^4.1.0
+        version: 4.3.0
+      openapi-typescript:
+        specifier: ^7.6.1
+        version: 7.13.0(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
 
   packages/position:
     devDependencies:
@@ -309,6 +327,9 @@ packages:
 
   '@fastify/proxy-addr@5.1.0':
     resolution: {integrity: sha512-INS+6gh91cLUjB+PVHfu1UqcB76Sqtpyp7bnL+FYojhjygvOPA9ctiD/JDKsyD9Xgu4hUhCSJBPig/w7duNajw==}
+
+  '@fastify/response-validation@3.0.3':
+    resolution: {integrity: sha512-ojZ9CH501asIZueieqpbpVxrjWeZiGZIVbnrxtCjrMc62cjdCVi3D4QEyoHsc5Y+P/eK2dDEbpk/K1Q21fO5wg==}
 
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
@@ -865,6 +886,9 @@ packages:
   fast-uri@3.1.3:
     resolution: {integrity: sha512-i70LwGWUduXqzicKXWshooq+sWL1K3WUU5rKZNG/0i3a1OSoX3HqhH5WbWwTmqWfor4urUakGPiRQcleRZTwOg==}
 
+  fastify-plugin@5.1.0:
+    resolution: {integrity: sha512-FAIDA8eovSt5qcDgcBvDuX/v0Cjz0ohGhENZ/wpc3y+oZCY2afZ9Baqql3g/lC+OHRnciQol4ww7tuthOb9idw==}
+
   fastify@5.9.0:
     resolution: {integrity: sha512-VMS5lE0zj+MZlJpQa3Qv5iGjfun0H2N7VRgoBwpcTNQ2bdIQpv7fDpb+HGteGbicBsGkzGS+X+hdx9mmrfWuHQ==}
 
@@ -919,6 +943,10 @@ packages:
 
   globals@14.0.0:
     resolution: {integrity: sha512-oahGvuMGQlPw/ivIYBjVSrWAfWLBeku5tpPE2fOPLi+WHffIWbuh2tCjhyQhTBPMf5E9jDEH4FOmTYgYwbKwtQ==}
+    engines: {node: '>=18'}
+
+  globals@15.15.0:
+    resolution: {integrity: sha512-7ACyT3wmyp3I61S4fG682L0VA2RGD9otkqGJIwNUMF1SWUombIIk+af1unuDYgMm082aHYwD+mzJvv9Iu8dsgg==}
     engines: {node: '>=18'}
 
   has-flag@4.0.0:
@@ -1651,6 +1679,12 @@ snapshots:
       '@fastify/forwarded': 3.0.1
       ipaddr.js: 2.4.0
 
+  '@fastify/response-validation@3.0.3':
+    dependencies:
+      '@fastify/error': 4.2.0
+      ajv: 8.20.0
+      fastify-plugin: 5.1.0
+
   '@humanfs/core@0.19.2':
     dependencies:
       '@humanfs/types': 0.15.0
@@ -2225,6 +2259,8 @@ snapshots:
 
   fast-uri@3.1.3: {}
 
+  fastify-plugin@5.1.0: {}
+
   fastify@5.9.0:
     dependencies:
       '@fastify/ajv-compiler': 4.0.5
@@ -2295,6 +2331,8 @@ snapshots:
       path-scurry: 1.11.1
 
   globals@14.0.0: {}
+
+  globals@15.15.0: {}
 
   has-flag@4.0.0: {}
 

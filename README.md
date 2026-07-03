@@ -49,33 +49,58 @@ sync. Multiroom grouping, chapter awareness, and podcasts are planned for later.
 
 ## Requirements
 
-- An Audiobookshelf server, version 2.26 or newer, and a dedicated low-privilege account
-  for Ratatoskr to use when handing media URLs to speakers (see `docs/SPEC.md` section 14).
+- An Audiobookshelf server, version 2.26 or newer.
 - Sonos or IKEA SYMFONISK speakers on the same local network. Ratatoskr controls them
   directly over UPnP; no separate Sonos controller process is needed.
 
+### Set up the streamer account in Audiobookshelf
+
+Individual listeners log in with their own Audiobookshelf accounts, so their progress is
+saved to the right person. Separately, Ratatoskr needs one **dedicated, low-privilege
+account** whose token it puts into the audio URLs handed to the speakers (any device on
+the LAN can read those URLs, so this account is deliberately not a real user's):
+
+1. In Audiobookshelf, go to **Settings → Users → Add User**.
+2. Create a user, e.g. `ratatoskr-streamer`, with a strong password.
+3. Give it the **User** account type (read/stream access), not **Admin**. Grant it access
+   to the libraries you want to play. Do not give it upload/delete permissions.
+4. Put the credentials into `ABS_STREAMER_USER` / `ABS_STREAMER_PASSWORD` (below).
+
 ## Configuration
 
-Configuration is provided through environment variables; see [`.env.example`](.env.example)
-for the full list with defaults, and `docs/SPEC.md` sections 7 and 14 for the rationale.
-Listening users authenticate per-request against Audiobookshelf (section 8) — there is no
-static server-wide ABS token.
+Configuration is via environment variables. Copy the example file and fill it in:
+
+```sh
+cp .env.example .env
+```
+
+The `dev` and `start` scripts load `.env` automatically (Node's `--env-file`). The full
+list of variables, with defaults, lives in [`.env.example`](.env.example). The required
+ones are `ABS_URL`, `ABS_STREAMER_USER`, and `ABS_STREAMER_PASSWORD`; the server also
+requires TLS (`TLS_CERT_PATH` / `TLS_KEY_PATH`) unless you set `ALLOW_PLAIN_HTTP=true`,
+so credentials aren't sent in cleartext. On startup, any missing or invalid variable is
+reported — all problems at once — and the server refuses to run.
 
 ## Development
 
-This is a pnpm workspace (`packages/position` — pure position-mapping logic;
-`packages/app` — the Fastify service):
+This is a pnpm workspace of three packages: `position` (pure position-mapping logic),
+`contract` (types and schemas generated from `contract/openapi.yaml`), and `app` (the
+Fastify service).
 
 ```sh
 pnpm install
-pnpm run build   # generates contract types, then builds all packages
-pnpm run test
-pnpm run dev      # runs packages/app with live reload
+pnpm run build          # regenerates the contract package, then builds all packages
+pnpm run test           # unit tests (90% coverage thresholds enforced)
+pnpm --filter @ratatoskr/app run test:integration   # spawns the built server, needs a prior build
+pnpm run dev            # runs the app with live reload
 ```
 
-`packages/app` reads the OpenAPI contract from `contract/openapi.yaml` at both build time
-(generated TypeScript types) and runtime (registers the contract's schemas for response
-validation), so the two can never drift apart silently.
+The `contract` package regenerates the request/response types **and** the runtime JSON
+schemas from `contract/openapi.yaml` in its build step, so the code can never reference a
+shape the contract doesn't define. Note that Fastify's response schemas only *serialize*
+(they enforce required fields and drop unknown ones); they do not validate enum values or
+shapes. Real response conformance is asserted separately — the integration tests validate
+against the contract with Ajv, and response validation is enabled in test builds.
 
 ## API
 

@@ -1,3 +1,4 @@
+import { accessSync, constants } from 'node:fs'
 import { ConfigError } from './errors.js'
 
 export interface TlsConfig {
@@ -21,9 +22,10 @@ export interface Config {
 
 type Env = Record<string, string | undefined>
 
-// Validation deliberately aggregates every problem and throws a single ConfigError at
-// the end, instead of failing fast on the first missing variable — one restart cycle to
-// see everything that's wrong, not one per variable.
+// Validation deliberately aggregates every problem and throws a single ConfigError at the
+// end, instead of failing fast on the first — one restart cycle to see everything that's
+// wrong. The only way to obtain a Config is via finalize(), which validates as it returns,
+// so the check cannot be accidentally skipped.
 class EnvReader {
   private readonly problems: string[] = []
 
@@ -34,6 +36,20 @@ class EnvReader {
     if (value === undefined || value.trim() === '') {
       this.problems.push(`${name} is required`)
       return ''
+    }
+    return value
+  }
+
+  url(name: string): string {
+    const value = this.requireString(name)
+    if (value === '') return value
+    try {
+      const { protocol } = new URL(value)
+      if (protocol !== 'http:' && protocol !== 'https:') {
+        this.problems.push(`${name} must be an http(s) URL (got "${value}")`)
+      }
+    } catch {
+      this.problems.push(`${name} must be a valid URL (got "${value}")`)
     }
     return value
   }
@@ -63,7 +79,21 @@ class EnvReader {
     const keyPath = this.env.TLS_KEY_PATH
     const allowPlainHttp = this.env.ALLOW_PLAIN_HTTP === 'true'
 
-    if (certPath && keyPath) return { certPath, keyPath }
+    if (certPath && keyPath) {
+      // Validate readability now, so a typo or an unmounted secret volume fails with the
+      // same clear ConfigError as everything else, not a raw ENOENT later in buildApp().
+      for (const [name, path] of [
+        ['TLS_CERT_PATH', certPath],
+        ['TLS_KEY_PATH', keyPath],
+      ] as const) {
+        try {
+          accessSync(path, constants.R_OK)
+        } catch {
+          this.problems.push(`${name} is not readable (${path})`)
+        }
+      }
+      return { certPath, keyPath }
+    }
     if (certPath || keyPath) {
       this.problems.push('TLS_CERT_PATH and TLS_KEY_PATH must both be set, or neither')
       return undefined
@@ -79,16 +109,16 @@ class EnvReader {
     return undefined
   }
 
-  throwIfInvalid(): void {
+  finalize(config: Config): Config {
     if (this.problems.length > 0) throw new ConfigError(this.problems)
+    return Object.freeze(config)
   }
 }
 
 export function loadConfig(env: Env = process.env): Config {
   const reader = new EnvReader(env)
-
-  const config: Config = {
-    absUrl: reader.requireString('ABS_URL'),
+  return reader.finalize({
+    absUrl: reader.url('ABS_URL'),
     absStreamerUser: reader.requireString('ABS_STREAMER_USER'),
     absStreamerPassword: reader.requireString('ABS_STREAMER_PASSWORD'),
     sonosSeedHost: env.SONOS_SEED_HOST,
@@ -99,10 +129,7 @@ export function loadConfig(env: Env = process.env): Config {
     seekRetries: reader.positiveNumber('SEEK_RETRIES', 2),
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     tls: reader.tls(),
-  }
-
-  reader.throwIfInvalid()
-  return Object.freeze(config)
+  })
 }
 
 export { ConfigError }

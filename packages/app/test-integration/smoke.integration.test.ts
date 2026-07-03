@@ -15,7 +15,6 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 const DIST_MAIN = fileURLToPath(new URL('../dist/main.js', import.meta.url))
 const CONTRACT = fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url))
-const PKG = fileURLToPath(new URL('../package.json', import.meta.url))
 
 // Env keys the config reader consumes — removed from the inherited env so the test is
 // hermetic no matter what the host shell has set. The rest of process.env is inherited
@@ -148,8 +147,8 @@ describe('server process smoke test', () => {
     expect(body.status).toBe('ok')
     expect(body.abs).toEqual({ reachable: true })
     expect((body.sonos as { reachable: boolean }).reachable).toBe(false)
-    const pkg = JSON.parse(readFileSync(PKG, 'utf8')) as { version: string }
-    expect(body.version).toBe(pkg.version)
+    // SPEC section 14: /health must not leak the server version to unauthenticated callers.
+    expect(body.version).toBeUndefined()
 
     // Independent contract conformance: validate against the raw contract document, not
     // the server's own (ref-rewritten) schema copies — the server must not grade its own
