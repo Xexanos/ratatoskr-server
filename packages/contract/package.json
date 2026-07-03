@@ -1,0 +1,22 @@
+{
+  "name": "@ratatoskr/contract",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "description": "Generated artifacts derived from contract/openapi.yaml: request/response types and the runtime JSON schemas. Single source of truth (SPEC section 6). Never hand-edited.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ../../contract/openapi.yaml -o src/generated/openapi.d.ts && node scripts/generate-schemas.mjs",
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "js-yaml": "^4.1.0",
+    "openapi-typescript": "^7.6.1",
+    "typescript": "^5.7.3"
+  }
+}

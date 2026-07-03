@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run generate
+      - run: pnpm -r run build
+      - run: pnpm -r run test:coverage
+      # Needs the build step above: spawns the compiled server (dist/main.js) and talks
+      # to it over real HTTP.
+      - run: pnpm -r --if-present run test:integration
+      - run: pnpm run lint
+
+  # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
+  # change in a breaking way within /v1 without a major version bump.
+  oasdiff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch --depth=1 origin ${{ github.base_ref }}
+      - uses: oasdiff/oasdiff-action/breaking@v0
+        with:
+          base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
+          revision: "HEAD:contract/openapi.yaml"
+          fail-on: ERR
+          github-token: ${{ github.token }}

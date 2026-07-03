@@ -216,14 +216,20 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
 - **HTTP server:** Fastify. Schema-first, with first-class JSON-schema request/response
   validation that pairs naturally with the OpenAPI contract.
 - **HTTP client (Audiobookshelf):** the built-in `fetch` (undici). No extra HTTP dependency.
-- **Contract to code:** `openapi-typescript` generates the request/response types from
-  `contract/openapi.yaml` into a source that is never hand-edited. The Fastify routes are
-  written by hand against those types. This satisfies the "do not hand-edit generated type
-  code" constraint (section 11).
-- **Contract conformance:** the OpenAPI schema is enforced at the edge (Fastify schema
-  validation) and exercised in the integration tests, so responses cannot silently drift
-  from the contract. `oasdiff` runs in CI against the previous tagged contract for
-  breaking-change detection, as section 6 requires.
+- **Contract to code:** a dedicated `@ratatoskr/contract` package generates, from
+  `contract/openapi.yaml` in one build step, both the request/response types
+  (`openapi-typescript`) and the runtime JSON schemas (with local `$ref`s rewritten for
+  the validator). Both are generated, never hand-edited (section 11), and shipped as a
+  normal module — so nothing is parsed from the repo layout at runtime and the built
+  package is self-contained for the container deployment. The Fastify routes are written
+  by hand against those types.
+- **Contract conformance:** Fastify's route response schemas only *serialize* (via
+  fast-json-stringify) — they guarantee required fields and strip unknown ones, but do
+  not validate enum values or shape. Real conformance is asserted independently: the
+  integration tests validate responses against the raw contract with Ajv, and response
+  validation is additionally enabled in test builds (`@fastify/response-validation`).
+  `oasdiff` runs in CI against the previous tagged contract for breaking-change detection,
+  as section 6 requires.
 - **Testing:** Vitest as the runner, Fastify's `inject` for handler-level integration
   tests, and lightweight fakes for the ABS and Sonos clients. The dependency set is kept
   deliberately small (section 11).
@@ -241,7 +247,7 @@ logic must be pure and I/O-free. This is enforced architecturally, not by conven
 position logic lives in its own workspace package with zero runtime dependencies, so I/O
 cannot leak into it.
 
-The repository is an npm/pnpm workspace with two packages:
+The repository is an npm/pnpm workspace with three packages:
 
 ```
 ratatoskr-server/
@@ -253,21 +259,28 @@ ratatoskr-server/
 │   │   └── seekPlan.ts         #   "seek to track, then to offset" as a plain data structure;
 │   │                           #   settle delay, tolerance and retries are PARAMETERS, not env
 │   │
-│   └── app/                   # @ratatoskr/app — the service (all I/O); depends on position
+│   ├── contract/             # @ratatoskr/contract — generated from contract/openapi.yaml
+│   │   └── src/generated/     #   request/response types + runtime JSON schemas ($ref-rewritten),
+│   │                          #   emitted by the generate step; never hand-edited (section 11)
+│   │
+│   └── app/                   # @ratatoskr/app — the service (all I/O); depends on the other two
 │       ├── config/             #   load and validate environment variables at startup
 │       ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │       ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │       ├── playback/           #   session manager (the single in-memory session) + the sync loop
 │       ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount,
-│       │                       #   and mapping between the domain and the generated contract types
+│       │                       #   and mapping between the domain and the contract types
 │       └── main.ts             #   startup wiring
-│
-└── (generated contract types in their own never-hand-edited source)
 ```
 
 The purity of `@ratatoskr/position` is enforced by it having no runtime dependencies at
-all; an ESLint import-boundary rule additionally forbids importing Node built-ins or the
-app package from it.
+all; a scoped ESLint import-boundary rule additionally forbids its `src/` from importing
+Node built-ins or other workspace packages.
+
+Keeping the generated contract artifacts in their own `@ratatoskr/contract` package (rather
+than inside `app`) means the app imports them as an ordinary module and never reads the
+contract file or walks the repo layout at runtime — so the built container image, which
+ships neither the workspace files nor the contract source, boots correctly.
 
 Design principle for the fragile part: **`position` decides *what* should happen** (track
 and offset, the list of track URLs, the ordered seek steps) as pure data; **the `sonos`
@@ -336,3 +349,7 @@ Known accepted risks / open points:
   server must not both consume the same refresh token independently. How the token is
   handed over at session start (and possibly handed back) is resolved in the playback
   design (phase 4) — flagged here so it is not discovered in production.
+- `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
+  per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
+  cache the dependency status for a short TTL once the polling/reachability patterns exist
+  in phase 4/5, rather than building caching infrastructure without that context.
