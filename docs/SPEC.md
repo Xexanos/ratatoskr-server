@@ -47,9 +47,11 @@ Ratatoskr is the brain; clients are thin remotes. Audio never flows through Rata
   the LAN (discovery, set the transport URI, play, pause, seek, and poll transport state)
   via the embedded node-sonos-ts library. There is no separate Sonos controller process.
 - Audiobookshelf -> Sonos speaker: the speaker fetches the audio file directly over the
-  LAN, using an ABS URL (with the streaming user's access token as a query parameter) that
-  Ratatoskr hands to it. Because access tokens are short-lived, Ratatoskr embeds a current
-  token and re-sets the transport URI as needed, so long playback does not fail on expiry.
+  LAN, using an ABS URL (with an access token as a query parameter) that Ratatoskr hands
+  to it. That token belongs to a dedicated low-privilege streamer identity, never to the
+  listening user (see section 14). Because access tokens are short-lived, Ratatoskr embeds
+  a current token and re-sets the transport URI as needed, so long playback does not fail
+  on expiry.
 
 Audiobookshelf is the single source of truth for progress. Ratatoskr holds only the
 current session, in memory. If Ratatoskr restarts, the session is lost but no progress
@@ -128,8 +130,15 @@ All configuration is via environment variables, validated at startup with a clea
 if something required is missing:
 
 - `ABS_URL` (required) — LAN URL of Audiobookshelf, reachable by both Ratatoskr and the
-  speakers. Ratatoskr holds no Audiobookshelf token of its own; it authenticates per-user
-  (see section 8).
+  speakers. Listening users authenticate per-user (see section 8); the only server-side
+  ABS credential is the streamer identity below.
+- `ABS_STREAMER_USER`, `ABS_STREAMER_PASSWORD` (required) — credentials of the dedicated
+  low-privilege ABS account whose short-lived tokens are embedded in the media URLs handed
+  to the speakers (see section 14). Ratatoskr logs this identity in at startup and
+  refreshes it as needed.
+- `TLS_CERT_PATH`, `TLS_KEY_PATH` (recommended) — serve the API over HTTPS (see
+  section 14). If unset, the server refuses to start unless `ALLOW_PLAIN_HTTP=true` is
+  set explicitly.
 - Sonos speaker discovery is automatic over SSDP on the LAN — no URL to configure.
   `SONOS_SEED_HOST` (optional) — IP or hostname of one speaker, used as a discovery seed
   on networks where multicast/SSDP is unreliable.
@@ -153,6 +162,9 @@ to the person who is actually listening.
 - Access tokens are short-lived; clients exchange the refresh token for a new pair via
   `POST /v1/auth/refresh`. Both auth endpoints proxy to Audiobookshelf.
 - All endpoints require a valid token except `/health`, `/auth/login`, and `/auth/refresh`.
+- The listening user's token is used for Audiobookshelf **API** calls only. The media URLs
+  handed to the speakers carry the dedicated streamer identity's token instead, because
+  those URLs are readable by anyone on the LAN (section 14).
 
 Ratatoskr keeps no user database. For the single active playback session it holds that
 user's tokens in memory only, so the sync loop can renew the access token and keep writing
@@ -266,3 +278,61 @@ hardware. The sync loop in `playback/` stays thin: poll, convert to absolute sec
 
 The single API version prefix (`/v1`) is defined in one place in `api/`, so a future
 `/v2` can be mounted alongside it (section 6).
+
+## 14. Security
+
+Threat model: the home LAN is not fully trusted — assume guest devices and compromised
+IoT hardware on the same network. Sonos UPnP control is unauthenticated by nature: any
+LAN device can control any speaker **and read the current transport URI back** via
+`GetMediaInfo`. The audio path (ABS -> speaker) is always cleartext HTTP, because Sonos
+speakers do not trust custom certificate authorities. Ratatoskr does not attempt to gate
+speaker control (pointless), but it must not leak anything through these channels that is
+worth more than the audio itself.
+
+Decisions (binding for the implementation):
+
+- **Media URLs never carry a listening user's token.** Since the transport URI (including
+  its `?token=` query parameter) is readable by anyone on the LAN, the URLs handed to the
+  speakers use the short-lived access token of a dedicated ABS account
+  (`ABS_STREAMER_USER`) that has read/stream access to the library and nothing else. A
+  leaked media URL is then worth at most read access to the library for about an hour —
+  not the listener's account. The listening user's tokens exist only inside Ratatoskr
+  (and on the user's own client). Setup cost: the admin creates this account in ABS once.
+- **TLS between clients and Ratatoskr.** Login credentials and the 30-day refresh token
+  must not cross the network in cleartext. Ratatoskr serves HTTPS using a self-signed
+  certificate or a local CA (`TLS_CERT_PATH` / `TLS_KEY_PATH`); the Android app pins that
+  certificate via its network security configuration (works with the hermetic F-Droid
+  build; no public CA involved). Plain HTTP requires the explicit opt-out
+  `ALLOW_PLAIN_HTTP=true` — for setups that terminate TLS in a reverse proxy or accept
+  the risk knowingly.
+- **Log redaction is normative.** Never log `Authorization` headers, query strings
+  containing `token`, or the request bodies of the `/auth/*` endpoints. The error mapper
+  strips URLs from upstream errors before they reach responses or logs. (Also note: ABS
+  and any proxy in between will log media-URL query strings — one more reason those URLs
+  carry only the streamer token.)
+- **Rate-limit the unauthenticated endpoints.** `/auth/login` and `/auth/refresh` get a
+  conservative per-IP rate limit so Ratatoskr is not a free brute-force funnel in front
+  of ABS.
+
+Hardening checklist (small items, still binding):
+
+- Validate and URL-encode client-supplied path parameters (`itemId`) before they enter
+  upstream URLs.
+- `/health` stays unauthenticated but reports only coarse reachability — no versions,
+  no URLs.
+- No CORS headers (the API is not for browsers); bearer-token auth means no cookie-based
+  CSRF surface.
+- Commit the lockfile; run `npm audit` in CI.
+- The container runs as a non-root user.
+
+Known accepted risks / open points:
+
+- The streamer token in the media URL remains readable on the LAN (UPnP, HTTP sniffing,
+  ABS access logs). Accepted: it is short-lived and minimally privileged.
+- ABS itself is typically served over plain HTTP on the LAN; securing it is outside this
+  project's scope, but a reverse proxy with TLS in front of both services is a sensible
+  deployment.
+- Refresh-token rotation: ABS rotates refresh tokens on every use, so the app and the
+  server must not both consume the same refresh token independently. How the token is
+  handed over at session start (and possibly handed back) is resolved in the playback
+  design (phase 4) — flagged here so it is not discovered in production.
