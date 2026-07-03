@@ -18,7 +18,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run generate
       - run: pnpm -r run build
-      - run: pnpm -r run test
+      - run: pnpm -r run test:coverage
       - run: pnpm run lint
 
   # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
