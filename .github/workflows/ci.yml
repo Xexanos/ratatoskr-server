@@ -19,6 +19,9 @@ jobs:
       - run: pnpm run generate
       - run: pnpm -r run build
       - run: pnpm -r run test:coverage
+      # Needs the build step above: spawns the compiled server (dist/main.js) and talks
+      # to it over real HTTP.
+      - run: pnpm -r --if-present run test:integration
       - run: pnpm run lint
 
   # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
