@@ -1,0 +1,6 @@
+packages:
+  - "packages/*"
+
+# esbuild's postinstall just fetches its platform binary — required for vite/vitest.
+allowBuilds:
+  esbuild: true

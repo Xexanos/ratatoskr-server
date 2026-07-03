@@ -49,21 +49,33 @@ sync. Multiroom grouping, chapter awareness, and podcasts are planned for later.
 
 ## Requirements
 
-- An Audiobookshelf server, version 2.26 or newer, and a permanent API key
-  (see the Audiobookshelf API key guide).
-- [node-sonos-http-api](https://github.com/jishi/node-sonos-http-api) reachable on the
-  same local network as your speakers.
-- Sonos or IKEA SYMFONISK speakers on that same network.
+- An Audiobookshelf server, version 2.26 or newer, and a dedicated low-privilege account
+  for Ratatoskr to use when handing media URLs to speakers (see `docs/SPEC.md` section 14).
+- Sonos or IKEA SYMFONISK speakers on the same local network. Ratatoskr controls them
+  directly over UPnP; no separate Sonos controller process is needed.
 
 ## Configuration
 
-Configuration is provided through environment variables:
+Configuration is provided through environment variables; see [`.env.example`](.env.example)
+for the full list with defaults, and `docs/SPEC.md` sections 7 and 14 for the rationale.
+Listening users authenticate per-request against Audiobookshelf (section 8) — there is no
+static server-wide ABS token.
 
-- `ABS_URL` — LAN URL of the Audiobookshelf server (for example `http://192.168.1.50:13378`).
-- `ABS_TOKEN` — Audiobookshelf API key.
-- `SONOS_HTTP_API_URL` — URL of the node-sonos-http-api instance.
-- `RATATOSKR_TOKEN` — optional shared token clients must present. If unset, auth is disabled.
-- `POLL_INTERVAL_SECONDS` — how often to poll the speaker (default 15).
+## Development
+
+This is a pnpm workspace (`packages/position` — pure position-mapping logic;
+`packages/app` — the Fastify service):
+
+```sh
+pnpm install
+pnpm run build   # generates contract types, then builds all packages
+pnpm run test
+pnpm run dev      # runs packages/app with live reload
+```
+
+`packages/app` reads the OpenAPI contract from `contract/openapi.yaml` at both build time
+(generated TypeScript types) and runtime (registers the contract's schemas for response
+validation), so the two can never drift apart silently.
 
 ## API
 

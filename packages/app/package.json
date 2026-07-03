@@ -1,0 +1,27 @@
+{
+  "name": "@ratatoskr/app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "main": "./dist/main.js",
+  "scripts": {
+    "generate": "openapi-typescript ../../contract/openapi.yaml -o src/contract/generated/openapi.d.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "fastify": "^5.2.1",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.7",
+    "openapi-typescript": "^7.6.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.4"
+  }
+}
