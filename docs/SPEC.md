@@ -349,3 +349,7 @@ Known accepted risks / open points:
   server must not both consume the same refresh token independently. How the token is
   handed over at session start (and possibly handed back) is resolved in the playback
   design (phase 4) — flagged here so it is not discovered in production.
+- `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
+  per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
+  cache the dependency status for a short TTL once the polling/reachability patterns exist
+  in phase 4/5, rather than building caching infrastructure without that context.
