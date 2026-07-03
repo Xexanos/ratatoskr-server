@@ -1,0 +1,500 @@
+openapi: 3.0.3
+info:
+  title: Ratatoskr API
+  version: 1.0.0
+  description: |
+    Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
+    document describes the HTTP API that Ratatoskr's own clients (the Android app,
+    and any future client) use to browse the library, pick a speaker, and control
+    playback. Audio itself is streamed directly from Audiobookshelf to the Sonos
+    speakers and does not pass through this API.
+
+    This contract is the single source of truth for client/server communication.
+    Server and clients are versioned and released independently, and must remain
+    compatible across a range of versions. Therefore:
+
+      - The API is versioned in the URL path (/v1). Breaking changes go into a new
+        major version and a new path (/v2), served alongside the old one during a
+        deprecation window.
+      - Backwards-compatible additions (new optional fields, new endpoints) are
+        minor version bumps within /v1. Clients must ignore unknown fields.
+      - A CI check (oasdiff) fails any change that breaks compatibility without a
+        major version bump.
+  license:
+    name: GPL-3.0-or-later
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: http://{host}:{port}/v1
+    description: Ratatoskr service on the local network
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8080"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: system
+  - name: speakers
+  - name: library
+  - name: playback
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness and dependency check
+      security: []
+      tags: [system]
+      responses:
+        "200":
+          description: Service is up. Reports reachability of its dependencies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Authenticate against Audiobookshelf via Ratatoskr
+      description: |
+        Ratatoskr forwards the credentials to Audiobookshelf and returns the resulting
+        access and refresh tokens plus the identified user. Clients then send the access
+        token as the bearer token on all other endpoints; Ratatoskr uses it upstream so
+        that the library view and progress are per-user.
+      security: []
+      tags: [system]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthTokens" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /auth/refresh:
+    post:
+      operationId: refresh
+      summary: Exchange a refresh token for a new token pair
+      description: |
+        Audiobookshelf access tokens are short-lived. Clients exchange their refresh
+        token for a new access/refresh pair. Ratatoskr proxies this to Audiobookshelf.
+      security: []
+      tags: [system]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: A new token pair.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthTokens" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /speakers:
+    get:
+      operationId: listSpeakers
+      summary: List discovered Sonos speakers and groups
+      tags: [speakers]
+      responses:
+        "200":
+          description: The speakers currently visible on the local network.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Speaker"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /library/items:
+    get:
+      operationId: listLibraryItems
+      summary: List or search audiobooks from Audiobookshelf
+      description: |
+        A thin, paginated projection of the ABS library so that clients never need
+        Audiobookshelf credentials of their own. Only the fields required to choose
+        and display a book are returned.
+      tags: [library]
+      parameters:
+        - name: q
+          in: query
+          description: Optional full-text search over title and author.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a previous response.
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of library items.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryItemPage"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /library/items/{itemId}:
+    get:
+      operationId: getLibraryItem
+      summary: Get a single audiobook, including stored progress
+      tags: [library]
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      responses:
+        "200":
+          description: The requested item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryItem"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /sessions/current:
+    get:
+      operationId: getCurrentSession
+      summary: Get the active playback session
+      description: |
+        Ratatoskr plays one audiobook at a time in v1. Returns 404 when nothing is
+        playing.
+      tags: [playback]
+      responses:
+        "200":
+          description: The active session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NoActiveSession" }
+    put:
+      operationId: startSession
+      summary: Start (or replace) playback on a speaker
+      description: |
+        Starts playback of an item on a speaker. If a session is already active it
+        is stopped first, and its final position is written back to Audiobookshelf.
+        Playback resumes from the position stored in Audiobookshelf. This operation
+        is idempotent for the same itemId and speakerId.
+      tags: [playback]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartSessionRequest" }
+      responses:
+        "200":
+          description: Session started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+    delete:
+      operationId: stopSession
+      summary: Stop playback
+      description: Stops playback and writes the final position back to Audiobookshelf.
+      tags: [playback]
+      responses:
+        "204":
+          description: Stopped. No active session remains.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NoActiveSession" }
+
+  /sessions/current/pause:
+    post:
+      operationId: pauseSession
+      summary: Pause playback
+      tags: [playback]
+      responses:
+        "200":
+          description: Paused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NoActiveSession" }
+
+  /sessions/current/resume:
+    post:
+      operationId: resumeSession
+      summary: Resume playback
+      tags: [playback]
+      responses:
+        "200":
+          description: Resumed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NoActiveSession" }
+
+  /sessions/current/seek:
+    post:
+      operationId: seekSession
+      summary: Seek to an absolute position
+      description: |
+        The position is the absolute offset in seconds from the start of the whole
+        audiobook. Ratatoskr maps it to the correct track and in-track offset.
+      tags: [playback]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SeekRequest" }
+      responses:
+        "200":
+          description: Seek accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NoActiveSession" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        The caller's Audiobookshelf access token, obtained from POST /auth/login and
+        renewed via POST /auth/refresh. Ratatoskr uses it for its upstream calls to
+        Audiobookshelf, so the library view and progress are scoped to that user.
+        Required on every endpoint except /health, /auth/login, and /auth/refresh.
+
+  parameters:
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      description: Audiobookshelf library item id.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: The request was malformed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The resource was not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NoActiveSession:
+      description: No audiobook is currently playing.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    UpstreamError:
+      description: A dependency (Audiobookshelf or the Sonos controller) failed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Health:
+      type: object
+      required: [status, abs, sonos]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+          description: Server semver.
+        abs:
+          $ref: "#/components/schemas/DependencyStatus"
+        sonos:
+          $ref: "#/components/schemas/DependencyStatus"
+
+    DependencyStatus:
+      type: object
+      required: [reachable]
+      properties:
+        reachable: { type: boolean }
+        detail: { type: string }
+
+    Speaker:
+      type: object
+      required: [id, name, isGroup]
+      properties:
+        id:
+          type: string
+          description: Stable identifier used in start requests.
+        name: { type: string }
+        isGroup: { type: boolean }
+        members:
+          type: array
+          description: Room names in the group, when isGroup is true.
+          items: { type: string }
+
+    Progress:
+      type: object
+      required: [positionSeconds, isFinished]
+      properties:
+        positionSeconds:
+          type: number
+          format: double
+          minimum: 0
+        isFinished: { type: boolean }
+
+    LibraryItemSummary:
+      type: object
+      required: [id, title, durationSeconds]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        author: { type: string }
+        durationSeconds:
+          type: number
+          format: double
+          minimum: 0
+        coverUrl:
+          type: string
+          nullable: true
+          description: Absolute URL served by Ratatoskr; may require the token.
+        progress:
+          $ref: "#/components/schemas/Progress"
+
+    LibraryItem:
+      allOf:
+        - $ref: "#/components/schemas/LibraryItemSummary"
+        - type: object
+          properties:
+            description: { type: string }
+            narrator: { type: string }
+
+    LibraryItemPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LibraryItemSummary" }
+        nextCursor:
+          type: string
+          nullable: true
+          description: Present when more items are available.
+
+    PlaybackState:
+      type: string
+      enum: [playing, paused, buffering, stopped, finished]
+
+    Session:
+      type: object
+      required: [itemId, speakerId, state, positionSeconds, durationSeconds, updatedAt]
+      properties:
+        itemId: { type: string }
+        item: { $ref: "#/components/schemas/LibraryItemSummary" }
+        speakerId: { type: string }
+        state: { $ref: "#/components/schemas/PlaybackState" }
+        positionSeconds:
+          type: number
+          format: double
+          minimum: 0
+          description: Absolute offset from the start of the whole audiobook.
+        durationSeconds:
+          type: number
+          format: double
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+
+    User:
+      type: object
+      required: [id, username]
+      properties:
+        id: { type: string }
+        username: { type: string }
+
+    AuthTokens:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken:
+          type: string
+          description: Short-lived Audiobookshelf access token; send as the bearer token.
+        refreshToken:
+          type: string
+          description: |
+            Longer-lived token. Exchange it via /auth/refresh, and pass it to startSession
+            so the server can keep progress flowing during long unattended playback.
+        user: { $ref: "#/components/schemas/User" }
+
+    StartSessionRequest:
+      type: object
+      required: [itemId, speakerId]
+      properties:
+        itemId: { type: string }
+        speakerId: { type: string }
+        refreshToken:
+          type: string
+          description: |
+            Optional but recommended. Lets Ratatoskr renew the caller's Audiobookshelf
+            access token on its own, so the server-side sync loop can keep writing progress
+            during long unattended playback. Held in memory for the active session only and
+            discarded on stop or restart.
+
+    SeekRequest:
+      type: object
+      required: [positionSeconds]
+      properties:
+        positionSeconds:
+          type: number
+          format: double
+          minimum: 0
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable error code.
+        message:
+          type: string
+          description: Human-readable explanation.
