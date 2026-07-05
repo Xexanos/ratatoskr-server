@@ -172,6 +172,27 @@ progress during long unattended playback; the tokens are discarded on stop and o
 There are no Ratatoskr-native accounts and no multi-tenant session store in v1 — one active
 session at a time, owned by one authenticated user.
 
+**Refresh-token rotation handover** (contract 1.1.0). Audiobookshelf rotates the refresh
+token on every use, so when the sync loop renews the session user's tokens, the pair the
+client stored at login is invalidated — without a hand-back channel the client's next
+`/auth/refresh` would fail and force a re-login. The `Session` schema therefore carries
+optional `accessToken`/`refreshToken` fields:
+
+- When the sync loop refreshes the session user's tokens, the server marks the new pair
+  as "not yet delivered".
+- It includes both fields in `Session` responses to that user until one such response has
+  been sent, then omits them again. Every playback operation returns a `Session`, so the
+  rotated pair reaches the client through the polling it already does for its now-playing
+  view — no new endpoint. (v1 has exactly one session and one session user, so "that user"
+  is simply the authenticated caller of a session endpoint.)
+- These fields fall under the log-redaction rule (section 14).
+
+The client-side half of the protocol (clients never call `/auth/refresh` while their
+session is active; they adopt tokens from `Session` responses, re-fetch
+`getCurrentSession` on a 401 before falling back to `/auth/refresh`, and poll once more
+right before `stopSession`) is specified in the app's SPEC, section 5. Implementation
+lands with the playback design (phase 4).
+
 ## 9. Testing
 
 - Unit tests for the position module are mandatory and should cover: single-file books,
@@ -346,9 +367,11 @@ Known accepted risks / open points:
   project's scope, but a reverse proxy with TLS in front of both services is a sensible
   deployment.
 - Refresh-token rotation: ABS rotates refresh tokens on every use, so the app and the
-  server must not both consume the same refresh token independently. How the token is
-  handed over at session start (and possibly handed back) is resolved in the playback
-  design (phase 4) — flagged here so it is not discovered in production.
+  server must not both consume the same refresh token independently. Resolved at the
+  contract level (1.1.0): the client hands its refresh token over in `startSession`, the
+  server hands rotated pairs back through optional `Session.accessToken`/`refreshToken`
+  fields (see section 8). The server-side behavior ships with the playback design
+  (phase 4).
 - `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
   per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
   cache the dependency status for a short TTL once the polling/reachability patterns exist

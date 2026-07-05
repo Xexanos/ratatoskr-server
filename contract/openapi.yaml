@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -430,6 +430,20 @@ components:
         updatedAt:
           type: string
           format: date-time
+        accessToken:
+          type: string
+          description: |
+            Present only when Ratatoskr has rotated the caller's Audiobookshelf tokens
+            since the last Session response it returned (Audiobookshelf rotates the
+            refresh token on every use, so a server-side renewal invalidates the pair
+            the client stored). Clients must adopt this token immediately and discard
+            the previous one. Absent otherwise. Added in 1.1.0.
+        refreshToken:
+          type: string
+          description: |
+            The rotated refresh token accompanying accessToken; present under the same
+            condition and with the same adoption rule. Never logged (log-redaction rule,
+            server SPEC section 14). Added in 1.1.0.
 
     LoginRequest:
       type: object
