@@ -216,9 +216,22 @@ paths:
     delete:
       operationId: stopSession
       summary: Stop playback
-      description: Stops playback and writes the final position back to Audiobookshelf.
+      description: |
+        Stops playback and writes the final position back to Audiobookshelf. Normally
+        returns 204. If a rotated Audiobookshelf token pair is still pending delivery at
+        stop time, returns 200 with a final Session whose rotatedTokens carries that pair,
+        so it is not lost when the session ends (the server discards its in-memory tokens
+        on stop). Clients must treat any 2xx as a successful stop and, on 200, adopt
+        rotatedTokens if present.
       tags: [playback]
       responses:
+        "200":
+          description: |
+            Stopped, and a rotated token pair was pending: the final Session carries it in
+            rotatedTokens. No active session remains.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
         "204":
           description: Stopped. No active session remains.
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -430,20 +443,34 @@ components:
         updatedAt:
           type: string
           format: date-time
+        rotatedTokens:
+          $ref: "#/components/schemas/RotatedTokens"
+
+    RotatedTokens:
+      type: object
+      required: [accessToken, refreshToken]
+      description: |
+        A rotated Audiobookshelf token pair handed back to the client. Present on a
+        Session only when Ratatoskr has renewed the caller's tokens since the last
+        Session it returned to this client: Audiobookshelf rotates the refresh token on
+        every use, so a server-side renewal invalidates the pair the client holds, and
+        this is the channel through which the client learns the new one. The two members
+        always travel together (both or neither), which is why they are a nested object
+        rather than two independent optional fields.
+
+        The client must adopt this pair immediately, discard the previous one, and send
+        the new access token on its next request. Ratatoskr keeps including the pair in
+        Session responses until the client authenticates with the new access token
+        (delivery is confirmed by adoption, not by a single send, so a dropped response
+        cannot strand the client), and also includes it in the final Session returned by
+        stopSession. Never logged (server SPEC section 14). Added in 1.1.0.
+      properties:
         accessToken:
           type: string
-          description: |
-            Present only when Ratatoskr has rotated the caller's Audiobookshelf tokens
-            since the last Session response it returned (Audiobookshelf rotates the
-            refresh token on every use, so a server-side renewal invalidates the pair
-            the client stored). Clients must adopt this token immediately and discard
-            the previous one. Absent otherwise. Added in 1.1.0.
+          description: Short-lived Audiobookshelf access token; send as the bearer token.
         refreshToken:
           type: string
-          description: |
-            The rotated refresh token accompanying accessToken; present under the same
-            condition and with the same adoption rule. Never logged (log-redaction rule,
-            server SPEC section 14). Added in 1.1.0.
+          description: The rotated longer-lived refresh token that replaces the client's stored one.
 
     LoginRequest:
       type: object
