@@ -68,6 +68,13 @@ simple.
   reports the current track index plus elapsed time within that track.
 - The position module must convert both ways: absolute seconds -> (trackIndex, offset),
   and (trackIndex, offset) -> absolute seconds, using the per-track durations from ABS.
+- The position module treats the track durations as a validated precondition: it fails
+  fast (throws) on a malformed list (empty, zero, non-finite), and only ever clamps
+  position *values*. Because those durations originate from ABS metadata, not from a
+  programmer, the `abs/` layer (library projection, section 13) is responsible for
+  validating and normalizing them, and for surfacing a clear "cannot be played" error for
+  a book with bad track metadata — so malformed data never reaches the position module or
+  the sync loop.
 - Seeking is finicky in practice. Expect to seek to the track first, then to the offset,
   and expect to need a small settle delay and a tolerance window before trusting the
   reported position. Make the delay, tolerance, and retry count configurable rather than
