@@ -29,7 +29,12 @@ export async function registerLibraryRoutes(app: FastifyInstance, abs: AbsClient
     {
       schema: {
         querystring: listQuerystring,
-        response: { 200: { $ref: 'LibraryItemPage#' }, 401: { $ref: 'Error#' }, 502: { $ref: 'Error#' } },
+        response: {
+          200: { $ref: 'LibraryItemPage#' },
+          400: { $ref: 'Error#' },
+          401: { $ref: 'Error#' },
+          502: { $ref: 'Error#' },
+        },
       },
     },
     async (request, reply) => {

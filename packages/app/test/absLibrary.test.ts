@@ -84,6 +84,26 @@ describe('AbsClient library projection', () => {
       expect(page.nextCursor).toBeNull()
     })
 
+    it('keeps paging within a library when ABS omits total and the page is full', async () => {
+      stubRoutes([
+        TWO_BOOK_LIBS,
+        // No `total` field: a full page (== limit) must still yield a next cursor rather
+        // than truncating the library to its first page.
+        { match: '/api/libraries/lib1/items', body: { results: [absBook('li_1', 'Alpha', 'A', 1), absBook('li_2', 'Beta', 'B', 2)] } },
+      ])
+      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor: undefined })
+      expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 0, page: 1 })
+    })
+
+    it('advances past a library when ABS omits total and the page is not full', async () => {
+      stubRoutes([
+        TWO_BOOK_LIBS,
+        { match: '/api/libraries/lib1/items', body: { results: [absBook('li_1', 'Alpha', 'A', 1)] } },
+      ])
+      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor: undefined })
+      expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 1, page: 0 })
+    })
+
     it('returns an empty page when the cursor points past the last library', async () => {
       stubRoutes([TWO_BOOK_LIBS])
       const cursor = Buffer.from(JSON.stringify({ libraryIndex: 5, page: 0 }), 'utf8').toString('base64url')

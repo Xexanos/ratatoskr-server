@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
+import { InvalidCursorError } from '../src/abs/cursor.js'
 import { AbsNotFoundError, AbsUpstreamError } from '../src/abs/errors.js'
 import { buildApp } from '../src/api/app.js'
 import type { Config } from '../src/config/index.js'
@@ -56,6 +57,22 @@ describe('GET /v1/library/items', () => {
     const app = await appWith({ listItems: vi.fn().mockRejectedValue(new AbsUpstreamError()) })
     const res = await app.inject({ method: 'GET', url: '/v1/library/items', headers: AUTH })
     expect(res.statusCode).toBe(502)
+    await app.close()
+  })
+
+  it('maps a bad cursor to 400 with a contract Error body', async () => {
+    const app = await appWith({ listItems: vi.fn().mockRejectedValue(new InvalidCursorError()) })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items?cursor=garbage', headers: AUTH })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ code: 'bad_request', message: expect.any(String) })
+    await app.close()
+  })
+
+  it('rejects an out-of-range limit with 400', async () => {
+    const app = await appWith({ listItems: vi.fn() })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items?limit=500', headers: AUTH })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('bad_request')
     await app.close()
   })
 })

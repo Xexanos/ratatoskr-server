@@ -91,10 +91,14 @@ export class AbsClient {
       total?: number
     }
     const results = Array.isArray(data.results) ? data.results : []
-    const total = typeof data.total === 'number' ? data.total : results.length
+    // ABS returns `total` (all items in the library); page within it while items remain.
+    // If `total` is ever missing, fall back to "a full page means there may be more" so a
+    // library is never truncated to its first page.
+    const moreInThisLibrary =
+      typeof data.total === 'number' ? (page + 1) * limit < data.total : results.length === limit
 
     let nextCursor: string | null = null
-    if ((page + 1) * limit < total) {
+    if (moreInThisLibrary) {
       nextCursor = encodeCursor({ libraryIndex, page: page + 1 })
     } else if (libraryIndex + 1 < libraries.length) {
       nextCursor = encodeCursor({ libraryIndex: libraryIndex + 1, page: 0 })
