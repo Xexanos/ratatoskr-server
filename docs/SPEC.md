@@ -413,3 +413,23 @@ Known accepted risks / open points:
   per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
   cache the dependency status for a short TTL once the polling/reachability patterns exist
   in phase 4/5, rather than building caching infrastructure without that context.
+
+## 15. Next steps
+
+Planned work, not yet built. Captured here so the intent is not lost; each lands in its
+own change with its own tests.
+
+- **Integration test against a real Audiobookshelf.** The `abs/` client is currently
+  covered only against `fetch` stubs, so it verifies our own parsing but not that the
+  request shapes and response shapes match a live ABS. Add an integration test that runs
+  the client (login/refresh and the library projection) against a real or containerized
+  Audiobookshelf, gated so it does not run in the normal unit-test pass (it needs a
+  reachable ABS). This closes the open item from the phase-3a review — a smoke test against
+  a live ABS before phase 4 builds playback on top of the projection.
+- **Bundle the server for a smaller deploy artifact.** The build is currently `tsc`-only:
+  it emits per-file JavaScript and ships `node_modules` into the container. Introduce a
+  bundling step (e.g. esbuild or rollup) that tree-shakes the server (`packages/app`) into
+  a single artifact with dead code eliminated, to shrink the container image and speed
+  startup. Must stay compatible with the single multi-stage, multi-arch Dockerfile
+  (section 12) and must not pull generated contract types/schemas out of their normal
+  module boundary (section 11).
