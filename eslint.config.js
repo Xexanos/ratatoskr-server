@@ -5,7 +5,9 @@ import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/generated/**', '**/node_modules/**'],
+    // spike/ holds throwaway hardware-spike scripts kept locally (git-excluded, not part
+    // of the repo); never lint them.
+    ignores: ['**/dist/**', '**/generated/**', '**/node_modules/**', 'spike/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
