@@ -179,6 +179,55 @@ progress during long unattended playback; the tokens are discarded on stop and o
 There are no Ratatoskr-native accounts and no multi-tenant session store in v1 — one active
 session at a time, owned by one authenticated user.
 
+**Refresh-token rotation handover** (contract 1.1.0). Audiobookshelf rotates the refresh
+token on every use, so when the sync loop renews the session user's tokens, the pair the
+client stored at login is invalidated — without a hand-back channel the client's next
+`/auth/refresh` would fail and force a re-login. The `Session` schema therefore carries an
+optional `rotatedTokens` object (`accessToken` + `refreshToken`, both or neither).
+
+This relies on two properties of Audiobookshelf's token model (verified against the
+version this server targets; see the README's minimum-version requirement):
+
+- Access tokens are **stateless** — validated by signature and expiry only, with no
+  server-side session lookup — so a given access token stays valid until its own expiry
+  even after the pair has been rotated. (Refresh tokens, by contrast, are stateful and the
+  old one is invalidated the moment it is used.)
+- Because Ratatoskr and the client hold the *same* access token during a session, the sync
+  loop must **refresh proactively, before that token expires** — never only after a 401.
+  This leaves a handover window in which the client's still-valid old access token can
+  authenticate the very request that fetches the rotated pair. (Concrete lifetimes are an
+  Audiobookshelf configuration detail — e.g. access tokens on the order of hours, refresh
+  tokens on the order of weeks — so this spec states the ordering requirement, not a
+  number.)
+
+Server behavior:
+
+- When the sync loop refreshes the session user's tokens, the server marks the new pair
+  as pending delivery **to this client**.
+- It includes `rotatedTokens` in every `Session` response until the client authenticates
+  with the new access token — i.e. delivery is confirmed by **adoption, not by a single
+  send**, so a dropped or half-read response cannot strand the client. Every playback
+  operation returns a `Session`, so the pair reaches the client through the polling it
+  already does for its now-playing view — no new endpoint. (v1 has exactly one session and
+  one session user, so "this client" is simply the authenticated caller of a session
+  endpoint.)
+- `stopSession` discards the in-memory tokens, so a pair still pending at stop cannot be
+  redelivered afterwards. To close that race, `stopSession` returns **200 with a final
+  `Session`** carrying the pending `rotatedTokens` (instead of the usual 204) whenever a
+  pair is outstanding.
+- `rotatedTokens` appears in response bodies, so it falls under the log-redaction rule
+  extended for it in section 14.
+
+The client-side half of the protocol is specified in the app's SPEC, section 5: the client
+never calls `/auth/refresh` while its session is active and adopts tokens only from
+`Session` responses (including the 200 body from `stopSession`). On a 401 during an active
+session it first re-fetches `getCurrentSession` — which succeeds because the old access
+token is still valid until its expiry — to pick up a rotated pair, and only falls back to
+`/auth/refresh` if none is offered. One irreducible residual remains: if the single
+response that would carry the final pair at stop is lost in transit, the client re-logs in;
+this is far narrower than the original send-once race and needs no persistence to recover
+from. Implementation lands with the playback design (phase 4).
+
 ## 9. Testing
 
 - Unit tests for the position module are mandatory and should cover: single-file books,
@@ -326,10 +375,12 @@ Decisions (binding for the implementation):
   `ALLOW_PLAIN_HTTP=true` — for setups that terminate TLS in a reverse proxy or accept
   the risk knowingly.
 - **Log redaction is normative.** Never log `Authorization` headers, query strings
-  containing `token`, or the request bodies of the `/auth/*` endpoints. The error mapper
-  strips URLs from upstream errors before they reach responses or logs. (Also note: ABS
-  and any proxy in between will log media-URL query strings — one more reason those URLs
-  carry only the streamer token.)
+  containing `token`, the request bodies of the `/auth/*` endpoints, or response bodies
+  that carry tokens — specifically the `AuthTokens` returned by `/auth/*` and the
+  `rotatedTokens` object on a `Session` (section 8). The error mapper strips URLs from
+  upstream errors before they reach responses or logs. (Also note: ABS and any proxy in
+  between will log media-URL query strings — one more reason those URLs carry only the
+  streamer token.)
 - **Rate-limit the unauthenticated endpoints.** `/auth/login` and `/auth/refresh` get a
   conservative per-IP rate limit so Ratatoskr is not a free brute-force funnel in front
   of ABS.
@@ -353,9 +404,11 @@ Known accepted risks / open points:
   project's scope, but a reverse proxy with TLS in front of both services is a sensible
   deployment.
 - Refresh-token rotation: ABS rotates refresh tokens on every use, so the app and the
-  server must not both consume the same refresh token independently. How the token is
-  handed over at session start (and possibly handed back) is resolved in the playback
-  design (phase 4) — flagged here so it is not discovered in production.
+  server must not both consume the same refresh token independently. Addressed at the
+  contract level (1.1.0): the client hands its refresh token over in `startSession`, the
+  server hands rotated pairs back through the optional `Session.rotatedTokens` object and
+  the 200 `stopSession` body (see section 8). The operational risk remains open until the
+  phase-4 server implementation lands.
 - `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
   per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
   cache the dependency status for a short TTL once the polling/reachability patterns exist
