@@ -6,6 +6,7 @@ import { AbsClient } from '../abs/client.js'
 import type { Config } from '../config/index.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerHealthRoute } from './routes/health.js'
+import { registerLibraryRoutes } from './routes/library.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -84,6 +85,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     async (v1) => {
       await registerHealthRoute(v1, config)
       await registerAuthRoutes(v1, abs)
+      await registerLibraryRoutes(v1, abs)
     },
     { prefix: '/v1' },
   )
