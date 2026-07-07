@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
 import { contractSchemas } from '@ratatoskr/contract'
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
+import { AbsClient } from '../abs/client.js'
 import type { Config } from '../config/index.js'
+import { registerAuthRoutes } from './routes/auth.js'
 import { registerHealthRoute } from './routes/health.js'
+import { registerLibraryRoutes } from './routes/library.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -28,6 +31,8 @@ export interface BuildAppOptions {
   // does not *validate* — so enum violations and shape drift pass silently in production.
   // Enabling this in tests turns SPEC section 12's conformance promise into a real guard.
   validateResponses?: boolean
+  // Inject a fake Audiobookshelf client in tests. Defaults to a real one built from config.
+  absClient?: AbsClient
 }
 
 export async function buildApp(config: Config, options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -53,6 +58,21 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     app.addSchema({ $id: name, ...schema })
   }
 
+  // Map every error into the contract's Error shape ({ code, message }) so responses stay
+  // contract-conformant — Fastify's default validation/error body has a different shape.
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    if (error.validation) {
+      return reply.code(400).send({ code: 'bad_request', message: error.message })
+    }
+    if (error.statusCode && error.statusCode < 500) {
+      return reply.code(error.statusCode).send({ code: 'bad_request', message: error.message })
+    }
+    request.log.error(error)
+    return reply.code(500).send({ code: 'internal_error', message: 'Internal server error' })
+  })
+
+  const abs = options.absClient ?? new AbsClient(config.absUrl)
+
   if (options.validateResponses) {
     // Queued before the routes so its onRoute hook sees them. The dynamic import only
     // loads the module (it doesn't touch Fastify), so registration order is preserved and
@@ -64,6 +84,8 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   app.register(
     async (v1) => {
       await registerHealthRoute(v1, config)
+      await registerAuthRoutes(v1, abs)
+      await registerLibraryRoutes(v1, abs)
     },
     { prefix: '/v1' },
   )
