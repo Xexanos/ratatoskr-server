@@ -18,8 +18,8 @@ function expectConfigError(env: Record<string, string | undefined>, ...expected:
   let error: unknown
   try {
     loadConfig(env)
-  } catch (e) {
-    error = e
+  } catch (caught) {
+    error = caught
   }
   expect(error).toBeInstanceOf(ConfigError)
   const message = (error as Error).message

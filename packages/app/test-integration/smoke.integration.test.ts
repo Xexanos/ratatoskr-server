@@ -86,7 +86,7 @@ async function waitUntilReady(server: SpawnedServer, port: number, deadlineMs = 
       await fetch(`http://127.0.0.1:${port}/v1/health`, { signal: AbortSignal.timeout(1000) })
       return
     } catch {
-      await new Promise((r) => setTimeout(r, 100))
+      await new Promise((resolve) => setTimeout(resolve, 100))
     }
   }
   throw new Error(`server did not become ready within ${deadlineMs}ms.\nstderr:\n${server.stderr()}`)
@@ -109,14 +109,14 @@ describe('server process smoke test', () => {
       running.child.kill('SIGTERM')
       await Promise.race([
         once(running.child, 'exit'),
-        new Promise((r) => setTimeout(r, 5000)).then(() => running?.child.kill('SIGKILL')),
+        new Promise((resolve) => setTimeout(resolve, 5000)).then(() => running?.child.kill('SIGKILL')),
       ])
     }
     running = undefined
     if (fakeAbs) {
       // The child's undici fetch holds keep-alive connections; close() alone would hang.
       fakeAbs.closeAllConnections()
-      await new Promise((r) => fakeAbs?.close(r))
+      await new Promise((resolve) => fakeAbs?.close(resolve))
       fakeAbs = undefined
     }
   })
@@ -125,7 +125,7 @@ describe('server process smoke test', () => {
     // A real HTTP upstream standing in for Audiobookshelf — any response counts as
     // reachable, which is exactly the health check's own contract.
     fakeAbs = createServer((_req, res) => res.end('ok'))
-    await new Promise<void>((r) => fakeAbs?.listen(0, '127.0.0.1', r))
+    await new Promise<void>((resolve) => fakeAbs?.listen(0, '127.0.0.1', resolve))
     const absPort = (fakeAbs.address() as AddressInfo).port
 
     const port = await freePort()
