@@ -3,11 +3,11 @@ import { decodeCursor, encodeCursor, InvalidCursorError } from '../src/abs/curso
 
 describe('browse cursor', () => {
   it('round-trips a cursor through encode/decode', () => {
-    for (const c of [
+    for (const cursor of [
       { libraryIndex: 0, page: 0 },
       { libraryIndex: 2, page: 5 },
     ]) {
-      expect(decodeCursor(encodeCursor(c))).toEqual(c)
+      expect(decodeCursor(encodeCursor(cursor))).toEqual(cursor)
     }
   })
 

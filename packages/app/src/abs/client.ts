@@ -11,7 +11,7 @@ type Progress = components['schemas']['Progress']
 const REQUEST_TIMEOUT_MS = 10_000
 
 export interface ListItemsQuery {
-  q: string | undefined
+  searchQuery: string | undefined
   limit: number
   cursor: string | undefined
 }
@@ -43,8 +43,8 @@ export class AbsClient {
   // (the ABS search endpoint returns bounded top matches and is not paginated).
   async listItems(token: string, query: ListItemsQuery): Promise<LibraryItemPage> {
     const libraries = await this.listBookLibraries(token)
-    if (query.q !== undefined && query.q !== '') {
-      return this.search(token, libraries, query.q, query.limit)
+    if (query.searchQuery !== undefined && query.searchQuery !== '') {
+      return this.search(token, libraries, query.searchQuery, query.limit)
     }
     return this.browse(token, libraries, query.limit, query.cursor)
   }
@@ -60,10 +60,11 @@ export class AbsClient {
   async getProgress(token: string, itemId: string): Promise<Progress> {
     const data = await this.getJson(`/api/me/progress/${encodeURIComponent(itemId)}`, token, true)
     if (data === null) return { positionSeconds: 0, isFinished: false } // 404: nothing listened yet
-    const d = data as { currentTime?: unknown; isFinished?: unknown }
+    const progressData = data as { currentTime?: unknown; isFinished?: unknown }
     return {
-      positionSeconds: typeof d.currentTime === 'number' && d.currentTime > 0 ? d.currentTime : 0,
-      isFinished: d.isFinished === true,
+      positionSeconds:
+        typeof progressData.currentTime === 'number' && progressData.currentTime > 0 ? progressData.currentTime : 0,
+      isFinished: progressData.isFinished === true,
     }
   }
 
@@ -71,8 +72,8 @@ export class AbsClient {
     const data = await this.getJson('/api/libraries', token)
     const libraries = (data as { libraries?: { id?: unknown; mediaType?: unknown }[] })?.libraries ?? []
     return libraries
-      .filter((l) => l.mediaType === 'book' && typeof l.id === 'string')
-      .map((l) => ({ id: l.id as string }))
+      .filter((library) => library.mediaType === 'book' && typeof library.id === 'string')
+      .map((library) => ({ id: library.id as string }))
   }
 
   private async browse(
@@ -109,13 +110,13 @@ export class AbsClient {
   private async search(
     token: string,
     libraries: { id: string }[],
-    q: string,
+    searchQuery: string,
     limit: number,
   ): Promise<LibraryItemPage> {
     const perLibrary = await Promise.all(
       libraries.map(async (library) => {
         const data = (await this.getJson(
-          `/api/libraries/${encodeURIComponent(library.id)}/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+          `/api/libraries/${encodeURIComponent(library.id)}/search?q=${encodeURIComponent(searchQuery)}&limit=${limit}`,
           token,
         )) as { book?: { libraryItem?: unknown }[] }
         return Array.isArray(data.book) ? data.book : []
@@ -212,10 +213,10 @@ function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
 }
 
 function toAuthTokens(data: unknown): AuthTokens {
-  const d = data as { accessToken?: unknown; refreshToken?: unknown; user?: { id?: unknown; username?: unknown } }
-  const accessToken = d?.accessToken
-  const refreshToken = d?.refreshToken
-  const user = d?.user
+  const tokenData = data as { accessToken?: unknown; refreshToken?: unknown; user?: { id?: unknown; username?: unknown } }
+  const accessToken = tokenData?.accessToken
+  const refreshToken = tokenData?.refreshToken
+  const user = tokenData?.user
   if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !user) {
     throw new AbsUpstreamError('Audiobookshelf did not return the expected tokens')
   }

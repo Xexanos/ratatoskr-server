@@ -38,9 +38,9 @@ export async function registerLibraryRoutes(app: FastifyInstance, abs: AbsClient
       },
     },
     async (request, reply) => {
-      const { q, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
+      const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
       try {
-        return await abs.listItems(bearerToken(request), { q, limit, cursor })
+        return await abs.listItems(bearerToken(request), { searchQuery, limit, cursor })
       } catch (err) {
         return libraryErrorReply(reply, err)
       }

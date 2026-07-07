@@ -13,8 +13,8 @@ function stubRoutes(routes: { match: string; body?: unknown; status?: number }[]
     vi.fn((url: string) => {
       // Longest matching path wins, so '/api/libraries/lib1/items' beats '/api/libraries'.
       const route = routes
-        .filter((r) => url.includes(r.match))
-        .sort((a, b) => b.match.length - a.match.length)[0]
+        .filter((candidate) => url.includes(candidate.match))
+        .sort((left, right) => right.match.length - left.match.length)[0]
       if (!route) return Promise.resolve(new Response(null, { status: 404 }))
       if (route.status && route.status !== 200) return Promise.resolve(new Response(null, { status: route.status }))
       return Promise.resolve(
@@ -53,7 +53,7 @@ describe('AbsClient library projection', () => {
           body: { results: [absBook('li_1', 'Alpha', 'Author A', 3600), absBook('li_2', 'Beta', 'Author B', 60)], total: 5 },
         },
       ])
-      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor: undefined })
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
 
       expect(page.items).toEqual([
         { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: null },
@@ -70,7 +70,7 @@ describe('AbsClient library projection', () => {
       ])
       // cursor at lib1 page 1, limit 2 -> (1+1)*2=4 >= total 3 -> last page -> advance to lib3.
       const cursor = Buffer.from(JSON.stringify({ libraryIndex: 0, page: 1 }), 'utf8').toString('base64url')
-      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor })
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor })
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 1, page: 0 })
     })
 
@@ -80,7 +80,7 @@ describe('AbsClient library projection', () => {
         { match: '/api/libraries/lib3/items', body: { results: [absBook('li_x', 'End', 'E', 5)], total: 1 } },
       ])
       const cursor = Buffer.from(JSON.stringify({ libraryIndex: 1, page: 0 }), 'utf8').toString('base64url')
-      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor })
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor })
       expect(page.nextCursor).toBeNull()
     })
 
@@ -91,7 +91,7 @@ describe('AbsClient library projection', () => {
         // than truncating the library to its first page.
         { match: '/api/libraries/lib1/items', body: { results: [absBook('li_1', 'Alpha', 'A', 1), absBook('li_2', 'Beta', 'B', 2)] } },
       ])
-      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor: undefined })
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 0, page: 1 })
     })
 
@@ -100,14 +100,14 @@ describe('AbsClient library projection', () => {
         TWO_BOOK_LIBS,
         { match: '/api/libraries/lib1/items', body: { results: [absBook('li_1', 'Alpha', 'A', 1)] } },
       ])
-      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor: undefined })
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 1, page: 0 })
     })
 
     it('returns an empty page when the cursor points past the last library', async () => {
       stubRoutes([TWO_BOOK_LIBS])
       const cursor = Buffer.from(JSON.stringify({ libraryIndex: 5, page: 0 }), 'utf8').toString('base64url')
-      const page = await new AbsClient(BASE).listItems('tok', { q: undefined, limit: 2, cursor })
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor })
       expect(page).toEqual({ items: [], nextCursor: null })
     })
   })
@@ -119,8 +119,8 @@ describe('AbsClient library projection', () => {
         { match: '/api/libraries/lib1/search', body: { book: [{ libraryItem: absBook('li_1', 'Match One', 'A', 10) }] } },
         { match: '/api/libraries/lib3/search', body: { book: [{ libraryItem: absBook('li_2', 'Match Two', 'B', 20) }] } },
       ])
-      const page = await new AbsClient(BASE).listItems('tok', { q: 'match', limit: 50, cursor: undefined })
-      expect(page.items.map((i) => i.id)).toEqual(['li_1', 'li_2'])
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: 'match', limit: 50, cursor: undefined })
+      expect(page.items.map((item) => item.id)).toEqual(['li_1', 'li_2'])
       expect(page.nextCursor).toBeNull()
     })
   })

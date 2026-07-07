@@ -39,7 +39,7 @@ describe('GET /v1/library/items', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ items: [SUMMARY], nextCursor: null })
-    expect(listItems).toHaveBeenCalledWith('user-token', { q: 'alpha', limit: 50, cursor: undefined })
+    expect(listItems).toHaveBeenCalledWith('user-token', { searchQuery: 'alpha', limit: 50, cursor: undefined })
     await app.close()
   })
 
