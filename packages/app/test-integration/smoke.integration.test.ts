@@ -144,9 +144,12 @@ describe('server process smoke test', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 
-    expect(body.status).toBe('ok')
+    // No real Sonos on the CI/test network, so discovery finds nothing: sonos is unreachable
+    // and the overall status is therefore degraded (abs itself is reachable via the fake).
+    expect(body.status).toBe('degraded')
     expect(body.abs).toEqual({ reachable: true })
-    expect((body.sonos as { reachable: boolean }).reachable).toBe(false)
+    // sonos also carries a `detail` string when unreachable, so match only the flag we assert.
+    expect(body.sonos).toMatchObject({ reachable: false })
     // SPEC section 14: /health must not leak the server version to unauthenticated callers.
     expect(body.version).toBeUndefined()
 

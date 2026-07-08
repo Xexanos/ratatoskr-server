@@ -24,6 +24,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     seekRetries: 2,
     progressWriteThresholdSeconds: 5,
     tls: undefined,
+    validateResponses: true,
     ...overrides,
   }
 }

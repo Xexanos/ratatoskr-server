@@ -37,6 +37,12 @@ describe('loadConfig', () => {
     expect(config.progressWriteThresholdSeconds).toBe(5)
     expect(config.tls).toBeUndefined()
     expect(config.sonosSeedHost).toBeUndefined()
+    expect(config.validateResponses).toBe(false)
+  })
+
+  it('enables response validation only when VALIDATE_RESPONSES=true', () => {
+    expect(loadConfig({ ...REQUIRED, VALIDATE_RESPONSES: 'true' }).validateResponses).toBe(true)
+    expect(loadConfig({ ...REQUIRED, VALIDATE_RESPONSES: '1' }).validateResponses).toBe(false)
   })
 
   it('reports every missing required var at once', () => {

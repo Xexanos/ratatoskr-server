@@ -169,6 +169,11 @@ to the person who is actually listening.
 - Access tokens are short-lived; clients exchange the refresh token for a new pair via
   `POST /v1/auth/refresh`. Both auth endpoints proxy to Audiobookshelf.
 - All endpoints require a valid token except `/health`, `/auth/login`, and `/auth/refresh`.
+  Validity is proven by the upstream Audiobookshelf call each endpoint makes with the token.
+  `GET /speakers` is the one exception: Sonos discovery is local, so nothing is forwarded to
+  ABS and the bearer token is checked for **presence only**. This is deliberate — a device on
+  the same LAN can already enumerate the Sonos topology directly via SSDP/UPnP (section 14) — so
+  it leaks nothing new; real per-request validation for it arrives with playback in phase 4.
 - The listening user's token is used for Audiobookshelf **API** calls only. The media URLs
   handed to the speakers carry the dedicated streamer identity's token instead, because
   those URLs are readable by anyone on the LAN (section 14).
@@ -280,12 +285,25 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
   validation that pairs naturally with the OpenAPI contract.
 - **HTTP client (Audiobookshelf):** the built-in `fetch` (undici). No extra HTTP dependency.
 - **Contract to code:** a dedicated `@ratatoskr/contract` package generates, from
-  `contract/openapi.yaml` in one build step, both the request/response types
-  (`openapi-typescript`) and the runtime JSON schemas (with local `$ref`s rewritten for
-  the validator). Both are generated, never hand-edited (section 11), and shipped as a
-  normal module — so nothing is parsed from the repo layout at runtime and the built
-  package is self-contained for the container deployment. The Fastify routes are written
-  by hand against those types.
+  `contract/openapi.yaml` in one build step, the request/response types
+  (`openapi-typescript`), the runtime JSON schemas (with local `$ref`s rewritten for the
+  validator), and the full OpenAPI document as a runtime object (`openapiDocument`). All are
+  generated, never hand-edited (section 11), and shipped as a normal module — so nothing is
+  parsed from the repo layout at runtime and the built package is self-contained for the
+  container deployment.
+- **Routing:** routes are driven from the contract by `fastify-openapi-glue`, not hand-wired.
+  It registers every path, its request/response schemas, and its per-operation security
+  straight from `openapiDocument`, and maps each `operationId` to a method on a single
+  `ApiService` object (dependency injection via the constructor). This makes drift between the
+  routes and the contract structurally impossible — a route's response codes and schemas *are*
+  the contract's (an earlier hand-maintained response map had already drifted, missing a
+  documented `400`). Handlers just return the payload or throw a domain error; auth and the
+  domain-error→HTTP mapping are centralized (below).
+- **Auth & errors (central):** a single `securityHandlers.bearerAuth` enforces the contract's
+  bearer requirement as a preHandler (it stashes the token for the operations that forward it
+  to ABS); operations declaring `security: []` are exempt. A single `mapError` turns every
+  domain error and Fastify validation error into the contract's `{ code, message }` shape via
+  the global error handler — no per-route error plumbing.
 - **Contract conformance:** Fastify's route response schemas only *serialize* (via
   fast-json-stringify) — they guarantee required fields and strip unknown ones, but do
   not validate enum values or shape. Real conformance is asserted independently: the
@@ -300,6 +318,16 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
   CI conformance gates — is documented in [`docs/testing.md`](./testing.md).
 - **Deployment:** a single multi-stage Dockerfile, built for `amd64` and `arm64`
   (multi-arch), on a slim Node base image. One process, one container.
+- **Container networking (Sonos):** Sonos discovery and UPnP eventing rely on UDP multicast
+  and on the speakers being able to reach the server (event callbacks). Docker's default
+  bridge network NATs the container onto its own subnet, which blocks both: SSDP discovery
+  finds nothing and the speaker→server event path is severed. Run the container with **host
+  networking** (`network_mode: host`, Linux) so it shares the host's LAN stack — the robust
+  default for a LAN appliance. Where that is not possible, set `SONOS_SEED_HOST` (section 7):
+  the client then loads the zone topology by a direct unicast call to that speaker instead of
+  multicast, and `/speakers` re-reads the topology live per request, so it stays correct even
+  without event callbacks. (Outbound control — set transport URI, play/pause/seek, poll — and
+  the speaker fetching audio from ABS both work under bridge networking regardless.)
 
 Note on the F-Droid build: `openapi-generator` still produces the Kotlin *client* used by
 the Android app in its own hermetic F-Droid build. That is driven entirely by
