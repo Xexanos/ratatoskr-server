@@ -12,14 +12,18 @@ const DISCOVERY_TIMEOUT_SECONDS = 5
 // Lets tests inject a fake manager; production uses a real node-sonos-ts manager.
 export type SonosManagerFactory = () => SonosManager
 
-// Controls Sonos over the LAN via node-sonos-ts (SPEC section 3). For phase 3b this is just
-// the discovery/topology slice behind /speakers and /health; playback lands in phase 4. The
-// manager is initialized once and kept (phase 4 builds transport control on the same
-// instance); listSpeakers reads the topology live each call, so it does not depend on the
-// manager's event subscription staying reachable (see listSpeakers).
+// Controls Sonos over the LAN via node-sonos-ts (SPEC section 3). Phase 3b is just the
+// discovery/topology slice behind /speakers and /health; playback lands in phase 4 on the same
+// (kept) manager. Every read hits the live zone topology (GetZoneGroupState, a unicast request)
+// rather than the manager's cached `.Devices`, which only stays current via a UPnP event
+// subscription a bridged Docker network can't deliver; a failed read drops the manager so the
+// next call re-discovers, and reachability tracks the last live read rather than the cache.
 export class SonosClient {
   private manager: SonosManager | undefined
   private initPromise: Promise<SonosManager> | undefined
+  private reachable = false
+  private closed = false
+  private refreshing = false
 
   constructor(
     private readonly seedHost: string | undefined,
@@ -27,43 +31,74 @@ export class SonosClient {
   ) {}
 
   async listSpeakers(): Promise<Speaker[]> {
-    const manager = await this.ensureManager()
-    // Read the live zone topology on each call rather than trusting the manager's cached
-    // `.Devices`, which only stays current via a UPnP event subscription — a bridged Docker
-    // network can't deliver those speaker->server callbacks, so the cache would go stale.
-    // GetZoneGroupState is a plain unicast request and works wherever outbound control does.
-    const [entry] = manager.Devices
-    if (entry === undefined) throw new SonosUpstreamError('No Sonos devices found on the network')
-    return toSpeakers(await entry.GetZoneGroupState())
+    return toSpeakers(await this.readTopology())
   }
 
-  // Non-blocking: reports what we already know and kicks off discovery in the background if it
-  // has not run yet, so a polled /health never waits on SSDP discovery. Reachability improves
-  // to true once the background discovery completes.
+  // Non-blocking: returns the last live-read outcome and refreshes it in the background, so a
+  // frequently polled /health neither waits on SSDP nor trusts a never-shrinking device cache.
   async isReachable(): Promise<boolean> {
-    if (this.manager) return this.manager.Devices.length > 0
-    void this.ensureManager().catch(() => {})
-    return false
+    void this.refreshReachability()
+    return this.reachable
   }
 
   async close(): Promise<void> {
-    this.manager?.CancelSubscription()
-    this.manager = undefined
-    this.initPromise = undefined
+    this.closed = true
+    this.reset()
   }
 
-  // Initialize the manager exactly once. Concurrent callers share the in-flight promise; a
-  // failed init is not cached, so the next call retries.
+  // Read the live zone-group topology. On any failure, drop the manager (so the next call
+  // re-discovers) and surface a SonosUpstreamError (-> 502, the only failure /speakers declares).
+  private async readTopology(): Promise<ZoneGroups> {
+    try {
+      const manager = await this.ensureManager()
+      const [entry] = manager.Devices
+      if (entry === undefined) throw new SonosUpstreamError('No Sonos devices found on the network')
+      const groups = await entry.GetZoneGroupState()
+      this.reachable = true
+      return groups
+    } catch (err) {
+      this.reset()
+      this.reachable = false
+      throw err instanceof SonosUpstreamError ? err : new SonosUpstreamError('Sonos did not respond')
+    }
+  }
+
+  private async refreshReachability(): Promise<void> {
+    if (this.refreshing || this.closed) return
+    this.refreshing = true
+    try {
+      await this.readTopology()
+    } catch {
+      // readTopology already recorded reachable=false; /health just reflects it.
+    } finally {
+      this.refreshing = false
+    }
+  }
+
+  // Initialize the manager exactly once. Concurrent callers share the in-flight promise; a failed
+  // init is not cached. If the client was closed while init was in flight, cancel the freshly
+  // built manager's subscription rather than caching a live one (avoids a leaked renew timer /
+  // event listener that keeps the process from exiting).
   private async ensureManager(): Promise<SonosManager> {
     if (this.manager) return this.manager
     if (!this.initPromise) this.initPromise = this.initialize()
+    let manager: SonosManager
     try {
-      this.manager = await this.initPromise
-      return this.manager
+      manager = await this.initPromise
     } catch (err) {
       this.initPromise = undefined
       throw err
     }
+    if (this.closed) {
+      try {
+        manager.CancelSubscription()
+      } catch {
+        // best effort
+      }
+      throw new SonosUpstreamError('Sonos client is closed')
+    }
+    this.manager = manager
+    return manager
   }
 
   private async initialize(): Promise<SonosManager> {
@@ -81,22 +116,36 @@ export class SonosClient {
     }
     return manager
   }
+
+  // Drop the manager so the next read re-discovers. Best-effort cancels the (possibly dead)
+  // subscription first so node-sonos-ts's renew interval / event listener don't leak.
+  private reset(): void {
+    try {
+      this.manager?.CancelSubscription()
+    } catch {
+      // best effort — the manager may already be unreachable
+    }
+    this.manager = undefined
+    this.initPromise = undefined
+  }
 }
 
-// The parsed zone-group topology as returned by SonosDevice.GetZoneGroupState (derived from
-// the method so we don't deep-import the library's internal ZoneGroup type).
+// The parsed zone-group topology as returned by SonosDevice.GetZoneGroupState (derived from the
+// method so we don't deep-import the library's internal ZoneGroup type).
 type ZoneGroups = Awaited<ReturnType<SonosDevice['GetZoneGroupState']>>
 
 // Project the zone-group topology onto the contract's Speaker shape: one Speaker per group.
-// A standalone speaker is a group of one (isGroup false); a multi-member group reports the
-// members' room names. The id is the coordinator's UUID (the stable target for playback).
+// Invisible members (e.g. a Boost/Bridge or other hidden device) are excluded so a lone speaker
+// is not reported as a group. id/name come from the coordinator; a multi-member group lists the
+// visible members' room names.
 function toSpeakers(groups: ZoneGroups): Speaker[] {
   return groups
     .map((group) => {
-      const isGroup = group.members.length > 1
+      const visible = group.members.filter((member) => !member.Invisible)
+      const isGroup = visible.length > 1
       const speaker: Speaker = { id: group.coordinator.uuid, name: group.coordinator.name, isGroup }
       if (isGroup) {
-        speaker.members = group.members.map((member) => member.name).sort((a, b) => a.localeCompare(b))
+        speaker.members = visible.map((member) => member.name).sort((a, b) => a.localeCompare(b))
       }
       return speaker
     })

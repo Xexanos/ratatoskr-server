@@ -84,7 +84,7 @@ class EnvReader {
   tls(): TlsConfig | undefined {
     const certPath = this.env.TLS_CERT_PATH
     const keyPath = this.env.TLS_KEY_PATH
-    const allowPlainHttp = this.env.ALLOW_PLAIN_HTTP === 'true'
+    const allowPlainHttp = this.boolean('ALLOW_PLAIN_HTTP')
 
     if (certPath && keyPath) {
       // Validate readability now, so a typo or an unmounted secret volume fails with the

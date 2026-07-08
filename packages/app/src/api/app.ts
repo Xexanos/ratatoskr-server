@@ -6,7 +6,7 @@ import openapiGlue from 'fastify-openapi-glue'
 import { AbsClient } from '../abs/client.js'
 import type { Config } from '../config/index.js'
 import { SonosClient } from '../sonos/client.js'
-import { mapError } from './errorHandler.js'
+import { mapError, NotImplementedError } from './errorHandler.js'
 import { securityHandlers } from './security.js'
 import { ApiService } from './service.js'
 
@@ -59,6 +59,12 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     return reply.code(mapped.statusCode).send({ code: mapped.code, message: mapped.message })
   })
 
+  // Unknown paths go to Fastify's not-found handler, not setErrorHandler — shape that response
+  // as the contract's Error ({ code, message }) too, instead of Fastify's default body.
+  app.setNotFoundHandler((_request, reply) => {
+    return reply.code(404).send({ code: 'not_found', message: 'Not found' })
+  })
+
   const abs = options.absClient ?? new AbsClient(config.absUrl)
   const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost)
   // Release the Sonos manager's zone-event subscription when the app closes. Optional-chained
@@ -77,9 +83,21 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // Routes, request/response schemas and per-operation auth are all derived from the contract
   // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
   // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
+  const service = new ApiService({ abs, sonos, config })
+  const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   await app.register(openapiGlue, {
     specification: openapiDocument,
-    serviceHandlers: new ApiService({ abs, sonos, config }),
+    // glue registers every contract path. Resolve each operationId to its ApiService method;
+    // operations without one (the phase-4 /sessions/* ops) get a stub that throws
+    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500.
+    operationResolver: (operationId) => {
+      const method = methods[operationId]
+      return typeof method === 'function'
+        ? method.bind(service)
+        : () => {
+            throw new NotImplementedError()
+          }
+    },
     securityHandlers,
     prefix: '/v1',
   })

@@ -4,6 +4,16 @@ import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from '../abs/errors.
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
 
+// Thrown for contract operations that openapi-glue registers but we have not implemented yet
+// (the /sessions/* playback ops arrive in phase 4). Mapped to 404 not_found, which the contract
+// declares for all of those operations — instead of glue's default 500.
+export class NotImplementedError extends Error {
+  constructor() {
+    super('This operation is not implemented yet')
+    this.name = 'NotImplementedError'
+  }
+}
+
 export interface MappedError {
   statusCode: number
   code: string
@@ -46,6 +56,9 @@ export function mapError(error: unknown): MappedError {
   }
   if (error instanceof SonosUpstreamError) {
     return { statusCode: 502, code: 'upstream_error', message: 'Sonos is unavailable' }
+  }
+  if (error instanceof NotImplementedError) {
+    return { statusCode: 404, code: 'not_found', message: 'This operation is not implemented yet' }
   }
   // Fastify's own errors: schema validation and other client-side (4xx) failures.
   const fastifyError = error as FastifyError

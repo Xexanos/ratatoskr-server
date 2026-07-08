@@ -4,13 +4,20 @@ import { SonosClient } from '../src/sonos/client.js'
 import { SonosUpstreamError } from '../src/sonos/errors.js'
 
 // Minimal stand-ins for the parsed zone-group topology (only the fields toSpeakers reads).
-const member = (uuid: string, name: string) => ({ uuid, name })
+const member = (uuid: string, name: string, invisible = false) => ({ uuid, name, Invisible: invisible })
 const group = (
   coordinator: { uuid: string; name: string },
-  members: { uuid: string; name: string }[],
+  members: { uuid: string; name: string; Invisible: boolean }[],
 ) => ({ groupId: `g_${coordinator.uuid}`, name: coordinator.name, coordinator, members })
 
 type FakeGroup = ReturnType<typeof group>
+
+interface FakeOpts {
+  noDevices?: boolean
+  initResult?: boolean
+  initThrows?: boolean
+  readThrows?: boolean
+}
 
 interface FakeManager {
   Devices: { GetZoneGroupState: ReturnType<typeof vi.fn> }[]
@@ -20,17 +27,19 @@ interface FakeManager {
 }
 
 // A fake manager whose single entry device returns the given zone-group topology from
-// GetZoneGroupState (what listSpeakers reads live). `noDevices` simulates discovery finding
-// nothing; `initResult`/`initThrows` drive the init outcome.
-function fakeManager(
-  groups: FakeGroup[] = [],
-  opts: { noDevices?: boolean; initResult?: boolean; initThrows?: boolean } = {},
-): FakeManager {
+// GetZoneGroupState (what the live read consumes). `readThrows` makes the live read reject;
+// `noDevices`/`initResult`/`initThrows` drive init.
+function fakeManager(groups: FakeGroup[] = [], opts: FakeOpts = {}): FakeManager {
   const init = vi.fn(async () => {
     if (opts.initThrows) throw new Error('discovery boom')
     return opts.initResult ?? true
   })
-  const entry = { GetZoneGroupState: vi.fn(async () => groups) }
+  const entry = {
+    GetZoneGroupState: vi.fn(async () => {
+      if (opts.readThrows) throw new Error('read boom')
+      return groups
+    }),
+  }
   return {
     Devices: opts.noDevices ? [] : [entry],
     InitializeWithDiscovery: init,
@@ -48,7 +57,7 @@ const SOLO = [group(member('r1', 'A'), [member('r1', 'A')])]
 describe('SonosClient', () => {
   describe('listSpeakers projection', () => {
     it('projects a standalone speaker and a multi-member group, sorted by name', async () => {
-      const living = member('rincon_living', 'Living Room') // coordinator of the group
+      const living = member('rincon_living', 'Living Room')
       const groups = [
         group(living, [living, member('rincon_kitchen', 'Kitchen')]),
         group(member('rincon_office', 'Office'), [member('rincon_office', 'Office')]),
@@ -67,6 +76,22 @@ describe('SonosClient', () => {
       expect(speaker).toEqual({ id: 'rincon_solo', name: 'Solo', isGroup: false })
       expect(speaker).not.toHaveProperty('members')
     })
+
+    it('excludes Invisible members (e.g. a Boost/Bridge)', async () => {
+      const living = member('rincon_living', 'Living Room')
+      const groups = [
+        group(living, [living, member('rincon_kitchen', 'Kitchen'), member('rincon_boost', 'BOOST', true)]),
+      ]
+      const [speaker] = await clientWith(fakeManager(groups)).listSpeakers()
+      expect(speaker).toEqual({ id: 'rincon_living', name: 'Living Room', isGroup: true, members: ['Kitchen', 'Living Room'] })
+    })
+
+    it('treats a lone visible speaker beside a hidden device as standalone', async () => {
+      const living = member('rincon_living', 'Living Room')
+      const groups = [group(living, [living, member('rincon_boost', 'BOOST', true)])]
+      const [speaker] = await clientWith(fakeManager(groups)).listSpeakers()
+      expect(speaker).toEqual({ id: 'rincon_living', name: 'Living Room', isGroup: false })
+    })
   })
 
   describe('initialization', () => {
@@ -83,18 +108,21 @@ describe('SonosClient', () => {
     })
 
     it('maps a discovery exception to SonosUpstreamError', async () => {
-      const client = clientWith(fakeManager([], { initThrows: true }))
-      await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
+      await expect(clientWith(fakeManager([], { initThrows: true })).listSpeakers()).rejects.toBeInstanceOf(
+        SonosUpstreamError,
+      )
     })
 
     it('maps an unsuccessful init to SonosUpstreamError', async () => {
-      const client = clientWith(fakeManager(SOLO, { initResult: false }))
-      await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
+      await expect(clientWith(fakeManager(SOLO, { initResult: false })).listSpeakers()).rejects.toBeInstanceOf(
+        SonosUpstreamError,
+      )
     })
 
     it('treats zero discovered devices as SonosUpstreamError', async () => {
-      const client = clientWith(fakeManager([], { noDevices: true }))
-      await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
+      await expect(clientWith(fakeManager([], { noDevices: true })).listSpeakers()).rejects.toBeInstanceOf(
+        SonosUpstreamError,
+      )
     })
 
     it('initializes only once across calls and reuses the manager', async () => {
@@ -120,19 +148,33 @@ describe('SonosClient', () => {
     })
   })
 
+  describe('live topology read', () => {
+    it('maps a failing GetZoneGroupState to SonosUpstreamError and re-discovers next time', async () => {
+      const bad = fakeManager(SOLO, { readThrows: true })
+      const good = fakeManager(SOLO)
+      let call = 0
+      const factory = vi.fn(() => (call++ === 0 ? bad : good) as unknown as SonosManager)
+      const client = new SonosClient(undefined, factory)
+
+      await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
+      // the failed read dropped the manager, so the next call re-initializes
+      expect(await client.listSpeakers()).toHaveLength(1)
+      expect(factory).toHaveBeenCalledTimes(2)
+    })
+  })
+
   describe('isReachable', () => {
-    it('returns false before discovery has run, then true once the manager is up', async () => {
+    it('is false before any read, then true after a successful read', async () => {
       const client = clientWith(fakeManager(SOLO))
-      expect(await client.isReachable()).toBe(false) // not yet initialized
-      await client.listSpeakers() // initializes and caches
+      expect(await client.isReachable()).toBe(false) // no live read has completed yet
+      await client.listSpeakers()
       expect(await client.isReachable()).toBe(true)
     })
 
-    it('returns false when the cached manager has lost all devices', async () => {
-      const manager = fakeManager(SOLO)
+    it('flips back to false after a failed live read', async () => {
+      const manager = fakeManager(SOLO, { readThrows: true })
       const client = clientWith(manager)
-      await client.listSpeakers()
-      manager.Devices.length = 0 // all speakers dropped off the network
+      await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
       expect(await client.isReachable()).toBe(false)
     })
   })
@@ -148,6 +190,27 @@ describe('SonosClient', () => {
 
     it('is a no-op when the manager was never initialized', async () => {
       await expect(clientWith(fakeManager()).close()).resolves.toBeUndefined()
+    })
+
+    it('cancels (not caches) a manager whose init finishes after close', async () => {
+      let resolveInit: (ok: boolean) => void = () => {}
+      const initPromise = new Promise<boolean>((resolve) => {
+        resolveInit = resolve
+      })
+      const manager: FakeManager = {
+        Devices: [{ GetZoneGroupState: vi.fn(async () => SOLO) }],
+        InitializeWithDiscovery: vi.fn(() => initPromise),
+        InitializeFromDevice: vi.fn(() => initPromise),
+        CancelSubscription: vi.fn(),
+      }
+      const client = clientWith(manager)
+
+      const pending = client.listSpeakers() // suspends awaiting init
+      await client.close() // closed before init resolves
+      resolveInit(true) // init now completes
+
+      await expect(pending).rejects.toBeInstanceOf(SonosUpstreamError)
+      expect(manager.CancelSubscription).toHaveBeenCalled()
     })
   })
 })
