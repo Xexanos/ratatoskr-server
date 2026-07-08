@@ -1,6 +1,7 @@
 import type { components } from '@ratatoskr/contract'
 import type { FastifyInstance } from 'fastify'
 import type { Config } from '../../config/index.js'
+import type { SonosClient } from '../../sonos/client.js'
 
 type Health = components['schemas']['Health']
 type DependencyStatus = components['schemas']['DependencyStatus']
@@ -23,24 +24,28 @@ async function checkAbs(absUrl: string): Promise<DependencyStatus> {
   }
 }
 
-// TODO(phase 4): once the Sonos client exists, check real reachability and factor it
-// into the overall `status` below instead of always reporting unimplemented.
-function checkSonos(): DependencyStatus {
-  return { reachable: false, detail: 'Sonos control is not implemented yet (planned for phase 4)' }
+// isReachable() is non-blocking: it reports the last known state and warms up discovery in the
+// background, so this unauthenticated, frequently polled endpoint never waits on SSDP.
+async function checkSonos(sonos: SonosClient): Promise<DependencyStatus> {
+  return (await sonos.isReachable()) ? { reachable: true } : { reachable: false, detail: 'Sonos did not respond' }
 }
 
-export async function registerHealthRoute(app: FastifyInstance, config: Config): Promise<void> {
+export async function registerHealthRoute(
+  app: FastifyInstance,
+  config: Config,
+  sonos: SonosClient,
+): Promise<void> {
   app.get<{ Reply: Health }>(
     '/health',
     { schema: { response: { 200: { $ref: 'Health#' } } } },
     async () => {
-      const [abs, sonos] = await Promise.all([checkAbs(config.absUrl), Promise.resolve(checkSonos())])
+      const [abs, sonos_] = await Promise.all([checkAbs(config.absUrl), checkSonos(sonos)])
       // SPEC section 14: /health reports only coarse reachability — deliberately no
       // version and no URLs, since it is unauthenticated on an untrusted LAN.
       return {
-        status: abs.reachable ? 'ok' : 'degraded',
+        status: abs.reachable && sonos_.reachable ? 'ok' : 'degraded',
         abs,
-        sonos,
+        sonos: sonos_,
       }
     },
   )

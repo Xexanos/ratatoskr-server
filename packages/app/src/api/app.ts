@@ -4,9 +4,11 @@ import { contractSchemas } from '@ratatoskr/contract'
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import { AbsClient } from '../abs/client.js'
 import type { Config } from '../config/index.js'
+import { SonosClient } from '../sonos/client.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerHealthRoute } from './routes/health.js'
 import { registerLibraryRoutes } from './routes/library.js'
+import { registerSpeakerRoutes } from './routes/speakers.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -33,6 +35,8 @@ export interface BuildAppOptions {
   validateResponses?: boolean
   // Inject a fake Audiobookshelf client in tests. Defaults to a real one built from config.
   absClient?: AbsClient
+  // Inject a fake Sonos client in tests. Defaults to a real one built from config.
+  sonosClient?: SonosClient
 }
 
 export async function buildApp(config: Config, options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -72,6 +76,12 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   })
 
   const abs = options.absClient ?? new AbsClient(config.absUrl)
+  const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost)
+  // Release the Sonos manager's zone-event subscription when the app closes. Optional-chained
+  // so injected Partial<SonosClient> fakes without close() are fine.
+  app.addHook('onClose', async () => {
+    await sonos.close?.()
+  })
 
   if (options.validateResponses) {
     // Queued before the routes so its onRoute hook sees them. The dynamic import only
@@ -83,9 +93,10 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
 
   app.register(
     async (v1) => {
-      await registerHealthRoute(v1, config)
+      await registerHealthRoute(v1, config, sonos)
       await registerAuthRoutes(v1, abs)
       await registerLibraryRoutes(v1, abs)
+      await registerSpeakerRoutes(v1, sonos)
     },
     { prefix: '/v1' },
   )
