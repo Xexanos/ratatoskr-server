@@ -12,6 +12,7 @@
     "generate": "pnpm --filter @ratatoskr/contract run generate",
     "build": "pnpm run generate && pnpm -r run build",
     "test": "pnpm run build && pnpm -r run test",
+    "test:integration": "pnpm run build && pnpm -r --if-present run test:integration",
     "lint": "eslint .",
     "dev": "pnpm run build && pnpm --filter @ratatoskr/app run dev"
   },
