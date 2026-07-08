@@ -17,13 +17,14 @@ function testConfig(): Config {
     seekRetries: 2,
     progressWriteThresholdSeconds: 5,
     tls: undefined,
+    validateResponses: true,
   }
 }
 
 const TOKENS = { accessToken: 'a', refreshToken: 'r', user: { id: '42', username: 'lars' } }
 
 function appWith(abs: Partial<AbsClient>) {
-  return buildApp(testConfig(), { validateResponses: true, absClient: abs as AbsClient })
+  return buildApp(testConfig(), { absClient: abs as AbsClient })
 }
 
 describe('POST /v1/auth/login', () => {

@@ -1,14 +1,14 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
-import { contractSchemas } from '@ratatoskr/contract'
-import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
+import { openapiDocument } from '@ratatoskr/contract'
+import Fastify, { type FastifyInstance } from 'fastify'
+import openapiGlue from 'fastify-openapi-glue'
 import { AbsClient } from '../abs/client.js'
 import type { Config } from '../config/index.js'
 import { SonosClient } from '../sonos/client.js'
-import { registerAuthRoutes } from './routes/auth.js'
-import { registerHealthRoute } from './routes/health.js'
-import { registerLibraryRoutes } from './routes/library.js'
-import { registerSpeakerRoutes } from './routes/speakers.js'
+import { mapError } from './errorHandler.js'
+import { securityHandlers } from './security.js'
+import { ApiService } from './service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -28,11 +28,6 @@ function loggerOptions() {
 }
 
 export interface BuildAppOptions {
-  // Dev/test only: assert responses actually conform to the contract schema (enum values,
-  // shape). Fastify's route response schema only *serializes* (fast-json-stringify), it
-  // does not *validate* — so enum violations and shape drift pass silently in production.
-  // Enabling this in tests turns SPEC section 12's conformance promise into a real guard.
-  validateResponses?: boolean
   // Inject a fake Audiobookshelf client in tests. Defaults to a real one built from config.
   absClient?: AbsClient
   // Inject a fake Sonos client in tests. Defaults to a real one built from config.
@@ -56,23 +51,12 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
       }) as unknown as FastifyInstance)
     : Fastify({ logger: loggerOptions() })
 
-  // The contract's component schemas (generated and $ref-rewritten at build time by
-  // @ratatoskr/contract) are registered by $id so routes can reference them as "Name#".
-  for (const [name, schema] of Object.entries(contractSchemas)) {
-    app.addSchema({ $id: name, ...schema })
-  }
-
   // Map every error into the contract's Error shape ({ code, message }) so responses stay
-  // contract-conformant — Fastify's default validation/error body has a different shape.
-  app.setErrorHandler((error: FastifyError, request, reply) => {
-    if (error.validation) {
-      return reply.code(400).send({ code: 'bad_request', message: error.message })
-    }
-    if (error.statusCode && error.statusCode < 500) {
-      return reply.code(error.statusCode).send({ code: 'bad_request', message: error.message })
-    }
-    request.log.error(error)
-    return reply.code(500).send({ code: 'internal_error', message: 'Internal server error' })
+  // contract-conformant. All domain-error → HTTP mapping lives in mapError (errorHandler.ts).
+  app.setErrorHandler((error, request, reply) => {
+    const mapped = mapError(error)
+    if (mapped.statusCode >= 500) request.log.error(error)
+    return reply.code(mapped.statusCode).send({ code: mapped.code, message: mapped.message })
   })
 
   const abs = options.absClient ?? new AbsClient(config.absUrl)
@@ -83,23 +67,22 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     await sonos.close?.()
   })
 
-  if (options.validateResponses) {
-    // Queued before the routes so its onRoute hook sees them. The dynamic import only
-    // loads the module (it doesn't touch Fastify), so registration order is preserved and
-    // the dev-only dependencies stay out of the production code path.
+  if (config.validateResponses) {
+    // Registered before the routes so its onRoute hook sees the ones openapi-glue adds. The
+    // dynamic import keeps the dev-only ajv/plugin out of the production code path.
     const { enableResponseValidation } = await import('./responseValidation.js')
     enableResponseValidation(app)
   }
 
-  app.register(
-    async (v1) => {
-      await registerHealthRoute(v1, config, sonos)
-      await registerAuthRoutes(v1, abs)
-      await registerLibraryRoutes(v1, abs)
-      await registerSpeakerRoutes(v1, sonos)
-    },
-    { prefix: '/v1' },
-  )
+  // Routes, request/response schemas and per-operation auth are all derived from the contract
+  // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
+  // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
+  await app.register(openapiGlue, {
+    specification: openapiDocument,
+    serviceHandlers: new ApiService({ abs, sonos, config }),
+    securityHandlers,
+    prefix: '/v1',
+  })
 
   return app
 }

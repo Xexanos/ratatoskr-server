@@ -47,3 +47,11 @@ const body = `export const contractSchemas: Record<string, object> = ${JSON.stri
 mkdirSync(dirname(outPath), { recursive: true })
 writeFileSync(outPath, banner + body)
 console.log(`wrote ${Object.keys(rewritten).length} schemas to ${outPath}`)
+
+// The full, unmodified OpenAPI document as a runtime object, for fastify-openapi-glue's
+// `specification` option. Unlike contractSchemas, refs are left standard
+// ("#/components/schemas/X") — glue dereferences them itself — so this must NOT be rewritten.
+const docOutPath = join(here, '..', 'src', 'generated', 'openapi-document.ts')
+const docBody = `export const openapiDocument: Record<string, unknown> = ${JSON.stringify(doc, null, 2)}\n`
+writeFileSync(docOutPath, banner + docBody)
+console.log(`wrote the OpenAPI document to ${docOutPath}`)

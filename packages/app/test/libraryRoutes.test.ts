@@ -18,6 +18,7 @@ function testConfig(): Config {
     seekRetries: 2,
     progressWriteThresholdSeconds: 5,
     tls: undefined,
+    validateResponses: true,
   }
 }
 
@@ -26,7 +27,7 @@ const SUMMARY = { id: 'li_1', title: 'Alpha', durationSeconds: 3600, coverUrl: n
 const ITEM = { ...SUMMARY, progress: { positionSeconds: 0, isFinished: false } }
 
 function appWith(abs: Partial<AbsClient>) {
-  return buildApp(testConfig(), { validateResponses: true, absClient: abs as AbsClient })
+  return buildApp(testConfig(), { absClient: abs as AbsClient })
 }
 
 describe('GET /v1/library/items', () => {

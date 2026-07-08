@@ -18,6 +18,9 @@ export interface Config {
   seekRetries: number
   progressWriteThresholdSeconds: number
   tls: TlsConfig | undefined
+  // Validate every response against the contract schema at runtime (dev/staging aid). Off in
+  // production; the tests turn it on. See src/api/responseValidation.ts.
+  validateResponses: boolean
 }
 
 type Env = Record<string, string | undefined>
@@ -63,6 +66,10 @@ class EnvReader {
       return fallback
     }
     return value
+  }
+
+  boolean(name: string): boolean {
+    return this.env[name] === 'true'
   }
 
   port(): number {
@@ -129,6 +136,7 @@ export function loadConfig(env: Env = process.env): Config {
     seekRetries: reader.positiveNumber('SEEK_RETRIES', 2),
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     tls: reader.tls(),
+    validateResponses: reader.boolean('VALIDATE_RESPONSES'),
   })
 }
 

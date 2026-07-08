@@ -280,12 +280,25 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
   validation that pairs naturally with the OpenAPI contract.
 - **HTTP client (Audiobookshelf):** the built-in `fetch` (undici). No extra HTTP dependency.
 - **Contract to code:** a dedicated `@ratatoskr/contract` package generates, from
-  `contract/openapi.yaml` in one build step, both the request/response types
-  (`openapi-typescript`) and the runtime JSON schemas (with local `$ref`s rewritten for
-  the validator). Both are generated, never hand-edited (section 11), and shipped as a
-  normal module — so nothing is parsed from the repo layout at runtime and the built
-  package is self-contained for the container deployment. The Fastify routes are written
-  by hand against those types.
+  `contract/openapi.yaml` in one build step, the request/response types
+  (`openapi-typescript`), the runtime JSON schemas (with local `$ref`s rewritten for the
+  validator), and the full OpenAPI document as a runtime object (`openapiDocument`). All are
+  generated, never hand-edited (section 11), and shipped as a normal module — so nothing is
+  parsed from the repo layout at runtime and the built package is self-contained for the
+  container deployment.
+- **Routing:** routes are driven from the contract by `fastify-openapi-glue`, not hand-wired.
+  It registers every path, its request/response schemas, and its per-operation security
+  straight from `openapiDocument`, and maps each `operationId` to a method on a single
+  `ApiService` object (dependency injection via the constructor). This makes drift between the
+  routes and the contract structurally impossible — a route's response codes and schemas *are*
+  the contract's (an earlier hand-maintained response map had already drifted, missing a
+  documented `400`). Handlers just return the payload or throw a domain error; auth and the
+  domain-error→HTTP mapping are centralized (below).
+- **Auth & errors (central):** a single `securityHandlers.bearerAuth` enforces the contract's
+  bearer requirement as a preHandler (it stashes the token for the operations that forward it
+  to ABS); operations declaring `security: []` are exempt. A single `mapError` turns every
+  domain error and Fastify validation error into the contract's `{ code, message }` shape via
+  the global error handler — no per-route error plumbing.
 - **Contract conformance:** Fastify's route response schemas only *serialize* (via
   fast-json-stringify) — they guarantee required fields and strip unknown ones, but do
   not validate enum values or shape. Real conformance is asserted independently: the

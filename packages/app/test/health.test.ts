@@ -16,12 +16,13 @@ function testConfig(): Config {
     seekRetries: 2,
     progressWriteThresholdSeconds: 5,
     tls: undefined,
+    validateResponses: true,
   }
 }
 
 // A Sonos fake is always injected so /health never triggers real SSDP discovery.
 function appWith(sonos: Partial<SonosClient>) {
-  return buildApp(testConfig(), { validateResponses: true, sonosClient: sonos as SonosClient })
+  return buildApp(testConfig(), { sonosClient: sonos as SonosClient })
 }
 
 describe('GET /v1/health', () => {
