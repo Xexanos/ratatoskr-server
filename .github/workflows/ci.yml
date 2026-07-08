@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: git fetch --depth=1 origin ${{ github.base_ref }}
-      - uses: oasdiff/oasdiff-action/breaking@v0
+      - uses: oasdiff/oasdiff-action/breaking@v0.1.4
         with:
           base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
           revision: "HEAD:contract/openapi.yaml"
