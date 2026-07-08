@@ -33,19 +33,19 @@ async function checkSonos(sonos: SonosClient): Promise<DependencyStatus> {
 export async function registerHealthRoute(
   app: FastifyInstance,
   config: Config,
-  sonos: SonosClient,
+  sonosClient: SonosClient,
 ): Promise<void> {
   app.get<{ Reply: Health }>(
     '/health',
     { schema: { response: { 200: { $ref: 'Health#' } } } },
     async () => {
-      const [abs, sonos_] = await Promise.all([checkAbs(config.absUrl), checkSonos(sonos)])
+      const [abs, sonos] = await Promise.all([checkAbs(config.absUrl), checkSonos(sonosClient)])
       // SPEC section 14: /health reports only coarse reachability — deliberately no
       // version and no URLs, since it is unauthenticated on an untrusted LAN.
       return {
-        status: abs.reachable && sonos_.reachable ? 'ok' : 'degraded',
+        status: abs.reachable && sonos.reachable ? 'ok' : 'degraded',
         abs,
-        sonos: sonos_,
+        sonos,
       }
     },
   )
