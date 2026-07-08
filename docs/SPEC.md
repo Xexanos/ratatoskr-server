@@ -313,6 +313,16 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
   CI conformance gates — is documented in [`docs/testing.md`](./testing.md).
 - **Deployment:** a single multi-stage Dockerfile, built for `amd64` and `arm64`
   (multi-arch), on a slim Node base image. One process, one container.
+- **Container networking (Sonos):** Sonos discovery and UPnP eventing rely on UDP multicast
+  and on the speakers being able to reach the server (event callbacks). Docker's default
+  bridge network NATs the container onto its own subnet, which blocks both: SSDP discovery
+  finds nothing and the speaker→server event path is severed. Run the container with **host
+  networking** (`network_mode: host`, Linux) so it shares the host's LAN stack — the robust
+  default for a LAN appliance. Where that is not possible, set `SONOS_SEED_HOST` (section 7):
+  the client then loads the zone topology by a direct unicast call to that speaker instead of
+  multicast, and `/speakers` re-reads the topology live per request, so it stays correct even
+  without event callbacks. (Outbound control — set transport URI, play/pause/seek, poll — and
+  the speaker fetching audio from ABS both work under bridge networking regardless.)
 
 Note on the F-Droid build: `openapi-generator` still produces the Kotlin *client* used by
 the Android app in its own hermetic F-Droid build. That is driven entirely by

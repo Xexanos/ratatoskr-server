@@ -14,8 +14,9 @@ export type SonosManagerFactory = () => SonosManager
 
 // Controls Sonos over the LAN via node-sonos-ts (SPEC section 3). For phase 3b this is just
 // the discovery/topology slice behind /speakers and /health; playback lands in phase 4. The
-// manager is initialized once and kept — it holds a zone-event subscription that keeps the
-// topology current, and phase 4 builds transport control on the same instance.
+// manager is initialized once and kept (phase 4 builds transport control on the same
+// instance); listSpeakers reads the topology live each call, so it does not depend on the
+// manager's event subscription staying reachable (see listSpeakers).
 export class SonosClient {
   private manager: SonosManager | undefined
   private initPromise: Promise<SonosManager> | undefined
@@ -27,7 +28,13 @@ export class SonosClient {
 
   async listSpeakers(): Promise<Speaker[]> {
     const manager = await this.ensureManager()
-    return toSpeakers(manager.Devices)
+    // Read the live zone topology on each call rather than trusting the manager's cached
+    // `.Devices`, which only stays current via a UPnP event subscription — a bridged Docker
+    // network can't deliver those speaker->server callbacks, so the cache would go stale.
+    // GetZoneGroupState is a plain unicast request and works wherever outbound control does.
+    const [entry] = manager.Devices
+    if (entry === undefined) throw new SonosUpstreamError('No Sonos devices found on the network')
+    return toSpeakers(await entry.GetZoneGroupState())
   }
 
   // Non-blocking: reports what we already know and kicks off discovery in the background if it
@@ -76,29 +83,22 @@ export class SonosClient {
   }
 }
 
-// Project discovered devices onto the contract's Speaker shape: one Speaker per zone group.
-// Devices are grouped by their coordinator (a standalone speaker is its own coordinator, so
-// isGroup is false); a multi-member group reports the members' room names.
-function toSpeakers(devices: readonly SonosDevice[]): Speaker[] {
-  const groups = new Map<string, { coordinator: SonosDevice; members: SonosDevice[] }>()
-  for (const device of devices) {
-    const coordinator = device.Coordinator ?? device
-    const group = groups.get(coordinator.Uuid)
-    if (group) {
-      group.members.push(device)
-    } else {
-      groups.set(coordinator.Uuid, { coordinator, members: [device] })
-    }
-  }
+// The parsed zone-group topology as returned by SonosDevice.GetZoneGroupState (derived from
+// the method so we don't deep-import the library's internal ZoneGroup type).
+type ZoneGroups = Awaited<ReturnType<SonosDevice['GetZoneGroupState']>>
 
-  const speakers: Speaker[] = []
-  for (const { coordinator, members } of groups.values()) {
-    const isGroup = members.length > 1
-    const speaker: Speaker = { id: coordinator.Uuid, name: coordinator.Name, isGroup }
-    if (isGroup) {
-      speaker.members = members.map((member) => member.Name).sort((a, b) => a.localeCompare(b))
-    }
-    speakers.push(speaker)
-  }
-  return speakers.sort((a, b) => a.name.localeCompare(b.name))
+// Project the zone-group topology onto the contract's Speaker shape: one Speaker per group.
+// A standalone speaker is a group of one (isGroup false); a multi-member group reports the
+// members' room names. The id is the coordinator's UUID (the stable target for playback).
+function toSpeakers(groups: ZoneGroups): Speaker[] {
+  return groups
+    .map((group) => {
+      const isGroup = group.members.length > 1
+      const speaker: Speaker = { id: group.coordinator.uuid, name: group.coordinator.name, isGroup }
+      if (isGroup) {
+        speaker.members = group.members.map((member) => member.name).sort((a, b) => a.localeCompare(b))
+      }
+      return speaker
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
