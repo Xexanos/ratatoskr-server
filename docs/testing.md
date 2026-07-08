@@ -21,7 +21,9 @@ live in the central repo, not here.
 Runner: **Vitest** (TypeScript/ESM-native).
 
 ### Unit — pure logic, no I/O
-- position mapping (absolute seconds ↔ track index + offset)
+- position mapping (absolute seconds ↔ track index + offset) — the mandatory cases in
+  [`SPEC.md §9`](./SPEC.md) (single- and multi-file books, seeking across a track boundary,
+  the start and the very end, rounding at track edges) are the non-negotiable minimum here
 - DIDL-Lite metadata building for the transport URI
 - config / environment validation
 - log redaction (no secret ever reaches a log line)
@@ -79,7 +81,9 @@ pnpm lint
 The strategy above is the target. Current state:
 
 - **Present:** unit tests and an integration smoke test against a fake ABS; 90%
-  coverage thresholds; the `oasdiff` breaking-change gate in CI.
+  coverage thresholds; the `oasdiff` breaking-change gate in CI. (The ABS client is
+  currently exercised as a unit test via a stubbed `fetch`; the component-level fake-ABS
+  *HTTP* server described above lands with the fuller component suite.)
 - **Lands with Sonos support (SPEC phase 4):** the Sonos-control component tests,
   the full integration test (incl. the sync loop), and the fake Sonos itself.
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the

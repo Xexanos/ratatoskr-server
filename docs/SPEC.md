@@ -230,6 +230,13 @@ from. Implementation lands with the playback design (phase 4).
 
 ## 9. Testing
 
+The full, authoritative test strategy for the server — the test levels (unit / component /
+integration), the cross-cutting security and contract-conformance checks, the fakes
+(including the repo-owned fake Sonos), and how CI runs them — lives in
+[`docs/testing.md`](./testing.md). It is designed from this architecture and links back to
+the central cross-component test concept. The mandatory cases below are the non-negotiable
+minimum and are subsumed by that document; keep the two consistent.
+
 - Unit tests for the position module are mandatory and should cover: single-file books,
   multi-file books, seeking across a track boundary, the start and the very end of a book,
   and rounding at track edges.
@@ -288,7 +295,9 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
   as section 6 requires.
 - **Testing:** Vitest as the runner, Fastify's `inject` for handler-level integration
   tests, and lightweight fakes for the ABS and Sonos clients. The dependency set is kept
-  deliberately small (section 11).
+  deliberately small (section 11). The full strategy — test levels, the repo-owned fake
+  Sonos (in-process here, published as a GHCR image the central E2E repo consumes), and the
+  CI conformance gates — is documented in [`docs/testing.md`](./testing.md).
 - **Deployment:** a single multi-stage Dockerfile, built for `amd64` and `arm64`
   (multi-arch), on a slim Node base image. One process, one container.
 
