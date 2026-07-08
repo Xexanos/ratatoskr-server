@@ -39,5 +39,5 @@ jobs:
         with:
           base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
           revision: "HEAD:contract/openapi.yaml"
-          fail-on: ERR
+          fail-on: WARN
           github-token: ${{ github.token }}
