@@ -1,4 +1,4 @@
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, readFileSync } from 'node:fs'
 import { ConfigError } from './errors.js'
 
 export interface TlsConfig {
@@ -21,6 +21,11 @@ export interface Config {
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
   // production; the tests turn it on. See src/api/responseValidation.ts.
   validateResponses: boolean
+  // TLS trust for the upstream Audiobookshelf connection (SPEC section 14). `absCaCert` is a PEM
+  // to pin (self-signed / private CA); `absTlsInsecure` disables verification entirely. At most
+  // one is set. Both undefined/false → normal verification against the system CAs.
+  absCaCert: string | undefined
+  absTlsInsecure: boolean
 }
 
 type Env = Record<string, string | undefined>
@@ -70,6 +75,48 @@ class EnvReader {
 
   boolean(name: string): boolean {
     return this.env[name] === 'true'
+  }
+
+  // ABS_URL must be HTTPS so per-user credentials and tokens (and the phase-4 streamer login)
+  // do not cross the network in cleartext (SPEC section 14). Plain HTTP requires an explicit
+  // opt-out, mirroring ALLOW_PLAIN_HTTP for Ratatoskr's own listener.
+  absUrl(): string {
+    const value = this.url('ABS_URL')
+    if (value.startsWith('http://') && this.env.ABS_ALLOW_PLAIN_HTTP !== 'true') {
+      this.problems.push(
+        'ABS_URL uses plain HTTP; Audiobookshelf credentials and tokens would cross the network ' +
+          'in cleartext (SPEC section 14). Use https://, or set ABS_ALLOW_PLAIN_HTTP=true to accept ' +
+          'the risk (e.g. a trusted LAN or TLS terminated by a reverse proxy).',
+      )
+    }
+    return value
+  }
+
+  // TLS trust for the ABS connection. Self-signed / private-CA setups pin a PEM via
+  // ABS_CA_CERT (inline) or ABS_CA_CERT_PATH (file); ABS_TLS_INSECURE=true disables verification
+  // as an explicit last resort. These are mutually exclusive.
+  absTls(): { caCert: string | undefined; insecure: boolean } {
+    const inlineCert = this.env.ABS_CA_CERT
+    const certPath = this.env.ABS_CA_CERT_PATH
+    const insecure = this.boolean('ABS_TLS_INSECURE')
+
+    let caCert: string | undefined
+    if (inlineCert && certPath) {
+      this.problems.push('ABS_CA_CERT and ABS_CA_CERT_PATH are mutually exclusive; set only one')
+    } else if (inlineCert) {
+      caCert = inlineCert
+    } else if (certPath) {
+      try {
+        caCert = readFileSync(certPath, 'utf8')
+      } catch {
+        this.problems.push(`ABS_CA_CERT_PATH is not readable (${certPath})`)
+      }
+    }
+
+    if ((caCert !== undefined || inlineCert || certPath) && insecure) {
+      this.problems.push('ABS_TLS_INSECURE cannot be combined with ABS_CA_CERT/ABS_CA_CERT_PATH')
+    }
+    return { caCert, insecure }
   }
 
   port(): number {
@@ -124,8 +171,9 @@ class EnvReader {
 
 export function loadConfig(env: Env = process.env): Config {
   const reader = new EnvReader(env)
+  const absTls = reader.absTls()
   return reader.finalize({
-    absUrl: reader.url('ABS_URL'),
+    absUrl: reader.absUrl(),
     absStreamerUser: reader.requireString('ABS_STREAMER_USER'),
     absStreamerPassword: reader.requireString('ABS_STREAMER_PASSWORD'),
     sonosSeedHost: env.SONOS_SEED_HOST,
@@ -137,6 +185,8 @@ export function loadConfig(env: Env = process.env): Config {
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),
+    absCaCert: absTls.caCert,
+    absTlsInsecure: absTls.insecure,
   })
 }
 

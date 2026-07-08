@@ -137,8 +137,18 @@ All configuration is via environment variables, validated at startup with a clea
 if something required is missing:
 
 - `ABS_URL` (required) — LAN URL of Audiobookshelf, reachable by both Ratatoskr and the
-  speakers. Listening users authenticate per-user (see section 8); the only server-side
-  ABS credential is the streamer identity below.
+  speakers. Should be `https://` so per-user credentials and tokens do not cross the network
+  in cleartext (see section 14). A plain-HTTP URL requires the explicit opt-out
+  `ABS_ALLOW_PLAIN_HTTP=true`. Listening users authenticate per-user (see section 8); the only
+  server-side ABS credential is the streamer identity below. At startup Ratatoskr probes
+  `ABS_URL` and refuses to start if the host responds but is not Audiobookshelf (a network
+  error is tolerated — the server starts and reports it via `/health`).
+- `ABS_ALLOW_PLAIN_HTTP` (optional) — accept a plain-HTTP `ABS_URL`. Only for a trusted LAN or
+  when TLS is terminated by a reverse proxy.
+- `ABS_CA_CERT_PATH` / `ABS_CA_CERT` (optional, mutually exclusive) — trust a self-signed or
+  private-CA Audiobookshelf certificate, as a PEM file path or inline PEM. Verification stays on.
+- `ABS_TLS_INSECURE` (optional) — last resort: disable ABS certificate verification entirely
+  (vulnerable to MITM). Mutually exclusive with the `ABS_CA_CERT*` options.
 - `ABS_STREAMER_USER`, `ABS_STREAMER_PASSWORD` (required) — credentials of the dedicated
   low-privilege ABS account whose short-lived tokens are embedded in the media URLs handed
   to the speakers (see section 14). Ratatoskr logs this identity in at startup and
@@ -437,9 +447,16 @@ Known accepted risks / open points:
 
 - The streamer token in the media URL remains readable on the LAN (UPnP, HTTP sniffing,
   ABS access logs). Accepted: it is short-lived and minimally privileged.
-- ABS itself is typically served over plain HTTP on the LAN; securing it is outside this
-  project's scope, but a reverse proxy with TLS in front of both services is a sensible
-  deployment.
+- The Ratatoskr → Audiobookshelf transport carries per-user credentials (login) and tokens
+  (library, and the phase-4 streamer identity), so it is hardened rather than left to chance:
+  `ABS_URL` should be `https://` and defaults to requiring it — plain HTTP needs the explicit
+  `ABS_ALLOW_PLAIN_HTTP=true` opt-out (trusted LAN / reverse-proxy TLS). Self-signed or
+  private-CA ABS certificates are trusted by pinning the PEM (`ABS_CA_CERT_PATH` / `ABS_CA_CERT`,
+  verification stays on); `ABS_TLS_INSECURE=true` is an explicit, discouraged last resort that
+  disables verification. Ratatoskr also probes `ABS_URL` at startup and refuses to boot if the
+  host answers but is not Audiobookshelf, so a misconfiguration fails loud instead of leaking
+  credentials to the wrong host. (This is a fingerprint check, not authentication — the real
+  guarantee against an impostor/MITM is HTTPS with a verified certificate.)
 - Refresh-token rotation: ABS rotates refresh tokens on every use, so the app and the
   server must not both consume the same refresh token independently. Addressed at the
   contract level (1.1.0): the client hands its refresh token over in `startSession`, the

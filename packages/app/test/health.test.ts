@@ -25,13 +25,18 @@ function appWith(sonos: Partial<SonosClient>) {
   return buildApp(testConfig(), { sonosClient: sonos as SonosClient })
 }
 
+// The ABS reachability check probes GET /ping and expects {"success":true}.
+function pingResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
 describe('GET /v1/health', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
   })
 
   it('reports ok when both Audiobookshelf and Sonos are reachable', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(true) })
     const res = await app.inject({ method: 'GET', url: '/v1/health' })
 
@@ -47,7 +52,7 @@ describe('GET /v1/health', () => {
   })
 
   it('reports degraded when Sonos is unreachable even though Audiobookshelf is up', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(false) })
     const res = await app.inject({ method: 'GET', url: '/v1/health' })
 
@@ -70,6 +75,18 @@ describe('GET /v1/health', () => {
     expect(body.status).toBe('degraded')
     expect(body.abs.reachable).toBe(false)
     expect(body.sonos.reachable).toBe(true)
+
+    await app.close()
+  })
+
+  it('reports abs.reachable=false when the host responds but is not Audiobookshelf', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ nope: true })))
+    const app = await appWith({ isReachable: vi.fn().mockResolvedValue(true) })
+    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+
+    const body = res.json()
+    expect(body.status).toBe('degraded')
+    expect(body.abs).toEqual({ reachable: false, detail: 'host responded but is not Audiobookshelf' })
 
     await app.close()
   })
