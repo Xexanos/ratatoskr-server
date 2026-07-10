@@ -7,6 +7,14 @@ updates:
     cooldown:
       default-days: 7
     groups:
+      # vitest and @vitest/* release in lockstep (@vitest/coverage-v8 pins the exact vitest
+      # version), so they must always be bumped together — including majors, which is why this
+      # group has no update-types restriction. Listed before minor-and-patch so it wins for
+      # these packages.
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       minor-and-patch:
         update-types:
           - "minor"
