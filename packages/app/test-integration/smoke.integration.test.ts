@@ -122,9 +122,9 @@ describe('server process smoke test', () => {
   })
 
   it('boots, serves /v1/health over real HTTP, and conforms to the contract', async () => {
-    // A real HTTP upstream standing in for Audiobookshelf — any response counts as
-    // reachable, which is exactly the health check's own contract.
-    fakeAbs = createServer((_req, res) => res.end('ok'))
+    // A real HTTP upstream standing in for Audiobookshelf: answer /ping like ABS so the startup
+    // probe and the health check treat it as a genuine, reachable ABS.
+    fakeAbs = createServer((_req, res) => res.end(JSON.stringify({ success: true })))
     await new Promise<void>((resolve) => fakeAbs?.listen(0, '127.0.0.1', resolve))
     const absPort = (fakeAbs.address() as AddressInfo).port
 
@@ -135,6 +135,7 @@ describe('server process smoke test', () => {
         ABS_STREAMER_USER: 'streamer',
         ABS_STREAMER_PASSWORD: 'secret',
         ALLOW_PLAIN_HTTP: 'true',
+        ABS_ALLOW_PLAIN_HTTP: 'true',
         PORT: String(port),
       }),
     )
@@ -165,6 +166,29 @@ describe('server process smoke test', () => {
     const valid = validate(body)
     expect(validate.errors).toBeNull()
     expect(valid).toBe(true)
+  })
+
+  it('refuses to start when ABS_URL responds but is not Audiobookshelf', async () => {
+    // A host that is up but does not answer /ping like ABS is almost always a misconfiguration —
+    // the startup probe should fail loud rather than let it leak into runtime.
+    fakeAbs = createServer((_req, res) => res.end('not audiobookshelf'))
+    await new Promise<void>((resolve) => fakeAbs?.listen(0, '127.0.0.1', resolve))
+    const absPort = (fakeAbs.address() as AddressInfo).port
+
+    running = spawnServer(
+      cleanEnv({
+        ABS_URL: `http://127.0.0.1:${absPort}`,
+        ABS_STREAMER_USER: 'streamer',
+        ABS_STREAMER_PASSWORD: 'secret',
+        ALLOW_PLAIN_HTTP: 'true',
+        ABS_ALLOW_PLAIN_HTTP: 'true',
+        PORT: String(await freePort()),
+      }),
+    )
+    const [code] = (await once(running.child, 'exit')) as [number | null]
+
+    expect(code).toBe(1)
+    expect(running.stderr()).toContain('does not look like an Audiobookshelf server')
   })
 
   it('refuses to start with missing config, reporting all problems at once', async () => {

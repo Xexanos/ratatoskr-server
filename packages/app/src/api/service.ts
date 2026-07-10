@@ -1,7 +1,6 @@
 import type { components } from '@ratatoskr/contract'
 import type { FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
-import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
 
 type Health = components['schemas']['Health']
@@ -13,20 +12,17 @@ type Speaker = components['schemas']['Speaker']
 type LoginRequest = components['schemas']['LoginRequest']
 type RefreshRequest = components['schemas']['RefreshRequest']
 
-const ABS_PING_TIMEOUT_MS = 2000
-
-async function checkAbs(absUrl: string): Promise<DependencyStatus> {
-  try {
-    // Any HTTP response (even a 404) proves the host is reachable; we don't depend on ABS
-    // exposing a specific health endpoint. Only a network-level failure means "unreachable".
-    // The URL is not included in the detail (SPEC section 14: no upstream URLs in responses).
-    const res = await fetch(absUrl, { method: 'GET', signal: AbortSignal.timeout(ABS_PING_TIMEOUT_MS) })
-    // Discard the body so undici can return the connection to the pool instead of holding the
-    // socket until GC — a /health poller would otherwise leak sockets.
-    await res.body?.cancel()
-    return { reachable: true }
-  } catch {
-    return { reachable: false, detail: 'Audiobookshelf did not respond' }
+async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
+  // probe() verifies the host is genuinely Audiobookshelf (GET /ping) rather than accepting any
+  // response, and reuses the client's TLS trust settings. The URL is not included in the detail
+  // (SPEC section 14: no upstream URLs in responses).
+  switch (await abs.probe()) {
+    case 'ok':
+      return { reachable: true }
+    case 'not-audiobookshelf':
+      return { reachable: false, detail: 'host responded but is not Audiobookshelf' }
+    default:
+      return { reachable: false, detail: 'Audiobookshelf did not respond' }
   }
 }
 
@@ -39,7 +35,6 @@ async function checkSonos(sonos: SonosClient): Promise<DependencyStatus> {
 export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
-  config: Config
 }
 
 // Implements the contract operations, one method per operationId. fastify-openapi-glue resolves
@@ -49,16 +44,14 @@ export interface ApiServiceDeps {
 export class ApiService {
   private readonly abs: AbsClient
   private readonly sonos: SonosClient
-  private readonly config: Config
 
   constructor(deps: ApiServiceDeps) {
     this.abs = deps.abs
     this.sonos = deps.sonos
-    this.config = deps.config
   }
 
   async getHealth(): Promise<Health> {
-    const [abs, sonos] = await Promise.all([checkAbs(this.config.absUrl), checkSonos(this.sonos)])
+    const [abs, sonos] = await Promise.all([checkAbs(this.abs), checkSonos(this.sonos)])
     // SPEC section 14: /health reports only coarse reachability — deliberately no version and
     // no URLs, since it is unauthenticated on an untrusted LAN.
     return { status: abs.reachable && sonos.reachable ? 'ok' : 'degraded', abs, sonos }

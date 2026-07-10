@@ -9,6 +9,11 @@ type LibraryItemPage = components['schemas']['LibraryItemPage']
 type Progress = components['schemas']['Progress']
 
 const REQUEST_TIMEOUT_MS = 10_000
+const PROBE_TIMEOUT_MS = 2000
+
+// Outcome of probing ABS_URL: a genuine ABS server, a host that answered but isn't ABS
+// (misconfiguration), or no answer at all (down / wrong host / TLS failure).
+export type AbsProbeResult = 'ok' | 'not-audiobookshelf' | 'unreachable'
 
 export interface ListItemsQuery {
   searchQuery: string | undefined
@@ -17,9 +22,46 @@ export interface ListItemsQuery {
 }
 
 // Client for the Audiobookshelf REST API. Auth (SPEC section 8) proxies login/refresh;
-// the library methods produce the thin projection (SPEC section 2) for /library/*.
+// the library methods produce the thin projection (SPEC section 2) for /library/*. The
+// optional dispatcher carries the TLS trust settings for ABS (self-signed pin / insecure);
+// undefined means fetch's default (verify against the system CAs).
 export class AbsClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly dispatcher?: RequestInit['dispatcher'],
+  ) {}
+
+  // Only include the dispatcher option when one is configured — with exactOptionalPropertyTypes
+  // an explicit `dispatcher: undefined` is a type error, and undefined would mean "use the
+  // default" anyway.
+  private dispatcherOption(): Pick<RequestInit, 'dispatcher'> | Record<string, never> {
+    return this.dispatcher ? { dispatcher: this.dispatcher } : {}
+  }
+
+  // Confirms ABS_URL points at a genuine Audiobookshelf server via its unauthenticated
+  // `GET /ping` ({ success: true }). Used by the startup check and /health. This is a
+  // misconfiguration fingerprint, not authentication — an impostor can fake the response.
+  async probe(): Promise<AbsProbeResult> {
+    let res: Response
+    try {
+      res = await fetch(`${this.baseUrl}/ping`, {
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        ...this.dispatcherOption(),
+      })
+    } catch {
+      return 'unreachable'
+    }
+    if (!res.ok) {
+      await res.body?.cancel()
+      return 'not-audiobookshelf'
+    }
+    try {
+      const data = (await res.json()) as { success?: unknown }
+      return data?.success === true ? 'ok' : 'not-audiobookshelf'
+    } catch {
+      return 'not-audiobookshelf'
+    }
+  }
 
   // --- Authentication (proxied; SPEC section 8) ---
 
@@ -141,6 +183,7 @@ export class AbsClient {
         headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ...this.dispatcherOption(),
       })
     } catch {
       throw new AbsUpstreamError('Audiobookshelf did not respond')
@@ -154,6 +197,7 @@ export class AbsClient {
       res = await fetch(`${this.baseUrl}${path}`, {
         headers: { authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ...this.dispatcherOption(),
       })
     } catch {
       throw new AbsUpstreamError('Audiobookshelf did not respond')

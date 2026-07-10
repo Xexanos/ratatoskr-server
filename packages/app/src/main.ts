@@ -1,3 +1,5 @@
+import { AbsClient } from './abs/client.js'
+import { buildAbsDispatcher } from './abs/transport.js'
 import { buildApp } from './api/app.js'
 import { ConfigError, loadConfig } from './config/index.js'
 
@@ -13,7 +15,24 @@ async function main(): Promise<void> {
     throw err
   }
 
-  const app = await buildApp(config)
+  // Soft startup check: confirm ABS_URL points at a genuine Audiobookshelf server. A host that
+  // answers but is not ABS is almost always a misconfiguration — fail loud now rather than
+  // leaking it into runtime errors. A network error (ABS merely down/not up yet) must NOT block
+  // startup: the server degrades gracefully and /health reports it. The probed client is reused.
+  const abs = new AbsClient(config.absUrl, buildAbsDispatcher(config))
+  const absStatus = await abs.probe()
+  if (absStatus === 'not-audiobookshelf') {
+    console.error(
+      'ABS_URL responded but does not look like an Audiobookshelf server (GET /ping did not ' +
+        'return {"success":true}). Check ABS_URL. Refusing to start.',
+    )
+    process.exit(1)
+  }
+  if (absStatus === 'unreachable') {
+    console.warn('Audiobookshelf did not respond at startup; continuing (see /v1/health).')
+  }
+
+  const app = await buildApp(config, { absClient: abs })
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw
   // unhandled rejection instead of the same clean, formatted exit the config path gives.

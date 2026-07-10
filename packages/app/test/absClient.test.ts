@@ -78,4 +78,51 @@ describe('AbsClient', () => {
       await expect(new AbsClient(BASE).refresh('stale')).rejects.toBeInstanceOf(AbsAuthError)
     })
   })
+
+  describe('probe', () => {
+    it('reports ok for a genuine Audiobookshelf /ping', async () => {
+      const mock = stubFetch(() => jsonResponse({ success: true }))
+      expect(await new AbsClient(BASE).probe()).toBe('ok')
+      expect(mock.mock.calls[0][0]).toBe(`${BASE}/ping`)
+    })
+
+    it('reports not-audiobookshelf when the host answers but not like ABS', async () => {
+      stubFetch(() => jsonResponse({ hello: 'world' }))
+      expect(await new AbsClient(BASE).probe()).toBe('not-audiobookshelf')
+    })
+
+    it('reports not-audiobookshelf on a non-2xx response', async () => {
+      stubFetch(() => new Response(null, { status: 404 }))
+      expect(await new AbsClient(BASE).probe()).toBe('not-audiobookshelf')
+    })
+
+    it('reports not-audiobookshelf on a non-JSON body', async () => {
+      stubFetch(() => new Response('<html>ok</html>', { status: 200 }))
+      expect(await new AbsClient(BASE).probe()).toBe('not-audiobookshelf')
+    })
+
+    it('reports unreachable on a network error', async () => {
+      stubFetch(() => {
+        throw new Error('ECONNREFUSED')
+      })
+      expect(await new AbsClient(BASE).probe()).toBe('unreachable')
+    })
+  })
+
+  describe('TLS dispatcher', () => {
+    it('threads the configured dispatcher into ABS requests', async () => {
+      const dispatcher = { sentinel: true } as unknown as RequestInit['dispatcher']
+      const mock = stubFetch(() => jsonResponse(OK_BODY))
+      await new AbsClient(BASE, dispatcher).login('lars', 'secret')
+      const [, init] = mock.mock.calls[0] as [string, RequestInit]
+      expect(init.dispatcher).toBe(dispatcher)
+    })
+
+    it('omits the dispatcher option when none is configured', async () => {
+      const mock = stubFetch(() => jsonResponse(OK_BODY))
+      await new AbsClient(BASE).login('lars', 'secret')
+      const [, init] = mock.mock.calls[0] as [string, RequestInit]
+      expect(init.dispatcher).toBeUndefined()
+    })
+  })
 })

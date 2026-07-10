@@ -10,6 +10,7 @@ const REQUIRED = {
   ABS_STREAMER_USER: 'streamer',
   ABS_STREAMER_PASSWORD: 'secret',
   ALLOW_PLAIN_HTTP: 'true',
+  ABS_ALLOW_PLAIN_HTTP: 'true',
 }
 
 // Asserts a ConfigError is thrown whose aggregated message contains each expected
@@ -38,6 +39,8 @@ describe('loadConfig', () => {
     expect(config.tls).toBeUndefined()
     expect(config.sonosSeedHost).toBeUndefined()
     expect(config.validateResponses).toBe(false)
+    expect(config.absCaCert).toBeUndefined()
+    expect(config.absTlsInsecure).toBe(false)
   })
 
   it('enables response validation only when VALIDATE_RESPONSES=true', () => {
@@ -71,10 +74,54 @@ describe('loadConfig', () => {
       ABS_URL: REQUIRED.ABS_URL,
       ABS_STREAMER_USER: REQUIRED.ABS_STREAMER_USER,
       ABS_STREAMER_PASSWORD: REQUIRED.ABS_STREAMER_PASSWORD,
+      ABS_ALLOW_PLAIN_HTTP: 'true',
       TLS_CERT_PATH: CERT,
       TLS_KEY_PATH: KEY,
     })
     expect(config.tls).toEqual({ certPath: CERT, keyPath: KEY })
+  })
+
+  it('accepts an https ABS_URL without requiring ABS_ALLOW_PLAIN_HTTP', () => {
+    const config = loadConfig({
+      ABS_URL: 'https://abs.invalid',
+      ABS_STREAMER_USER: REQUIRED.ABS_STREAMER_USER,
+      ABS_STREAMER_PASSWORD: REQUIRED.ABS_STREAMER_PASSWORD,
+      ALLOW_PLAIN_HTTP: 'true',
+    })
+    expect(config.absUrl).toBe('https://abs.invalid')
+  })
+
+  it('rejects a plain-HTTP ABS_URL without the explicit opt-out', () => {
+    expectConfigError(
+      { ...REQUIRED, ABS_ALLOW_PLAIN_HTTP: undefined },
+      'ABS_URL uses plain HTTP',
+    )
+  })
+
+  it('trusts a self-signed ABS cert via inline PEM or file path', () => {
+    const inline = loadConfig({ ...REQUIRED, ABS_CA_CERT: 'PEM-INLINE' })
+    expect(inline.absCaCert).toBe('PEM-INLINE')
+    const fromPath = loadConfig({ ...REQUIRED, ABS_CA_CERT_PATH: CERT })
+    expect(fromPath.absCaCert).toContain('BEGIN CERTIFICATE')
+  })
+
+  it('rejects an unreadable ABS_CA_CERT_PATH', () => {
+    expectConfigError({ ...REQUIRED, ABS_CA_CERT_PATH: '/nonexistent/abs-ca.pem' }, 'ABS_CA_CERT_PATH is not readable')
+  })
+
+  it('rejects ABS_CA_CERT and ABS_CA_CERT_PATH set together', () => {
+    expectConfigError({ ...REQUIRED, ABS_CA_CERT: 'PEM', ABS_CA_CERT_PATH: CERT }, 'mutually exclusive')
+  })
+
+  it('rejects a CA together with ABS_TLS_INSECURE', () => {
+    expectConfigError(
+      { ...REQUIRED, ABS_CA_CERT: 'PEM', ABS_TLS_INSECURE: 'true' },
+      'ABS_TLS_INSECURE cannot be combined',
+    )
+  })
+
+  it('accepts ABS_TLS_INSECURE on its own', () => {
+    expect(loadConfig({ ...REQUIRED, ABS_TLS_INSECURE: 'true' }).absTlsInsecure).toBe(true)
   })
 
   it('rejects an unreadable TLS cert path instead of crashing later with ENOENT', () => {

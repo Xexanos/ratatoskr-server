@@ -4,6 +4,7 @@ import { openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
 import { AbsClient } from '../abs/client.js'
+import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
@@ -65,7 +66,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     return reply.code(404).send({ code: 'not_found', message: 'Not found' })
   })
 
-  const abs = options.absClient ?? new AbsClient(config.absUrl)
+  const abs = options.absClient ?? new AbsClient(config.absUrl, buildAbsDispatcher(config))
   const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost)
   // Release the Sonos manager's zone-event subscription when the app closes. Optional-chained
   // so injected Partial<SonosClient> fakes without close() are fine.
@@ -83,7 +84,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // Routes, request/response schemas and per-operation auth are all derived from the contract
   // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
   // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
-  const service = new ApiService({ abs, sonos, config })
+  const service = new ApiService({ abs, sonos })
   const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   await app.register(openapiGlue, {
     specification: openapiDocument,
