@@ -1,8 +1,8 @@
 // Pure seek planning (SPEC sections 4 and 13). Turns a target absolute book position into the
-// ordered steps a Sonos coordinator must perform — "seek to the track, then to the in-track
-// offset" — as a plain data structure. The settle delay, tolerance window and retry count are
-// PARAMETERS carried on the plan, not read from the environment here: the sonos/ wrapper owns
-// executing the steps and applying the tuning. No I/O (see purity.test.ts).
+// target track + in-track offset a Sonos coordinator must reach ("seek to the track, then to the
+// offset"). The settle delay, tolerance window and retry count are PARAMETERS carried on the plan,
+// not read from the environment here: the sonos/ wrapper owns executing the seek and applying the
+// tuning. No I/O (see purity.test.ts).
 
 import { absoluteToTrack } from './positionMapper.js'
 
@@ -15,11 +15,6 @@ export interface SeekTuning {
   retries: number
 }
 
-/** One ordered step of a seek. `track` selects a queue entry (1-based); `time` seeks within it. */
-export type SeekStep =
-  | { readonly kind: 'track'; readonly trackNumber: number }
-  | { readonly kind: 'time'; readonly offsetSeconds: number }
-
 export interface SeekPlan {
   /** Zero-based index of the target track in the queue. */
   readonly trackIndex: number
@@ -27,9 +22,7 @@ export interface SeekPlan {
   readonly offsetSeconds: number
   /** True when the target lay outside [0, total] and was clamped (see absoluteToTrack). */
   readonly clamped: boolean
-  /** Ordered steps: select the track (1-based `trackNumber`), then seek to the offset. */
-  readonly steps: readonly SeekStep[]
-  /** Settle/tolerance/retry knobs the sonos/ wrapper applies while executing the steps. */
+  /** Settle/tolerance/retry knobs the sonos/ wrapper applies while executing the seek. */
   readonly tuning: SeekTuning
 }
 
@@ -58,14 +51,5 @@ export function planSeek(
 ): SeekPlan {
   assertValidTuning(tuning)
   const { trackIndex, offsetSeconds, clamped } = absoluteToTrack(trackDurations, targetAbsoluteSeconds)
-  return {
-    trackIndex,
-    offsetSeconds,
-    clamped,
-    steps: [
-      { kind: 'track', trackNumber: trackIndex + 1 },
-      { kind: 'time', offsetSeconds },
-    ],
-    tuning,
-  }
+  return { trackIndex, offsetSeconds, clamped, tuning }
 }

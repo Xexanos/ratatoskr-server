@@ -3,4 +3,4 @@
 // import boundary).
 export { absoluteToTrack, totalDuration, trackToAbsolute, type TrackPosition } from './positionMapper.js'
 export { planPlayback, type TrackInput, type PlannedTrack, type PlaybackPlan } from './playbackPlan.js'
-export { planSeek, type SeekTuning, type SeekStep, type SeekPlan } from './seekPlan.js'
+export { planSeek, type SeekTuning, type SeekPlan } from './seekPlan.js'

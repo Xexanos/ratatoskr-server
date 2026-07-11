@@ -1,7 +1,6 @@
 import type { components } from '@ratatoskr/contract'
 import type { PlaybackPlan, SeekPlan } from '@ratatoskr/position'
-import { SonosManager } from '@svrooij/sonos'
-import type { SonosDevice } from '@svrooij/sonos'
+import { SonosDevice, SonosManager } from '@svrooij/sonos'
 import { buildTrackMetadata, escapeXml } from './didl.js'
 import { hmsToSeconds, secondsToHms } from './time.js'
 import { SonosUpstreamError } from './errors.js'
@@ -96,26 +95,45 @@ export class SonosClient {
     }
   }
 
-  // Seek to (track, in-track offset) per a SeekPlan: select the track, then REL_TIME to the
-  // offset, re-issuing until the settled RelTime is within tolerance or the retries run out. The
-  // settle delay / tolerance / retry count come from the plan (config knobs), not hard-coded.
+  // Seek to (track, in-track offset) per a SeekPlan. Each attempt re-issues BOTH the track select
+  // and the in-track seek, then verifies the coordinator is on the right track AND within the
+  // tolerance window. The whole attempt is retried on a thrown Seek too — right after Play or a
+  // track change the transport is often TRANSITIONING and rejects a Seek, so a transient failure
+  // must not abort resume. Settle/tolerance/retries come from the plan (config knobs).
+  //
+  // On exhaustion: if we at least reached the right track, accept it (an offset a few seconds off
+  // self-corrects on the next poll). If we never reached the track, throw — a resume in the wrong
+  // track is hours off and the sync loop would record it as truth, which is worse than a visible
+  // failure (SPEC §4/§5).
   async seek(speakerId: string, plan: SeekPlan): Promise<void> {
     const coordinator = await this.coordinatorFor(speakerId)
     const av = coordinator.AVTransportService
     const { settleMs, toleranceSeconds, retries } = plan.tuning
-    try {
-      await av.Seek({ InstanceID: 0, Unit: 'TRACK_NR', Target: String(plan.trackIndex + 1) })
-      for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const targetTrack = plan.trackIndex + 1
+    let lastError: unknown
+    let reachedTrack = false
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        await av.Seek({ InstanceID: 0, Unit: 'TRACK_NR', Target: String(targetTrack) })
         await av.Seek({ InstanceID: 0, Unit: 'REL_TIME', Target: secondsToHms(plan.offsetSeconds) })
         if (settleMs > 0) await delay(settleMs)
         const info = await av.GetPositionInfo({ InstanceID: 0 })
-        if (Math.abs(hmsToSeconds(info.RelTime) - plan.offsetSeconds) <= toleranceSeconds) return
+        reachedTrack = (typeof info.Track === 'number' ? info.Track : -1) === targetTrack
+        if (reachedTrack && Math.abs(hmsToSeconds(info.RelTime) - plan.offsetSeconds) <= toleranceSeconds) {
+          return
+        }
+        lastError = new SonosUpstreamError(`seek landed off target (track ${info.Track}, rel ${info.RelTime})`)
+      } catch (err) {
+        lastError = err
+        reachedTrack = false
       }
-      // Best effort: out of tolerance after the last retry — the sync loop reads the real
-      // position anyway, so a slightly-off resume self-corrects rather than failing the start.
-    } catch (err) {
-      throw asUpstream(err)
+      // Let a TRANSITIONING transport settle before the next attempt.
+      if (settleMs > 0 && attempt < retries) await delay(settleMs)
     }
+
+    if (reachedTrack) return
+    throw asUpstream(lastError)
   }
 
   async getPosition(speakerId: string): Promise<SonosPosition> {
@@ -141,15 +159,21 @@ export class SonosClient {
     }
   }
 
-  // Resolve the group coordinator device for a speaker id (which is the coordinator UUID from
-  // listSpeakers). Transport commands must target the coordinator (SPEC §4 / library docs).
+  // Resolve the group coordinator for a speaker id (the coordinator UUID, or any member's UUID, as
+  // reported by listSpeakers). Transport commands must target the coordinator (SPEC §4). Resolved
+  // from the SAME live GetZoneGroupState read that listSpeakers uses — NOT manager.Devices, whose
+  // coordinator relationships only update via UPnP zone events that a bridged network can't deliver
+  // (and that SONOS_DISABLE_EVENTS turns off). Using the cache would target a stale coordinator
+  // after a regroup and rip the speaker out of its group via x-rincon-queue:<stale-uuid>.
   private async coordinatorFor(speakerId: string): Promise<SonosDevice> {
-    const manager = await this.ensureManager()
-    const device = manager.Devices.find((d) => d.Uuid === speakerId || d.Coordinator.Uuid === speakerId)
-    if (device === undefined) {
-      throw new SonosUpstreamError(`Speaker ${speakerId} is not on the network`)
+    const groups = await this.readTopology()
+    for (const group of groups) {
+      if (group.coordinator.uuid === speakerId || group.members.some((member) => member.uuid === speakerId)) {
+        const { host, port, uuid, name } = group.coordinator
+        return new SonosDevice(host, port, uuid, name)
+      }
     }
-    return device.Coordinator
+    throw new SonosUpstreamError(`Speaker ${speakerId} is not on the network`)
   }
 
   // Read the live zone-group topology. On any failure, drop the manager (so the next call

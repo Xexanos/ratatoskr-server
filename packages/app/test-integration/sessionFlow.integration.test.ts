@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { StartedTestContainer } from 'testcontainers'
 import {
@@ -11,25 +10,22 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import { ROOT_PASS, ROOT_USER, STREAMER_PASS, STREAMER_USER, startSeededAbs } from './absSeed.js'
+import {
+  ABS_CURRENT,
+  DOCKER_READY,
+  REQUIRE_LIVE,
+  ROOT_PASS,
+  ROOT_USER,
+  STREAMER_PASS,
+  STREAMER_USER,
+  startSeededAbs,
+} from './absSeed.js'
 import { FakeSonos } from '../test-support/fakeSonos.js'
 
 // End-to-end playback slice-1 flow (SPEC §4/§5): the compiled server against a REAL Audiobookshelf
 // (Testcontainers) and the REAL fake-Sonos UPnP/SOAP double, driving PUT/GET/DELETE
 // /v1/sessions/current — start resumes from the ABS position, and stop writes progress back.
 
-function dockerAvailable(): boolean {
-  try {
-    execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 60_000 })
-    return true
-  } catch (error) {
-    console.warn(`[sessionFlow] Docker probe failed; test cannot run: ${String(error)}`)
-    return false
-  }
-}
-
-const DOCKER_READY = dockerAvailable()
-const REQUIRE_LIVE = process.env.CI === 'true' || process.env.ABS_IT_REQUIRE === '1'
 const run = DOCKER_READY || REQUIRE_LIVE ? describe : describe.skip
 
 const SPEAKER_UUID = 'RINCON_FAKE000001400'
@@ -57,7 +53,7 @@ run('playback session flow (real ABS + fake Sonos)', () => {
     assertServerBuilt()
     if (!DOCKER_READY) throw new Error('Docker is required for the session-flow test (CI/ABS_IT_REQUIRE)')
 
-    const seeded = await startSeededAbs()
+    const seeded = await startSeededAbs(ABS_CURRENT.image)
     container = seeded.container
     itemId = seeded.itemId
 

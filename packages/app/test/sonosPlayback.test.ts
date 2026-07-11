@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { planPlayback, planSeek, type PlaybackPlan, type SeekTuning } from '@ratatoskr/position'
 import { SonosClient } from '../src/sonos/client.js'
 import { SonosUpstreamError } from '../src/sonos/errors.js'
@@ -37,6 +37,12 @@ describe('SonosClient playback against the fake Sonos', () => {
     delete process.env.SONOS_DISABLE_EVENTS
   })
 
+  afterEach(() => {
+    // Reset the seek fault-injection hooks between tests.
+    fake.seekFaultsRemaining = 0
+    fake.positionReport = undefined
+  })
+
   it('lists the speaker from the fake topology', async () => {
     expect(await client.listSpeakers()).toEqual([{ id: SPEAKER, name: 'Test Room', isGroup: false }])
   })
@@ -72,6 +78,30 @@ describe('SonosClient playback against the fake Sonos', () => {
 
   it('maps an unknown speaker id to a Sonos upstream error', async () => {
     await expect(client.startPlayback('RINCON_UNKNOWN', twoTrackPlan())).rejects.toBeInstanceOf(SonosUpstreamError)
+  })
+
+  // 250s into a [100, 200] book -> track 2, offset 150. settleMs > 0 exercises the settle waits.
+  const RETRY_TUNING: SeekTuning = { settleMs: 1, toleranceSeconds: 3, retries: 2 }
+
+  it('retries a seek that faults mid-transition and then succeeds', async () => {
+    fake.seekFaultsRemaining = 1 // the first attempt's TRACK_NR seek is rejected (TRANSITIONING)
+    await client.seek(SPEAKER, planSeek([100, 200], 250, RETRY_TUNING))
+    expect(fake.currentTrack).toBe(2)
+    expect(fake.relTimeSeconds).toBe(150)
+  })
+
+  it('throws after exhausting retries when the target track is never reached', async () => {
+    fake.positionReport = { track: 1, relSeconds: 0 } // always reports the wrong track
+    await expect(
+      client.seek(SPEAKER, planSeek([100, 200], 250, { settleMs: 1, toleranceSeconds: 3, retries: 1 })),
+    ).rejects.toBeInstanceOf(SonosUpstreamError)
+  })
+
+  it('accepts the right track with an offset a few seconds off after retries (self-corrects on poll)', async () => {
+    fake.positionReport = { track: 2, relSeconds: 999 } // right track, far off the target offset
+    await expect(
+      client.seek(SPEAKER, planSeek([100, 200], 250, { settleMs: 1, toleranceSeconds: 3, retries: 0 })),
+    ).resolves.toBeUndefined()
   })
 
   it('the double rejects an enqueue without DIDL metadata (documents the 714 quirk)', async () => {

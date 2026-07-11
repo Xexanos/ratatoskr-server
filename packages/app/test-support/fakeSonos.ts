@@ -70,6 +70,12 @@ export class FakeSonos {
   relTimeSeconds = 0
   readonly actions: string[] = []
 
+  // Test hooks for the seek retry logic:
+  // - the next N Seek requests fault with UPnP 714 (mimics a TRANSITIONING transport rejecting seek)
+  seekFaultsRemaining = 0
+  // - when set, GetPositionInfo reports this instead of the seeked track/offset (force off-target)
+  positionReport: { track: number; relSeconds: number } | undefined = undefined
+
   constructor(options: FakeSonosOptions = {}) {
     this.uuid = options.uuid ?? 'RINCON_FAKE000001400'
     this.roomName = options.roomName ?? 'Test Room'
@@ -174,6 +180,10 @@ export class FakeSonos {
   }
 
   private seek(body: string): string {
+    if (this.seekFaultsRemaining > 0) {
+      this.seekFaultsRemaining -= 1
+      throw new Error('transport is transitioning') // -> UPnP 714 fault (handled in handle())
+    }
     const unit = param(body, 'Unit')
     const target = param(body, 'Target') ?? ''
     if (unit === 'TRACK_NR') this.currentTrack = Number(target) || 1
@@ -182,13 +192,15 @@ export class FakeSonos {
   }
 
   private getPositionInfo(): string {
+    const track = this.positionReport ? this.positionReport.track : this.currentTrack
+    const relSeconds = this.positionReport ? this.positionReport.relSeconds : this.relTimeSeconds
     return soap(
       `<u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">` +
-        `<Track>${this.currentTrack}</Track>` +
+        `<Track>${track}</Track>` +
         // Quirk: streamed files report a zero TrackDuration — callers must not trust it (SPEC §4).
         `<TrackDuration>0:00:00</TrackDuration><TrackMetaData></TrackMetaData>` +
         `<TrackURI>${esc(this.queue[this.currentTrack - 1]?.uri ?? '')}</TrackURI>` +
-        `<RelTime>${secondsToHms(this.relTimeSeconds)}</RelTime>` +
+        `<RelTime>${secondsToHms(relSeconds)}</RelTime>` +
         `<AbsTime>NOT_IMPLEMENTED</AbsTime><RelCount>1</RelCount><AbsCount>1</AbsCount>` +
         `</u:GetPositionInfoResponse>`,
     )
