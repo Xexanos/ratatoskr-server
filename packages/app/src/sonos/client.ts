@@ -1,9 +1,19 @@
 import type { components } from '@ratatoskr/contract'
+import type { PlaybackPlan, SeekPlan } from '@ratatoskr/position'
 import { SonosManager } from '@svrooij/sonos'
 import type { SonosDevice } from '@svrooij/sonos'
+import { buildTrackMetadata, escapeXml } from './didl.js'
+import { hmsToSeconds, secondsToHms } from './time.js'
 import { SonosUpstreamError } from './errors.js'
 
 type Speaker = components['schemas']['Speaker']
+
+// Where the coordinator currently is: which queue track (0-based) and elapsed seconds within it.
+// RelTime is authoritative; Sonos's TrackDuration is not (SPEC section 4), so it is not returned.
+export interface SonosPosition {
+  trackIndex: number
+  relTimeSeconds: number
+}
 
 // SonosManager.InitializeWithDiscovery resolves as soon as one device answers SSDP; this
 // bound only caps the wait when no speaker responds at all.
@@ -44,6 +54,102 @@ export class SonosClient {
   async close(): Promise<void> {
     this.closed = true
     this.reset()
+  }
+
+  // --- Playback control (SPEC sections 4 and 5) ---
+
+  // Replace the coordinator's queue with the book's tracks (each carrying DIDL-Lite metadata so
+  // Sonos knows the mime — a bare URL fails with UPnP 714, SPEC §4), point the transport at the
+  // queue, and start playing. Does NOT seek — the caller seeks to the resume position after.
+  async startPlayback(speakerId: string, plan: PlaybackPlan): Promise<void> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    const av = coordinator.AVTransportService
+    try {
+      await av.RemoveAllTracksFromQueue({ InstanceID: 0 })
+      for (const [index, track] of plan.tracks.entries()) {
+        await av.AddURIToQueue({
+          InstanceID: 0,
+          EnqueuedURI: track.url,
+          // The library inserts string metadata into the SOAP body verbatim, so escape it here.
+          EnqueuedURIMetaData: escapeXml(buildTrackMetadata(track)),
+          DesiredFirstTrackNumberEnqueued: index + 1,
+          EnqueueAsNext: false,
+        })
+      }
+      await av.SetAVTransportURI({
+        InstanceID: 0,
+        CurrentURI: `x-rincon-queue:${coordinator.Uuid}#0`,
+        CurrentURIMetaData: '',
+      })
+      await av.Play({ InstanceID: 0, Speed: '1' })
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
+  async stop(speakerId: string): Promise<void> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    try {
+      await coordinator.AVTransportService.Stop({ InstanceID: 0 })
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
+  // Seek to (track, in-track offset) per a SeekPlan: select the track, then REL_TIME to the
+  // offset, re-issuing until the settled RelTime is within tolerance or the retries run out. The
+  // settle delay / tolerance / retry count come from the plan (config knobs), not hard-coded.
+  async seek(speakerId: string, plan: SeekPlan): Promise<void> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    const av = coordinator.AVTransportService
+    const { settleMs, toleranceSeconds, retries } = plan.tuning
+    try {
+      await av.Seek({ InstanceID: 0, Unit: 'TRACK_NR', Target: String(plan.trackIndex + 1) })
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        await av.Seek({ InstanceID: 0, Unit: 'REL_TIME', Target: secondsToHms(plan.offsetSeconds) })
+        if (settleMs > 0) await delay(settleMs)
+        const info = await av.GetPositionInfo({ InstanceID: 0 })
+        if (Math.abs(hmsToSeconds(info.RelTime) - plan.offsetSeconds) <= toleranceSeconds) return
+      }
+      // Best effort: out of tolerance after the last retry — the sync loop reads the real
+      // position anyway, so a slightly-off resume self-corrects rather than failing the start.
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
+  async getPosition(speakerId: string): Promise<SonosPosition> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    try {
+      const info = await coordinator.AVTransportService.GetPositionInfo({ InstanceID: 0 })
+      const track = typeof info.Track === 'number' ? info.Track : 1
+      return { trackIndex: Math.max(0, track - 1), relTimeSeconds: hmsToSeconds(info.RelTime) }
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
+  // The coordinator's raw transport state (PLAYING / PAUSED_PLAYBACK / STOPPED / TRANSITIONING /
+  // NO_MEDIA_PRESENT). Must be read from the coordinator — a non-coordinator always reports PLAYING.
+  async getTransportState(speakerId: string): Promise<string> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    try {
+      const info = await coordinator.AVTransportService.GetTransportInfo({ InstanceID: 0 })
+      return info.CurrentTransportState
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
+  // Resolve the group coordinator device for a speaker id (which is the coordinator UUID from
+  // listSpeakers). Transport commands must target the coordinator (SPEC §4 / library docs).
+  private async coordinatorFor(speakerId: string): Promise<SonosDevice> {
+    const manager = await this.ensureManager()
+    const device = manager.Devices.find((d) => d.Uuid === speakerId || d.Coordinator.Uuid === speakerId)
+    if (device === undefined) {
+      throw new SonosUpstreamError(`Speaker ${speakerId} is not on the network`)
+    }
+    return device.Coordinator
   }
 
   // Read the live zone-group topology. On any failure, drop the manager (so the next call
@@ -105,9 +211,12 @@ export class SonosClient {
     const manager = this.createManager()
     let ok: boolean
     try {
-      ok = this.seedHost
-        ? await manager.InitializeFromDevice(this.seedHost)
-        : await manager.InitializeWithDiscovery(DISCOVERY_TIMEOUT_SECONDS)
+      if (this.seedHost !== undefined) {
+        const { host, port } = parseSeedHost(this.seedHost)
+        ok = await manager.InitializeFromDevice(host, port)
+      } else {
+        ok = await manager.InitializeWithDiscovery(DISCOVERY_TIMEOUT_SECONDS)
+      }
     } catch {
       throw new SonosUpstreamError('Sonos discovery failed')
     }
@@ -128,6 +237,24 @@ export class SonosClient {
     this.manager = undefined
     this.initPromise = undefined
   }
+}
+
+// Real Sonos always listens on 1400, so a seed host is normally a bare IP. We also accept an
+// explicit `host:port` (defaults to 1400) — production rarely needs it, but it lets the tests and
+// the containerized fake Sonos run on an arbitrary port. IPv6 literals are not supported here.
+function parseSeedHost(seed: string): { host: string; port: number } {
+  const match = /^(.+):(\d+)$/.exec(seed)
+  if (match) return { host: match[1] as string, port: Number(match[2]) }
+  return { host: seed, port: 1400 }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Normalize any node-sonos-ts / network failure into the SonosUpstreamError the API maps to 502.
+function asUpstream(err: unknown): SonosUpstreamError {
+  return err instanceof SonosUpstreamError ? err : new SonosUpstreamError('Sonos did not respond')
 }
 
 // The parsed zone-group topology as returned by SonosDevice.GetZoneGroupState (derived from the

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@ratatoskr/contract": "workspace:*",
+    "@ratatoskr/position": "workspace:*",
     "@svrooij/sonos": "^2.5.0",
     "fastify": "^5.2.1",
     "fastify-openapi-glue": "^4.11.3",

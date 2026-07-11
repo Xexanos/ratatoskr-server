@@ -1,6 +1,7 @@
 import type { FastifyError } from 'fastify'
 import { InvalidCursorError } from '../abs/cursor.js'
-import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from '../abs/errors.js'
+import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from '../abs/errors.js'
+import { NoActiveSessionError } from '../playback/errors.js'
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
 
@@ -50,6 +51,12 @@ export function mapError(error: unknown): MappedError {
   }
   if (error instanceof InvalidCursorError) {
     return { statusCode: 400, code: 'bad_request', message: 'Invalid pagination cursor' }
+  }
+  if (error instanceof NoActiveSessionError) {
+    return { statusCode: 404, code: 'not_found', message: 'No audiobook is currently playing' }
+  }
+  if (error instanceof ItemNotPlayableError) {
+    return { statusCode: 400, code: 'bad_request', message: 'This item cannot be played' }
   }
   if (error instanceof AbsUpstreamError) {
     return { statusCode: 502, code: 'upstream_error', message: 'Audiobookshelf is unavailable' }

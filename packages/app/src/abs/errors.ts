@@ -21,3 +21,14 @@ export class AbsNotFoundError extends Error {
     this.name = 'AbsNotFoundError'
   }
 }
+
+// A library item exists but cannot be played: no audio files, or malformed track metadata
+// (missing inode/mime, or a non-positive/non-finite duration). The abs/ layer validates ABS
+// metadata here so malformed data never reaches the position module (SPEC section 4). Mapped
+// to 400 BadRequest by the API layer.
+export class ItemNotPlayableError extends Error {
+  constructor(itemId: string, reason: string) {
+    super(`Item ${itemId} cannot be played: ${reason}`)
+    this.name = 'ItemNotPlayableError'
+  }
+}

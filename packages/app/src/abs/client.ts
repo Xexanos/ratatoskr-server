@@ -1,6 +1,6 @@
 import type { components } from '@ratatoskr/contract'
 import { decodeCursor, encodeCursor } from './cursor.js'
-import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from './errors.js'
+import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from './errors.js'
 
 type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
@@ -19,6 +19,29 @@ export interface ListItemsQuery {
   searchQuery: string | undefined
   limit: number
   cursor: string | undefined
+}
+
+// One playable audio file of a book: the ABS inode used to build the stream URL, its length
+// (Sonos's own TrackDuration is unreliable — SPEC section 4), and its mime type for DIDL-Lite.
+export interface PlaybackTrack {
+  ino: string
+  durationSeconds: number
+  mimeType: string
+}
+
+// The internal (non-contract) projection needed to play a book: the ordered audio files plus
+// the total length. Built from ABS `media.audioFiles`; validated so malformed metadata surfaces
+// as ItemNotPlayableError rather than reaching the position module.
+export interface PlaybackManifest {
+  itemId: string
+  tracks: PlaybackTrack[]
+  totalDurationSeconds: number
+}
+
+export interface ProgressUpdate {
+  currentTimeSeconds: number
+  durationSeconds: number
+  isFinished: boolean
 }
 
 // Client for the Audiobookshelf REST API. Auth (SPEC section 8) proxies login/refresh;
@@ -108,6 +131,56 @@ export class AbsClient {
         typeof progressData.currentTime === 'number' && progressData.currentTime > 0 ? progressData.currentTime : 0,
       isFinished: progressData.isFinished === true,
     }
+  }
+
+  // --- Playback (SPEC sections 4 and 5) ---
+
+  // Project ABS `media.audioFiles` into the ordered, validated track list needed to play a book.
+  // Fails fast with ItemNotPlayableError on no audio files or malformed metadata (missing inode /
+  // mime, or a non-positive/non-finite duration) so the position module never sees bad data.
+  async getPlaybackManifest(token: string, itemId: string): Promise<PlaybackManifest> {
+    const data = await this.getJson(`/api/items/${encodeURIComponent(itemId)}`, token)
+    const media = (data as { media?: { audioFiles?: unknown } }).media
+    const rawFiles = Array.isArray(media?.audioFiles) ? media.audioFiles : []
+    if (rawFiles.length === 0) {
+      throw new ItemNotPlayableError(itemId, 'no audio files')
+    }
+
+    const files = rawFiles.map((raw) => raw as { ino?: unknown; index?: unknown; duration?: unknown; mimeType?: unknown })
+    // ABS numbers audio files by `index` (1-based); sort so the queue order is deterministic.
+    files.sort((a, b) => (typeof a.index === 'number' ? a.index : 0) - (typeof b.index === 'number' ? b.index : 0))
+
+    const tracks: PlaybackTrack[] = files.map((file) => {
+      if (typeof file.ino !== 'string' || file.ino === '') {
+        throw new ItemNotPlayableError(itemId, 'an audio file has no inode')
+      }
+      if (typeof file.duration !== 'number' || !Number.isFinite(file.duration) || file.duration <= 0) {
+        throw new ItemNotPlayableError(itemId, `audio file ${file.ino} has an invalid duration`)
+      }
+      if (typeof file.mimeType !== 'string' || file.mimeType === '') {
+        throw new ItemNotPlayableError(itemId, `audio file ${file.ino} has no mime type`)
+      }
+      return { ino: file.ino, durationSeconds: file.duration, mimeType: file.mimeType }
+    })
+
+    const totalDurationSeconds = tracks.reduce((sum, track) => sum + track.durationSeconds, 0)
+    return { itemId, tracks, totalDurationSeconds }
+  }
+
+  // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts;
+  // ABS derives `progress` itself, but we send it too for correctness.
+  async writeProgress(token: string, itemId: string, update: ProgressUpdate): Promise<void> {
+    const fraction = update.isFinished
+      ? 1
+      : update.durationSeconds > 0
+        ? Math.min(1, Math.max(0, update.currentTimeSeconds / update.durationSeconds))
+        : 0
+    await this.patchJson(`/api/me/progress/${encodeURIComponent(itemId)}`, token, {
+      currentTime: update.currentTimeSeconds,
+      duration: update.durationSeconds,
+      progress: fraction,
+      isFinished: update.isFinished,
+    })
   }
 
   private async listBookLibraries(token: string): Promise<{ id: string }[]> {
@@ -203,6 +276,27 @@ export class AbsClient {
       throw new AbsUpstreamError('Audiobookshelf did not respond')
     }
     return this.handle(res, allowNotFound)
+  }
+
+  // PATCH that only checks the status; the success body is ignored (ABS returns the updated
+  // progress, which the caller does not need), so — unlike getJson/handle — it is not parsed.
+  private async patchJson(path: string, token: string, body: unknown): Promise<void> {
+    let res: Response
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ...this.dispatcherOption(),
+      })
+    } catch {
+      throw new AbsUpstreamError('Audiobookshelf did not respond')
+    }
+    await res.body?.cancel()
+    if (res.status === 401) throw new AbsAuthError()
+    if (res.status === 404) throw new AbsNotFoundError()
+    if (!res.ok) throw new AbsUpstreamError(`Audiobookshelf returned status ${res.status}`)
   }
 
   private async handle(res: Response, allowNotFound: boolean): Promise<unknown> {

@@ -1,4 +1,5 @@
 import { AbsClient } from './abs/client.js'
+import { StreamerSession } from './abs/streamerSession.js'
 import { buildAbsDispatcher } from './abs/transport.js'
 import { buildApp } from './api/app.js'
 import { ConfigError, loadConfig } from './config/index.js'
@@ -32,7 +33,18 @@ async function main(): Promise<void> {
     console.warn('Audiobookshelf did not respond at startup; continuing (see /v1/health).')
   }
 
-  const app = await buildApp(config, { absClient: abs })
+  // Log the dedicated streamer identity in at startup (SPEC section 8) so its short-lived token is
+  // ready for the media URLs handed to speakers. Best-effort like the ABS probe: if ABS is not up
+  // yet (or the token has to be refreshed later), the session manager re-logs in on first playback,
+  // so a transient failure here must not block startup.
+  const streamer = new StreamerSession(abs, config.absStreamerUser, config.absStreamerPassword)
+  try {
+    await streamer.login()
+  } catch {
+    console.warn('Streamer login failed at startup; will retry on first playback (see SPEC section 14).')
+  }
+
+  const app = await buildApp(config, { absClient: abs, streamer })
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw
   // unhandled rejection instead of the same clean, formatted exit the config path gives.

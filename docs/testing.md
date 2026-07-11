@@ -93,7 +93,16 @@ The strategy above is the target. Current state:
   breaking-change gate in CI. (The ABS client is also exercised as a unit test via a stubbed
   `fetch`; the component-level fake-ABS *HTTP* server described above still lands with the
   fuller component suite.)
-- **Lands with Sonos support (SPEC phase 4):** the Sonos-control component tests,
-  the full integration test (incl. the sync loop), and the fake Sonos itself.
+- **Phase 4, playback slice 1 (start / resume / stop) — present:** the **fake Sonos**
+  UPnP/SOAP double (`packages/app/test-support/fakeSonos.ts`), a **Sonos-control component
+  test** driving the real `SonosClient` against it (`test/sonosPlayback.test.ts`, asserting
+  DIDL-Lite is required, `RelTime` trusted, `TrackDuration` ignored — SPEC §4), and a
+  **playback session-flow integration test** (`test-integration/sessionFlow.integration.test.ts`)
+  that drives `PUT/GET/DELETE /v1/sessions/current` through the compiled server against a real
+  ABS container **and** the fake Sonos — starting a book, resuming from the ABS position, and
+  writing progress back on stop. The double runs in-process here via `SONOS_SEED_HOST=host:port`
+  + `SONOS_DISABLE_EVENTS=1`.
+- **Lands with the later playback slices:** the continuous **sync loop** (poll → write-back)
+  and the pause/resume/seek controls, then the rotation handover.
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the
   central E2E repo to consume.
