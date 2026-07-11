@@ -205,11 +205,12 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
       90_000,
     )
 
-    // 6. Seed the streamer identity (forward-compat; not exercised by these endpoints).
+    // 6. Seed the streamer identity. Must be active (isActive defaults to false → cannot log in),
+    //    because the server now logs the streamer in at startup and aborts if that login fails.
     const userRes = await seedFetch('ABS create streamer user', `${absBase}/api/users`, {
       method: 'POST',
       headers: { ...authHeader, 'content-type': 'application/json' },
-      body: JSON.stringify({ username: STREAMER_USER, password: STREAMER_PASS, type: 'user' }),
+      body: JSON.stringify({ username: STREAMER_USER, password: STREAMER_PASS, type: 'user', isActive: true }),
     })
     if (!userRes.ok) throw new Error(`ABS create streamer user failed: ${userRes.status} ${await userRes.text()}`)
 

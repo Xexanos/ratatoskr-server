@@ -29,19 +29,24 @@ async function main(): Promise<void> {
     )
     process.exit(1)
   }
-  if (absStatus === 'unreachable') {
-    console.warn('Audiobookshelf did not respond at startup; continuing (see /v1/health).')
-  }
-
   // Log the dedicated streamer identity in at startup (SPEC section 8) so its short-lived token is
-  // ready for the media URLs handed to speakers. Best-effort like the ABS probe: if ABS is not up
-  // yet (or the token has to be refreshed later), the session manager re-logs in on first playback,
-  // so a transient failure here must not block startup.
+  // ready for the media URLs handed to speakers. Only attempt it when ABS is actually reachable:
+  //  - reachable + login fails  -> a real credential misconfiguration; fail loud, like a bad ABS_URL.
+  //  - unreachable at startup    -> logging in is pointless; the session manager logs the streamer in
+  //                                 lazily on first playback, once ABS is back (see /v1/health).
   const streamer = new StreamerSession(abs, config.absStreamerUser, config.absStreamerPassword)
-  try {
-    await streamer.login()
-  } catch {
-    console.warn('Streamer login failed at startup; will retry on first playback (see SPEC section 14).')
+  if (absStatus === 'ok') {
+    try {
+      await streamer.login()
+    } catch {
+      console.error(
+        'Streamer login failed against a reachable Audiobookshelf. Check ABS_STREAMER_USER / ' +
+          'ABS_STREAMER_PASSWORD (the dedicated streamer account, SPEC section 14). Refusing to start.',
+      )
+      process.exit(1)
+    }
+  } else {
+    console.warn('Audiobookshelf unreachable at startup; deferring streamer login to first playback (see /v1/health).')
   }
 
   const app = await buildApp(config, { absClient: abs, streamer })
