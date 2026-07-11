@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 
+# This is a pnpm workspace — foreign package-manager lockfiles must never be committed
+# (pnpm-lock.yaml is the single lockfile). Guards against a stray `npm install`/`yarn` in a package.
+package-lock.json
+yarn.lock
+
 # Build output
 dist/
 build/
