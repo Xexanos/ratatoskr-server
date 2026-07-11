@@ -2,5 +2,10 @@ packages:
   - "packages/*"
 
 # esbuild's postinstall just fetches its platform binary — required for vite/vitest.
+# cpu-features/protobufjs/ssh2 are optional native addons of testcontainers' ssh transport,
+# which we don't use; skip their build scripts (pure-JS fallbacks apply).
 allowBuilds:
+  cpu-features: false
   esbuild: true
+  protobufjs: false
+  ssh2: false

@@ -257,10 +257,12 @@ function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
 }
 
 function toAuthTokens(data: unknown): AuthTokens {
-  const tokenData = data as { accessToken?: unknown; refreshToken?: unknown; user?: { id?: unknown; username?: unknown } }
-  const accessToken = tokenData?.accessToken
-  const refreshToken = tokenData?.refreshToken
-  const user = tokenData?.user
+  const user = (data as { user?: { id?: unknown; username?: unknown; accessToken?: unknown; refreshToken?: unknown } })?.user
+  // ABS returns the access/refresh pair nested under `user`. This is the shape of its token
+  // model across every version this server supports (>= 2.26, verified against live 2.26.0 and
+  // 2.35.1); the tokens are never at the top level.
+  const accessToken = user?.accessToken
+  const refreshToken = user?.refreshToken
   if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !user) {
     throw new AbsUpstreamError('Audiobookshelf did not return the expected tokens')
   }

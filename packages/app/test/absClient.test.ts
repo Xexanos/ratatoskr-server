@@ -14,7 +14,11 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-const OK_BODY = { accessToken: 'access-1', refreshToken: 'refresh-1', user: { id: 42, username: 'lars' } }
+// ABS nests the token pair under `user` (its access/refresh model, >= 2.26; `token` is the
+// legacy long-lived API token that also rides along). This mirrors a real login/refresh body.
+const OK_BODY = {
+  user: { id: 42, username: 'lars', token: 'legacy-api-token', accessToken: 'access-1', refreshToken: 'refresh-1' },
+}
 
 describe('AbsClient', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -63,7 +67,9 @@ describe('AbsClient', () => {
 
   describe('refresh', () => {
     it('posts to /auth/refresh with the refresh token in x-refresh-token', async () => {
-      const mock = stubFetch(() => jsonResponse({ ...OK_BODY, accessToken: 'access-2', refreshToken: 'refresh-2' }))
+      const mock = stubFetch(() =>
+        jsonResponse({ user: { ...OK_BODY.user, accessToken: 'access-2', refreshToken: 'refresh-2' } }),
+      )
       const tokens = await new AbsClient(BASE).refresh('refresh-1')
 
       const [url, init] = mock.mock.calls[0] as [string, RequestInit]
