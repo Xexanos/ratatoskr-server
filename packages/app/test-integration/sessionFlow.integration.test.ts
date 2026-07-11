@@ -127,6 +127,11 @@ run('playback session flow (real ABS + fake Sonos)', () => {
     expect(session).toMatchObject({ itemId, state: 'playing', positionSeconds: 1 })
   })
 
+  it('rejects a non-empty but invalid bearer with 401 (validated upstream, not presence-only)', async () => {
+    const res = await api('GET', '/v1/sessions/current', undefined, 'not-a-real-abs-token')
+    expect(res.status).toBe(401)
+  })
+
   it('stops with 204 and writes the reached position back to ABS', async () => {
     const res = await api('DELETE', '/v1/sessions/current')
     expect(res.status).toBe(204)

@@ -89,7 +89,12 @@ export class ApiService {
 
   // --- Playback (SPEC sections 4 and 5) ---
 
-  async getCurrentSession(): Promise<Session> {
+  // getCurrentSession/stopSession never forward the caller's token to ABS on their own, so validate
+  // it upstream first — otherwise the presence-only bearer check would let any non-empty bearer read
+  // or stop the session on the untrusted LAN (SPEC section 14). startSession needs no explicit check:
+  // it already presents the token to ABS via getPlaybackManifest, which 401s an invalid one.
+  async getCurrentSession(request: FastifyRequest): Promise<Session> {
+    await this.abs.validateToken(request.absToken as string)
     return this.sessions.current()
   }
 
@@ -100,7 +105,8 @@ export class ApiService {
 
   // Slice 1 always returns 204 (stopped). The 200 + rotatedTokens path (a pending rotated pair)
   // arrives with the token-rotation handover in a later slice.
-  async stopSession(_request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    await this.abs.validateToken(request.absToken as string)
     await this.sessions.stop()
     await reply.code(204).send()
   }

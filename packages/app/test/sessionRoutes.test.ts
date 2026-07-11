@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
-import { ItemNotPlayableError } from '../src/abs/errors.js'
+import { AbsAuthError, ItemNotPlayableError } from '../src/abs/errors.js'
 import { buildApp } from '../src/api/app.js'
 import type { Config } from '../src/config/index.js'
 import { NoActiveSessionError } from '../src/playback/errors.js'
@@ -34,10 +34,11 @@ const SESSION = {
   updatedAt: '2026-07-11T00:00:00.000Z',
 }
 
-function appWith(sessions: Partial<SessionManager>) {
+// A valid-by-default token validator; override `abs` to simulate an invalid token.
+function appWith(sessions: Partial<SessionManager>, abs: Partial<AbsClient> = {}) {
   return buildApp(testConfig(), {
     sessionManager: sessions as SessionManager,
-    absClient: {} as AbsClient,
+    absClient: { validateToken: vi.fn().mockResolvedValue(undefined), ...abs } as AbsClient,
     sonosClient: {} as SonosClient,
   })
 }
@@ -105,6 +106,15 @@ describe('GET /v1/sessions/current', () => {
     expect(res.json().code).toBe('not_found')
     await app.close()
   })
+
+  it('returns 401 for a non-empty but invalid bearer, without reading the session', async () => {
+    const current = vi.fn()
+    const app = await appWith({ current }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
+    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    expect(res.statusCode).toBe(401)
+    expect(current).not.toHaveBeenCalled()
+    await app.close()
+  })
 })
 
 describe('DELETE /v1/sessions/current', () => {
@@ -124,6 +134,15 @@ describe('DELETE /v1/sessions/current', () => {
     const app = await appWith({ stop: vi.fn().mockRejectedValue(new NoActiveSessionError()) })
     const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(404)
+    await app.close()
+  })
+
+  it('returns 401 for a non-empty but invalid bearer, without stopping', async () => {
+    const stop = vi.fn()
+    const app = await appWith({ stop }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
+    const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
+    expect(res.statusCode).toBe(401)
+    expect(stop).not.toHaveBeenCalled()
     await app.close()
   })
 })

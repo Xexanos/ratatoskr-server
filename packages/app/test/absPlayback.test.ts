@@ -57,6 +57,23 @@ describe('AbsClient.getPlaybackManifest', () => {
   })
 })
 
+describe('AbsClient.validateToken', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('GETs /api/me with the token and resolves when it is valid', async () => {
+    const mock = stubFetch(() => jsonResponse({ id: '1', username: 'lars' }))
+    await new AbsClient(BASE).validateToken('user-token')
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${BASE}/api/me`)
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer user-token')
+  })
+
+  it('rejects an invalid token with AbsAuthError', async () => {
+    stubFetch(() => new Response(null, { status: 401 }))
+    await expect(new AbsClient(BASE).validateToken('bad')).rejects.toBeInstanceOf(AbsAuthError)
+  })
+})
+
 describe('AbsClient.writeProgress', () => {
   afterEach(() => vi.unstubAllGlobals())
 

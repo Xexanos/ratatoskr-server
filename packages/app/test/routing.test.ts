@@ -31,9 +31,11 @@ const AUTH = { authorization: 'Bearer user-token' }
 describe('routing fallbacks', () => {
   afterEach(() => vi.restoreAllMocks())
 
+  // pause/resume/seek are still unimplemented in this slice (start/get/stop have landed), so they
+  // exercise the NotImplementedError -> 404 fallback and the per-operation bearer enforcement.
   it('maps an unimplemented session operation to 404 not_found (contract shape)', async () => {
     const app = await buildTestApp()
-    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ code: 'not_found', message: expect.any(String) })
     await app.close()
@@ -41,7 +43,7 @@ describe('routing fallbacks', () => {
 
   it('still enforces the bearer token on an unimplemented operation (401 without it)', async () => {
     const app = await buildTestApp()
-    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current' })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause' })
     expect(res.statusCode).toBe(401)
     expect(res.json().code).toBe('unauthorized')
     await app.close()
