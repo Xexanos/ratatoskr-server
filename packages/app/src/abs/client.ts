@@ -257,10 +257,9 @@ function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
 }
 
 function toAuthTokens(data: unknown): AuthTokens {
-  const tokenData = data as { accessToken?: unknown; refreshToken?: unknown; user?: { id?: unknown; username?: unknown } }
-  const accessToken = tokenData?.accessToken
-  const refreshToken = tokenData?.refreshToken
-  const user = tokenData?.user
+  const user = (data as { user?: { id?: unknown; username?: unknown; accessToken?: unknown; refreshToken?: unknown } })?.user
+  const accessToken = user?.accessToken
+  const refreshToken = user?.refreshToken
   if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !user) {
     throw new AbsUpstreamError('Audiobookshelf did not return the expected tokens')
   }

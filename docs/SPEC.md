@@ -473,13 +473,17 @@ Known accepted risks / open points:
 Planned work, not yet built. Captured here so the intent is not lost; each lands in its
 own change with its own tests.
 
-- **Integration test against a real Audiobookshelf.** The `abs/` client is currently
-  covered only against `fetch` stubs, so it verifies our own parsing but not that the
-  request shapes and response shapes match a live ABS. Add an integration test that runs
-  the client (login/refresh and the library projection) against a real or containerized
-  Audiobookshelf, gated so it does not run in the normal unit-test pass (it needs a
-  reachable ABS). This closes the open item from the phase-3a review — a smoke test against
-  a live ABS before phase 4 builds playback on top of the projection.
+- **Integration test against a real Audiobookshelf.** *(Done.)* The `abs/` client was
+  previously covered only against `fetch` stubs, so it verified our own parsing but not that
+  the request/response shapes match a live ABS. Added a Docker-gated integration test
+  (`packages/app/test-integration/absLive.integration.test.ts`) that boots a real,
+  digest-pinned Audiobookshelf in a container, seeds it, spawns the compiled server against
+  it, and drives login/refresh and the library projection over `/v1`. It skips cleanly where
+  no container runtime is available and runs in CI. This closed the phase-3a open item — a
+  smoke test against a live ABS before phase 4 builds playback on top of the projection —
+  and on its first run surfaced a real drift bug: the client read the ABS token pair from the
+  top level of the login/refresh response, but ABS 2.26+ nests it under `user`; fixed in
+  `toAuthTokens`.
 - **Bundle the server for a smaller deploy artifact.** The build is currently `tsc`-only:
   it emits per-file JavaScript and ships `node_modules` into the container. Introduce a
   bundling step (e.g. esbuild or rollup) that tree-shakes the server (`packages/app`) into

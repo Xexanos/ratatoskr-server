@@ -80,10 +80,19 @@ pnpm lint
 
 The strategy above is the target. Current state:
 
-- **Present:** unit tests and an integration smoke test against a fake ABS; 90%
-  coverage thresholds; the `oasdiff` breaking-change gate in CI. (The ABS client is
-  currently exercised as a unit test via a stubbed `fetch`; the component-level fake-ABS
-  *HTTP* server described above lands with the fuller component suite.)
+- **Present:** unit tests; a process-level integration smoke test (config validation and
+  `/health` against a trivial fake ABS, no Docker); and a **live-Audiobookshelf integration
+  test** (`packages/app/test-integration/absLive.integration.test.ts`) that boots a real,
+  digest-pinned Audiobookshelf in a container (Testcontainers), seeds it (root user, a book
+  library with a fixture audiobook, streamer user), spawns the compiled server against it,
+  and drives the ABS-backed `/v1` endpoints (auth login/refresh, library list/detail) with
+  Ajv contract-conformance. It is Docker-gated: local runs with no container runtime skip
+  cleanly, but in CI (or with `ABS_IT_REQUIRE=1`) a missing runtime **fails** the test instead
+  of skipping, so live coverage can never silently disappear while CI stays green. It runs in
+  CI's `build-test` job. 90% coverage thresholds; the `oasdiff`
+  breaking-change gate in CI. (The ABS client is also exercised as a unit test via a stubbed
+  `fetch`; the component-level fake-ABS *HTTP* server described above still lands with the
+  fuller component suite.)
 - **Lands with Sonos support (SPEC phase 4):** the Sonos-control component tests,
   the full integration test (incl. the sync loop), and the fake Sonos itself.
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the

@@ -7,8 +7,10 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['test-integration/**/*.test.ts'],
-    // Spawn + listen + poll on a cold CI runner doesn't fit vitest's 5s default.
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
+    // The live-ABS test's beforeAll pulls + boots a real Audiobookshelf container and waits
+    // for its library scan; a cold image pull alone can take minutes on a fresh CI runner.
+    // Generous hook timeout for that setup; per-test work (single HTTP calls) is quick.
+    hookTimeout: 300_000,
+    testTimeout: 60_000,
   },
 })
