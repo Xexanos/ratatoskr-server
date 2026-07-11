@@ -22,10 +22,22 @@ import {
 // Complements smoke.integration.test.ts (which pins /health + the startup fail-loud paths
 // with a trivial fake ABS and needs no Docker); it does not replace it.
 
-// ABS 2.35.1, pinned by multi-arch manifest digest so the test is reproducible and cannot
-// drift onto a moving tag. Must stay >= 2.26 for the refresh-token model the client uses
-// (x-return-tokens on login, x-refresh-token on refresh).
-const ABS_IMAGE = 'ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d'
+// Run the suite against both ends of the supported ABS range (README: >= 2.26) so we catch a
+// request/response-shape drift at either boundary, not just against one version. Both images are
+// pinned by multi-arch manifest digest so the test is reproducible and cannot slide onto a moving
+// tag. Override with ABS_IT_IMAGE to run a single image (a quick local check, or a CI matrix
+// entry). Bump CURRENT as ABS publishes new releases.
+const ABS_MIN = {
+  label: '2.26.0 (minimum)',
+  image: 'ghcr.io/advplyr/audiobookshelf@sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5',
+}
+const ABS_CURRENT = {
+  label: '2.35.1 (current)',
+  image: 'ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d',
+}
+const ABS_VERSIONS = process.env.ABS_IT_IMAGE
+  ? [{ label: process.env.ABS_IT_IMAGE, image: process.env.ABS_IT_IMAGE }]
+  : [ABS_MIN, ABS_CURRENT]
 const ABS_PORT = 13378
 const FIXTURE_DIR = fileURLToPath(new URL('./fixtures/audiobooks', import.meta.url))
 
@@ -92,7 +104,10 @@ async function seedFetch(label: string, url: string, init: RequestInit, timeoutM
   throw new Error(`${label} did not succeed within ${timeoutMs}ms (last: ${String(last)})`)
 }
 
-describe.skipIf(!DOCKER_READY && !REQUIRE_LIVE)('live Audiobookshelf integration', () => {
+// Skip cleanly when there is no runtime and it is not required; otherwise run once per version.
+const liveSuite = DOCKER_READY || REQUIRE_LIVE ? describe.each(ABS_VERSIONS) : describe.skip.each(ABS_VERSIONS)
+
+liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
   let container: StartedTestContainer | undefined
   let server: SpawnedServer | undefined
   let serverBase = ''
@@ -130,7 +145,7 @@ describe.skipIf(!DOCKER_READY && !REQUIRE_LIVE)('live Audiobookshelf integration
     }
 
     // 1. Boot a real Audiobookshelf with the fixture audiobook copied in.
-    container = await new GenericContainer(ABS_IMAGE)
+    container = await new GenericContainer(image)
       // The image binds port 80 by default; pin it to a known port explicitly instead.
       .withEnvironment({ PORT: String(ABS_PORT) })
       .withExposedPorts(ABS_PORT)
@@ -249,7 +264,7 @@ describe.skipIf(!DOCKER_READY && !REQUIRE_LIVE)('live Audiobookshelf integration
     expect(validate.errors).toBeNull()
   })
 
-  it('POST /v1/auth/refresh exchanges the refresh token for a rotated pair', async () => {
+  it('POST /v1/auth/refresh exchanges the refresh token for a fresh contract-valid pair', async () => {
     const res = await fetch(`${serverBase}/v1/auth/refresh`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -261,8 +276,12 @@ describe.skipIf(!DOCKER_READY && !REQUIRE_LIVE)('live Audiobookshelf integration
     const validate = contractValidator('AuthTokens')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
-    // ABS rotates the refresh token on every use (SPEC section 8): the new one must differ.
-    expect(body.refreshToken).not.toBe(auth.refreshToken)
+    expect(typeof body.accessToken).toBe('string')
+    expect(typeof body.refreshToken).toBe('string')
+    expect(body.user).toMatchObject({ username: ROOT_USER })
+    // Note: whether ABS *rotates* the refresh token on use is version-dependent (2.26.0 returns
+    // the same token; newer versions rotate), so we assert the contract shape — a usable pair —
+    // rather than rotation. The rotation-handover in SPEC section 8 degrades safely either way.
   })
 
   it('GET /v1/library/items lists the seeded book', async () => {
