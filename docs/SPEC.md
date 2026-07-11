@@ -491,3 +491,47 @@ own change with its own tests.
   startup. Must stay compatible with the single multi-stage, multi-arch Dockerfile
   (section 12) and must not pull generated contract types/schemas out of their normal
   module boundary (section 11).
+
+## 16. Planned features (post-v1)
+
+Ideas intentionally deferred beyond v1. These are **not commitments** — they are captured so
+the reasoning is not lost and so the v1 design does not *actively prevent* them (section 2).
+Each would land as its own change, with its own contract version bump where the API is affected.
+This differs from section 15 (near-term work already lined up); this section is the longer horizon.
+
+The section 2 "out of scope for v1" items are the natural first post-v1 candidates and are not
+repeated in full here: **multiroom grouping controlled from Ratatoskr**, **chapter-aware
+navigation**, and **podcasts**. The following are the additional features on the radar.
+
+- **Multiple simultaneous sessions / multi-user.** v1 serves exactly one active session, owned by
+  one authenticated user (section 8): a second `startSession` preempts the first (stopping it and
+  writing its progress). Post-v1, hold a session per authenticated user (and per speaker/group) in
+  a small in-memory registry, so several people can stream different books to different speakers at
+  once. This also requires a **same-user check** on session reads/mutations — necessary anyway to
+  protect the `rotatedTokens` handover (section 8) from being handed to a different valid user. The
+  single-session manager in `playback/` is a clean seam for this; nothing in v1 blocks it.
+
+- **App connected to multiple Ratatoskr servers.** For users with Sonos in more than one location,
+  each behind its own Ratatoskr instance. Mostly an app concern (a server list / switcher), but the
+  server should be identifiable so the app can label and distinguish instances — e.g. a stable,
+  admin-set server id/name surfaced somewhere safe (mindful of section 14: `/health` must not leak
+  sensitive detail to unauthenticated callers, so this may want an authenticated field instead).
+
+- **Cover art.** `LibraryItemSummary.coverUrl` is currently always `null` (section 14 open point).
+  A Ratatoskr-served cover route that proxies the image from ABS — so the streamer/user token is
+  never exposed to the client — would let the app show artwork.
+
+- **Sleep timer.** Stop (or fade out) playback after N minutes, a staple audiobook feature. Doing
+  it server-side (a timer on the active session) makes it survive the app backgrounding or losing
+  connectivity, and reuses the existing stop-and-write-progress path.
+
+- **Instant device-state detection via UPnP eventing.** v1 detects device-side pause/stop by
+  polling the transport (sections 5 and 14), because the speaker→server event callback is severed
+  under Docker bridge networking. In host-networking deployments, subscribing to AVTransport
+  `LastChange` events would replace poll-interval latency with instant updates. Feasibility depends
+  on the deployment's networking, so it is an enhancement rather than a default.
+
+- **Playback speed.** Audiobook listeners often want 1.25–1.5×. Whether this is achievable depends
+  on what Sonos exposes for streamed HTTP content (it may require server-side transcoding, which the
+  architecture deliberately avoids — audio never flows through Ratatoskr, section 3). Listed as
+  *wanted, feasibility-gated* rather than a clear next step.
