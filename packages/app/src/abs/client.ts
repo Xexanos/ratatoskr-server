@@ -167,8 +167,11 @@ export class AbsClient {
     return { itemId, tracks, totalDurationSeconds }
   }
 
-  // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts;
-  // ABS derives `progress` itself, but we send it too for correctness.
+  // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts.
+  // All four fields are sent deliberately: verified against a live ABS 2.35.1, the endpoint stores
+  // only what it is given — it does NOT look up the item's duration or derive `progress`/`isFinished`
+  // from `currentTime`. Omitting `duration`/`progress` yields a stored `progress: 0`, and omitting
+  // fields makes `isFinished` merge inconsistently. So we compute and send the full set.
   async writeProgress(token: string, itemId: string, update: ProgressUpdate): Promise<void> {
     const fraction = update.isFinished
       ? 1
