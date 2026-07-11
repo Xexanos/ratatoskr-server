@@ -9,6 +9,11 @@ import { NoActiveSessionError } from './errors.js'
 type Session = components['schemas']['Session']
 type PlaybackState = components['schemas']['PlaybackState']
 
+// How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds
+// is about seek accuracy) so that raising the seek tolerance for a flaky speaker does not silently
+// widen the end-of-book window.
+const END_OF_BOOK_TOLERANCE_SECONDS = 5
+
 export interface SessionManagerDeps {
   abs: AbsClient
   sonos: SonosClient
@@ -34,67 +39,86 @@ interface ActiveSession {
 // (SPEC sections 4 and 5). The sync loop and pause/resume/seek live in a later slice.
 export class SessionManager {
   private session: ActiveSession | undefined
+  // Fastify serves requests concurrently, and the operations below interleave `await`s around the
+  // single `session` field. Chain start/stop/current through this promise so exactly one runs at a
+  // time — otherwise concurrent starts orphan a playing speaker, or a start/stop race clears a
+  // freshly-started session (GET/DELETE 404 while the speaker plays on).
+  private opChain: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
-  // Start (or replace) playback: build the queue from ABS track metadata + the streamer token,
-  // play it, and resume from the position stored in ABS. Replacing an active session stops it
-  // first (writing its final position). Throws ItemNotPlayableError (400) for bad book metadata.
+  // Start (or replace) playback: build the queue from ABS track metadata + the streamer token, play
+  // it, and resume from the position stored in ABS. Throws ItemNotPlayableError (400) / AbsAuthError
+  // (401) for a bad book or an invalid token — validated BEFORE any active session is touched.
   async start(userToken: string, refreshToken: string | undefined, itemId: string, speakerId: string): Promise<Session> {
-    if (this.session !== undefined) {
-      await this.stopInternal()
-    }
+    return this.serialize(async () => {
+      // Validate the token and confirm the book is playable first: getPlaybackManifest presents the
+      // token to ABS (401s an invalid one) and rejects an unplayable book. Only after this is known
+      // viable do we tear down any active session — so a bad/unauthenticated request, or an
+      // unplayable itemId, no longer kills what is currently playing.
+      const [manifest, progress] = await Promise.all([
+        this.deps.abs.getPlaybackManifest(userToken, itemId),
+        this.deps.abs.getProgress(userToken, itemId),
+      ])
 
-    const [manifest, progress] = await Promise.all([
-      this.deps.abs.getPlaybackManifest(userToken, itemId),
-      this.deps.abs.getProgress(userToken, itemId),
-    ])
+      const streamerToken = await this.ensureStreamerToken()
+      const plan = planPlayback(
+        manifest.tracks.map((track: PlaybackTrack) => ({
+          url: this.mediaUrl(itemId, track.ino, streamerToken),
+          mimeType: track.mimeType,
+          durationSeconds: track.durationSeconds,
+        })),
+      )
 
-    const streamerToken = await this.ensureStreamerToken()
-    const plan = planPlayback(
-      manifest.tracks.map((track: PlaybackTrack) => ({
-        url: this.mediaUrl(itemId, track.ino, streamerToken),
-        mimeType: track.mimeType,
-        durationSeconds: track.durationSeconds,
-      })),
-    )
+      // Resume from the ABS-stored position (clamped into the book). A *finished* book restarts from
+      // the beginning rather than seeking to the exact end (where playback would end immediately).
+      const resumeSeconds = progress.isFinished
+        ? 0
+        : Math.min(Math.max(progress.positionSeconds, 0), manifest.totalDurationSeconds)
 
-    await this.deps.sonos.startPlayback(speakerId, plan)
+      // Now that the new start is viable, replace any active session (writing its final position).
+      if (this.session !== undefined) {
+        await this.stopInternal()
+      }
 
-    // Resume from the ABS-stored position (clamped into the book), seeking only when past the start.
-    const resumeSeconds = Math.min(Math.max(progress.positionSeconds, 0), manifest.totalDurationSeconds)
-    if (resumeSeconds > 0) {
-      await this.deps.sonos.seek(speakerId, planSeek([...plan.trackDurations], resumeSeconds, this.seekTuning()))
-    }
+      await this.deps.sonos.startPlayback(speakerId, plan)
+      if (resumeSeconds > 0) {
+        await this.deps.sonos.seek(speakerId, planSeek([...plan.trackDurations], resumeSeconds, this.seekTuning()))
+      }
 
-    this.session = {
-      itemId,
-      speakerId,
-      listeningToken: userToken,
-      refreshToken,
-      trackDurations: [...plan.trackDurations],
-      totalDurationSeconds: plan.totalDurationSeconds,
-    }
-    return this.toSession('playing', resumeSeconds)
+      this.session = {
+        itemId,
+        speakerId,
+        listeningToken: userToken,
+        refreshToken,
+        trackDurations: [...plan.trackDurations],
+        totalDurationSeconds: plan.totalDurationSeconds,
+      }
+      return this.toSession('playing', resumeSeconds)
+    })
   }
 
-  // The active session with a live position/state read from the coordinator (so a device-side
-  // pause is already reflected here). Throws NoActiveSessionError (404) when nothing is playing.
+  // The active session with a live position/state read from the coordinator (so a device-side pause
+  // is already reflected here). Throws NoActiveSessionError (404) when nothing is playing.
   async current(): Promise<Session> {
-    const session = this.requireSession()
-    const [position, transportState] = await Promise.all([
-      this.deps.sonos.getPosition(session.speakerId),
-      this.deps.sonos.getTransportState(session.speakerId),
-    ])
-    const absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
-    return this.toSession(mapTransportState(transportState), absolute)
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      const [position, transportState] = await Promise.all([
+        this.deps.sonos.getPosition(session.speakerId),
+        this.deps.sonos.getTransportState(session.speakerId),
+      ])
+      const absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
+      return this.toSession(mapTransportState(transportState), absolute)
+    })
   }
 
   // Stop playback, writing the final position back to ABS. Throws NoActiveSessionError (404) if
   // nothing is playing.
   async stop(): Promise<void> {
-    this.requireSession()
-    await this.stopInternal()
+    return this.serialize(async () => {
+      this.requireSession()
+      await this.stopInternal()
+    })
   }
 
   // True while a session is active — used by the app's onClose hook to stop on shutdown.
@@ -105,26 +129,51 @@ export class SessionManager {
   private async stopInternal(): Promise<void> {
     const session = this.session
     if (session === undefined) return
-    // Read the reached position (best effort — a failed read still stops and writes what we have).
-    let absolute = 0
+
+    // Read the reached position. If the read FAILS, do not write: writeProgress stores exactly what
+    // it is given, so writing a fallback 0 would wipe the user's real stored position (e.g. speaker
+    // unplugged 20h into a book). Only write a position we actually read.
+    let absolute: number | undefined
     try {
       const position = await this.deps.sonos.getPosition(session.speakerId)
       absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
     } catch {
-      // keep absolute = 0; the write below still records something rather than nothing
+      absolute = undefined
     }
-    const isFinished = session.totalDurationSeconds - absolute <= this.deps.config.seekToleranceSeconds
-    await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
-      currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
-      durationSeconds: session.totalDurationSeconds,
-      isFinished,
-    })
+
+    if (absolute !== undefined) {
+      const isFinished = session.totalDurationSeconds - absolute <= END_OF_BOOK_TOLERANCE_SECONDS
+      try {
+        await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
+          currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
+          durationSeconds: session.totalDurationSeconds,
+          isFinished,
+        })
+      } catch {
+        // Best-effort: a failed write must not block the stop. The common cause is the listening
+        // access token expiring (~1h) partway through a long book — renewing it via the stored
+        // refreshToken lands with the rotation slice; until then a failed final write is dropped
+        // rather than leaving the speaker unsilenceable and the session unclearable.
+      }
+    }
+
     try {
       await this.deps.sonos.stop(session.speakerId)
     } catch {
       // best effort — the session is ending regardless
     }
     this.session = undefined
+  }
+
+  // Run session operations one at a time (see opChain). The chain continues regardless of an op's
+  // outcome so one failure does not wedge the manager.
+  private serialize<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.opChain.then(op, op)
+    this.opChain = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   private toAbsolute(session: ActiveSession, trackIndex: number, relTimeSeconds: number): number {
@@ -149,8 +198,8 @@ export class SessionManager {
     return this.session
   }
 
-  // The streamer token for media URLs, logging in lazily if the startup login didn't happen or
-  // the token has expired (a full re-login is fine — dedicated account, short-lived token).
+  // The streamer token for media URLs, logging in lazily if the startup login didn't happen or the
+  // token has expired (a full re-login is fine — dedicated account, short-lived token).
   private async ensureStreamerToken(): Promise<string> {
     try {
       return this.deps.streamer.currentToken()

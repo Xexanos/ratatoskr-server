@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient, PlaybackManifest } from '../src/abs/client.js'
+import { AbsAuthError } from '../src/abs/errors.js'
 import type { StreamerSession } from '../src/abs/streamerSession.js'
 import type { Config } from '../src/config/index.js'
 import type { SonosClient } from '../src/sonos/client.js'
@@ -15,10 +16,12 @@ const MANIFEST: PlaybackManifest = {
   totalDurationSeconds: 300,
 }
 
-function build(overrides: { positionSeconds?: number } = {}) {
+function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {}) {
   const abs = {
     getPlaybackManifest: vi.fn().mockResolvedValue(MANIFEST),
-    getProgress: vi.fn().mockResolvedValue({ positionSeconds: overrides.positionSeconds ?? 150, isFinished: false }),
+    getProgress: vi
+      .fn()
+      .mockResolvedValue({ positionSeconds: overrides.positionSeconds ?? 150, isFinished: overrides.isFinished ?? false }),
     writeProgress: vi.fn().mockResolvedValue(undefined),
   }
   const sonos = {
@@ -107,6 +110,40 @@ describe('SessionManager', () => {
       expect(plan.tracks[0]?.url).toContain('token=refreshed-tok')
       expect(ctx.streamer.refresh).toHaveBeenCalled()
     })
+
+    it('restarts a finished book from the beginning instead of seeking to the end', async () => {
+      // A finished book's stored position is the total; naively resuming would seek to the very end.
+      ctx = build({ positionSeconds: 300, isFinished: true })
+      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      expect(session.positionSeconds).toBe(0)
+      expect(ctx.sonos.seek).not.toHaveBeenCalled()
+    })
+
+    it('leaves the active session untouched when a replacing start is rejected upstream', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.stop.mockClear()
+      // The new start's token is invalid: getPlaybackManifest rejects before any teardown.
+      ctx.abs.getPlaybackManifest.mockRejectedValueOnce(new AbsAuthError())
+      await expect(ctx.manager.start('bad-tok', undefined, 'li_2', 'RINCON_2')).rejects.toBeInstanceOf(AbsAuthError)
+      // The original session is preserved — not stopped, not overwritten, still current.
+      expect(ctx.sonos.stop).not.toHaveBeenCalled()
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
+      expect((await ctx.manager.current()).itemId).toBe('li_1')
+    })
+
+    it('serializes concurrent starts so the single-session invariant holds', async () => {
+      const [, second] = await Promise.all([
+        ctx.manager.start('t', undefined, 'li_1', 'RINCON_1'),
+        ctx.manager.start('t', undefined, 'li_2', 'RINCON_2'),
+      ])
+      // Serialized: both played, and the second replaced the first (one stop+write) rather than
+      // both starting with no session tracking one of the speakers.
+      expect(ctx.sonos.startPlayback).toHaveBeenCalledTimes(2)
+      expect(ctx.sonos.stop).toHaveBeenCalledTimes(1)
+      expect(second.itemId).toBe('li_2')
+      expect((await ctx.manager.current()).itemId).toBe('li_2')
+    })
   })
 
   describe('current', () => {
@@ -144,7 +181,7 @@ describe('SessionManager', () => {
 
     it('marks the item finished when stopped within tolerance of the end', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      // Position near the end: track index 1, offset 199 -> absolute 299 (300 total, tol 3).
+      // Near the end: track index 1, offset 199 -> absolute 299 (300 total, within the 5s window).
       ctx.sonos.getPosition.mockResolvedValueOnce({ trackIndex: 1, relTimeSeconds: 199 })
       await ctx.manager.stop()
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
@@ -158,17 +195,24 @@ describe('SessionManager', () => {
       await expect(ctx.manager.stop()).rejects.toBeInstanceOf(NoActiveSessionError)
     })
 
-    it('still writes progress and stops when the final position read fails', async () => {
+    it('does NOT write on a failed position read (would wipe stored progress) but still stops', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.sonos.getPosition.mockRejectedValueOnce(new Error('sonos down'))
       await ctx.manager.stop()
-      // Best effort: absolute falls back to 0 but we still record something and stop.
-      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
-        currentTimeSeconds: 0,
-        durationSeconds: 300,
-        isFinished: false,
-      })
+      // No write — writing a fallback 0 would overwrite the user's real stored position.
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
+      // But the speaker is still stopped and the session cleared.
       expect(ctx.sonos.stop).toHaveBeenCalled()
+      await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
+    })
+
+    it('does not let a failed ABS write block the stop or leave the session stuck', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      // e.g. the listening token expired mid-book -> writeProgress rejects.
+      ctx.abs.writeProgress.mockRejectedValueOnce(new AbsAuthError())
+      await ctx.manager.stop() // must not throw
+      expect(ctx.sonos.stop).toHaveBeenCalled()
+      await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
     })
   })
 })
