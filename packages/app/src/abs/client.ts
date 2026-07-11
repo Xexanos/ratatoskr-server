@@ -258,9 +258,8 @@ function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
 
 function toAuthTokens(data: unknown): AuthTokens {
   const user = (data as { user?: { id?: unknown; username?: unknown; accessToken?: unknown; refreshToken?: unknown } })?.user
-  // ABS returns the access/refresh pair nested under `user`. This is the shape of its token
-  // model across every version this server supports (>= 2.26, verified against live 2.26.0 and
-  // 2.35.1); the tokens are never at the top level.
+  // Verified against live ABS 2.26.0 (our minimum) and 2.35.1: the pair is only ever under
+  // `user`, never at the top level — reading it top-level was the pre-fix bug the live test caught.
   const accessToken = user?.accessToken
   const refreshToken = user?.refreshToken
   if (typeof accessToken !== 'string' || typeof refreshToken !== 'string' || !user) {

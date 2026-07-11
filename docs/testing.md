@@ -86,8 +86,10 @@ The strategy above is the target. Current state:
   digest-pinned Audiobookshelf in a container (Testcontainers), seeds it (root user, a book
   library with a fixture audiobook, streamer user), spawns the compiled server against it,
   and drives the ABS-backed `/v1` endpoints (auth login/refresh, library list/detail) with
-  Ajv contract-conformance. It is Docker-gated — it skips cleanly where no container runtime
-  is available, and runs in CI's `build-test` job. 90% coverage thresholds; the `oasdiff`
+  Ajv contract-conformance. It is Docker-gated: local runs with no container runtime skip
+  cleanly, but in CI (or with `ABS_IT_REQUIRE=1`) a missing runtime **fails** the test instead
+  of skipping, so live coverage can never silently disappear while CI stays green. It runs in
+  CI's `build-test` job. 90% coverage thresholds; the `oasdiff`
   breaking-change gate in CI. (The ABS client is also exercised as a unit test via a stubbed
   `fetch`; the component-level fake-ABS *HTTP* server described above still lands with the
   fuller component suite.)
