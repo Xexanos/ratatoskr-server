@@ -95,6 +95,25 @@ export class SonosClient {
     }
   }
 
+  async pause(speakerId: string): Promise<void> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    try {
+      await coordinator.AVTransportService.Pause({ InstanceID: 0 })
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
+  // Resume playback (Play on the existing queue, no transport-URI change).
+  async play(speakerId: string): Promise<void> {
+    const coordinator = await this.coordinatorFor(speakerId)
+    try {
+      await coordinator.AVTransportService.Play({ InstanceID: 0, Speed: '1' })
+    } catch (err) {
+      throw asUpstream(err)
+    }
+  }
+
   // Seek to (track, in-track offset) per a SeekPlan. Each attempt re-issues BOTH the track select
   // and the in-track seek, then verifies the coordinator is on the right track AND within the
   // tolerance window. The whole attempt is retried on a thrown Seek too — right after Play or a

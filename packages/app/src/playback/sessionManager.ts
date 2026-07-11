@@ -1,6 +1,6 @@
 import type { components } from '@ratatoskr/contract'
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
-import type { AbsClient, PlaybackTrack } from '../abs/client.js'
+import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
 import type { StreamerSession } from '../abs/streamerSession.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
@@ -44,6 +44,10 @@ export class SessionManager {
   // time — otherwise concurrent starts orphan a playing speaker, or a start/stop race clears a
   // freshly-started session (GET/DELETE 404 while the speaker plays on).
   private opChain: Promise<unknown> = Promise.resolve()
+  // The self-scheduling sync-loop timer, and the last absolute position written to ABS for the
+  // current session, so the loop only writes once the position has moved by the threshold.
+  private syncTimer: ReturnType<typeof setTimeout> | undefined
+  private lastWrittenSeconds = 0
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -94,7 +98,42 @@ export class SessionManager {
         trackDurations: [...plan.trackDurations],
         totalDurationSeconds: plan.totalDurationSeconds,
       }
+      this.lastWrittenSeconds = resumeSeconds
+      this.startLoop()
       return this.toSession('playing', resumeSeconds)
+    })
+  }
+
+  // Pause playback and write the current position immediately (SPEC section 5). The sync loop keeps
+  // running so a later resume — or a device-side action — is still reflected.
+  async pause(): Promise<Session> {
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      await this.deps.sonos.pause(session.speakerId)
+      const absolute = await this.readAbsolute(session)
+      if (absolute !== undefined) await this.writeBack(session, absolute)
+      return this.toSession('paused', absolute ?? this.lastWrittenSeconds)
+    })
+  }
+
+  // Resume playback on the existing queue.
+  async resume(): Promise<Session> {
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      await this.deps.sonos.play(session.speakerId)
+      const absolute = await this.readAbsolute(session)
+      return this.toSession('playing', absolute ?? this.lastWrittenSeconds)
+    })
+  }
+
+  // Seek to an absolute book position and write it back immediately.
+  async seek(positionSeconds: number): Promise<Session> {
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      const target = Math.min(Math.max(positionSeconds, 0), session.totalDurationSeconds)
+      await this.deps.sonos.seek(session.speakerId, planSeek([...session.trackDurations], target, this.seekTuning()))
+      await this.writeBack(session, target)
+      return this.toSession(await this.readState(session), target)
     })
   }
 
@@ -129,40 +168,140 @@ export class SessionManager {
   private async stopInternal(): Promise<void> {
     const session = this.session
     if (session === undefined) return
-
     // Read the reached position. If the read FAILS, do not write: writeProgress stores exactly what
-    // it is given, so writing a fallback 0 would wipe the user's real stored position (e.g. speaker
+    // it is given, so writing a fallback would wipe the user's real stored position (e.g. speaker
     // unplugged 20h into a book). Only write a position we actually read.
-    let absolute: number | undefined
+    let write: ProgressUpdate | undefined
     try {
       const position = await this.deps.sonos.getPosition(session.speakerId)
-      absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
+      write = this.progressAt(session, this.toAbsolute(session, position.trackIndex, position.relTimeSeconds))
     } catch {
-      absolute = undefined
+      write = undefined
     }
+    await this.finalize(session, write)
+  }
 
-    if (absolute !== undefined) {
-      const isFinished = session.totalDurationSeconds - absolute <= END_OF_BOOK_TOLERANCE_SECONDS
+  // Write the given payload (best-effort), cancel the sync loop, stop the speaker, and clear the
+  // session. Shared by stop(), the replace path in start(), and the loop's end/device-stop handling.
+  // A failed write (e.g. the ~1h listening token expiring mid-book — renewal via the stored
+  // refreshToken lands with the rotation slice) must not block the teardown.
+  private async finalize(session: ActiveSession, write: ProgressUpdate | undefined): Promise<void> {
+    this.stopLoop()
+    if (write !== undefined) {
       try {
-        await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
-          currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
-          durationSeconds: session.totalDurationSeconds,
-          isFinished,
-        })
+        await this.deps.abs.writeProgress(session.listeningToken, session.itemId, write)
       } catch {
-        // Best-effort: a failed write must not block the stop. The common cause is the listening
-        // access token expiring (~1h) partway through a long book — renewing it via the stored
-        // refreshToken lands with the rotation slice; until then a failed final write is dropped
-        // rather than leaving the speaker unsilenceable and the session unclearable.
+        // best-effort
       }
     }
-
     try {
       await this.deps.sonos.stop(session.speakerId)
     } catch {
       // best effort — the session is ending regardless
     }
     this.session = undefined
+  }
+
+  // --- Sync loop (SPEC section 5): poll the coordinator, write progress back on movement, and
+  // finalize on end-of-book or a device-side stop. One tick at a time through the same mutex as the
+  // user operations, so it never races a pause/seek/stop.
+
+  private startLoop(): void {
+    this.stopLoop()
+    this.scheduleTick()
+  }
+
+  private scheduleTick(): void {
+    this.syncTimer = setTimeout(() => void this.tick(), this.deps.config.pollIntervalSeconds * 1000)
+    // Don't keep the process alive solely for the poll timer; shutdown stops the session explicitly.
+    this.syncTimer.unref?.()
+  }
+
+  private async tick(): Promise<void> {
+    await this.serialize(() => this.syncOnce()).catch(() => undefined)
+    // Reschedule only while a session is still active (syncOnce may have finalized it).
+    if (this.session !== undefined) this.scheduleTick()
+  }
+
+  private async syncOnce(): Promise<void> {
+    const session = this.session
+    if (session === undefined) return
+
+    let absolute: number
+    let state: PlaybackState
+    try {
+      const [position, transportState] = await Promise.all([
+        this.deps.sonos.getPosition(session.speakerId),
+        this.deps.sonos.getTransportState(session.speakerId),
+      ])
+      absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
+      state = mapTransportState(transportState)
+    } catch {
+      return // transient read failure — try again next tick
+    }
+
+    // A stopped transport ends the session: near the end it's a finished book (progressAt marks it),
+    // otherwise a device-side stop mid-book. Either way write the reached position and tear down.
+    if (state === 'stopped') {
+      await this.finalize(session, this.progressAt(session, absolute))
+      return
+    }
+
+    // Otherwise (playing or paused) write back once the position has moved by the threshold — this
+    // also captures a device-side pause's frozen position on the first tick after it stops moving.
+    if (Math.abs(absolute - this.lastWrittenSeconds) >= this.deps.config.progressWriteThresholdSeconds) {
+      await this.writeBack(session, absolute)
+    }
+  }
+
+  private stopLoop(): void {
+    if (this.syncTimer !== undefined) {
+      clearTimeout(this.syncTimer)
+      this.syncTimer = undefined
+    }
+  }
+
+  // Write an in-progress position back to ABS (never `isFinished` — the book is not done until the
+  // transport stops), best-effort, tracking it as the last written position.
+  private async writeBack(session: ActiveSession, absolute: number): Promise<void> {
+    try {
+      await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
+        currentTimeSeconds: absolute,
+        durationSeconds: session.totalDurationSeconds,
+        isFinished: false,
+      })
+      this.lastWrittenSeconds = absolute
+    } catch {
+      // best-effort; the next tick retries
+    }
+  }
+
+  // The final progress payload for an absolute position — marks finished when within the end-of-book
+  // window (independent of the seek tolerance). Used only on teardown, not for in-progress writes.
+  private progressAt(session: ActiveSession, absolute: number): ProgressUpdate {
+    const isFinished = session.totalDurationSeconds - absolute <= END_OF_BOOK_TOLERANCE_SECONDS
+    return {
+      currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
+      durationSeconds: session.totalDurationSeconds,
+      isFinished,
+    }
+  }
+
+  private async readAbsolute(session: ActiveSession): Promise<number | undefined> {
+    try {
+      const position = await this.deps.sonos.getPosition(session.speakerId)
+      return this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
+    } catch {
+      return undefined
+    }
+  }
+
+  private async readState(session: ActiveSession): Promise<PlaybackState> {
+    try {
+      return mapTransportState(await this.deps.sonos.getTransportState(session.speakerId))
+    } catch {
+      return 'playing'
+    }
   }
 
   // Run session operations one at a time (see opChain). The chain continues regardless of an op's

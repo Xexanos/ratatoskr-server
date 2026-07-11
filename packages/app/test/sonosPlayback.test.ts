@@ -76,6 +76,15 @@ describe('SonosClient playback against the fake Sonos', () => {
     expect(await client.getTransportState(SPEAKER)).toBe('STOPPED')
   })
 
+  it('pauses and resumes on the coordinator', async () => {
+    await client.play(SPEAKER)
+    expect(fake.transportState).toBe('PLAYING')
+    await client.pause(SPEAKER)
+    expect(fake.transportState).toBe('PAUSED_PLAYBACK')
+    await client.play(SPEAKER)
+    expect(fake.transportState).toBe('PLAYING')
+  })
+
   it('maps an unknown speaker id to a Sonos upstream error', async () => {
     await expect(client.startPlayback('RINCON_UNKNOWN', twoTrackPlan())).rejects.toBeInstanceOf(SonosUpstreamError)
   })

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient, PlaybackManifest } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
 import type { StreamerSession } from '../src/abs/streamerSession.js'
@@ -28,6 +28,8 @@ function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {
     startPlayback: vi.fn().mockResolvedValue(undefined),
     seek: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
+    pause: vi.fn().mockResolvedValue(undefined),
+    play: vi.fn().mockResolvedValue(undefined),
     getPosition: vi.fn().mockResolvedValue({ trackIndex: 1, relTimeSeconds: 50 }),
     getTransportState: vi.fn().mockResolvedValue('PLAYING'),
   }
@@ -40,6 +42,8 @@ function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {
     seekSettleMs: 0,
     seekToleranceSeconds: 3,
     seekRetries: 2,
+    pollIntervalSeconds: 10,
+    progressWriteThresholdSeconds: 5,
   } as unknown as Config
 
   const manager = new SessionManager({
@@ -212,6 +216,113 @@ describe('SessionManager', () => {
       ctx.abs.writeProgress.mockRejectedValueOnce(new AbsAuthError())
       await ctx.manager.stop() // must not throw
       expect(ctx.sonos.stop).toHaveBeenCalled()
+      await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
+    })
+  })
+
+  describe('pause / resume / seek', () => {
+    it('pauses, writes the current position immediately, and reports paused', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      const session = await ctx.manager.pause()
+      expect(ctx.sonos.pause).toHaveBeenCalledWith('RINCON_1')
+      // getPosition -> {trackIndex:1, relTimeSeconds:50} -> absolute 150
+      expect(session).toMatchObject({ state: 'paused', positionSeconds: 150 })
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
+        currentTimeSeconds: 150,
+        durationSeconds: 300,
+        isFinished: false,
+      })
+    })
+
+    it('resumes and reports playing', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.resume()
+      expect(ctx.sonos.play).toHaveBeenCalledWith('RINCON_1')
+      expect(session.state).toBe('playing')
+    })
+
+    it('seeks to the target and writes it back', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      const session = await ctx.manager.seek(220)
+      // 220 into [100,200] -> track index 1, offset 120
+      const [, seekPlan] = ctx.sonos.seek.mock.calls.at(-1) as [string, { trackIndex: number; offsetSeconds: number }]
+      expect(seekPlan).toMatchObject({ trackIndex: 1, offsetSeconds: 120 })
+      expect(session.positionSeconds).toBe(220)
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
+        currentTimeSeconds: 220,
+        durationSeconds: 300,
+        isFinished: false,
+      })
+    })
+
+    it('clamps a seek beyond the end into the book', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      expect((await ctx.manager.seek(99999)).positionSeconds).toBe(300)
+    })
+
+    it('throw when nothing is playing', async () => {
+      await expect(ctx.manager.pause()).rejects.toBeInstanceOf(NoActiveSessionError)
+      await expect(ctx.manager.resume()).rejects.toBeInstanceOf(NoActiveSessionError)
+      await expect(ctx.manager.seek(10)).rejects.toBeInstanceOf(NoActiveSessionError)
+    })
+  })
+
+  describe('sync loop', () => {
+    beforeEach(() => vi.useFakeTimers())
+    afterEach(() => vi.useRealTimers())
+
+    it('writes progress back once the position moves past the threshold', async () => {
+      ctx = build({ positionSeconds: 0 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 80 }) // absolute 80
+      await vi.advanceTimersByTimeAsync(10_000) // one poll interval
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
+        currentTimeSeconds: 80,
+        durationSeconds: 300,
+        isFinished: false,
+      })
+    })
+
+    it('does not write when the position has not moved past the threshold', async () => {
+      ctx = build({ positionSeconds: 100 }) // lastWritten starts at 100
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 2 }) // absolute 102, moved 2 < 5
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
+    })
+
+    it('marks finished and tears down when the transport stops near the end', async () => {
+      ctx = build({ positionSeconds: 0 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 200 }) // absolute 300 (end)
+      ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
+        currentTimeSeconds: 300,
+        durationSeconds: 300,
+        isFinished: true,
+      })
+      expect(ctx.sonos.stop).toHaveBeenCalled()
+      await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
+    })
+
+    it('tears down without finishing on a device-side stop mid-book', async () => {
+      ctx = build({ positionSeconds: 0 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 50 }) // absolute 50 (mid-book)
+      ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
+        currentTimeSeconds: 50,
+        durationSeconds: 300,
+        isFinished: false,
+      })
       await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
     })
   })
