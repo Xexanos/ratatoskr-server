@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import { readFileSync, statSync } from 'node:fs'
 import { AddressInfo, createServer as createNetServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -91,6 +92,27 @@ export async function waitUntilReady(server: SpawnedServer, port: number, deadli
     }
   }
   throw new Error(`server did not become ready within ${deadlineMs}ms.\nstderr:\n${server.stderr()}`)
+}
+
+// Stop a spawned server and wait for it to actually exit. SIGTERM first; if it has not gone
+// within the grace window, SIGKILL. The kill timer is cleared on the fast path (no dangling
+// timer to complicate vitest worker teardown), and we always await the real `exit` event —
+// the SIGKILL branch only proves the signal was *sent*, not that the process is gone.
+export async function stopServer(server: SpawnedServer): Promise<void> {
+  const child = server.child
+  if (child.exitCode !== null) return
+  const exited = once(child, 'exit')
+  child.kill('SIGTERM')
+  let killTimer: ReturnType<typeof setTimeout> | undefined
+  const forceKill = new Promise<void>((resolve) => {
+    killTimer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve()
+    }, 5000)
+  })
+  await Promise.race([exited, forceKill])
+  if (killTimer) clearTimeout(killTimer)
+  await exited
 }
 
 // Fail with an actionable message if the server has not been built — every integration

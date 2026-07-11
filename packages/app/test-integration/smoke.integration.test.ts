@@ -8,6 +8,7 @@ import {
   contractValidator,
   freePort,
   spawnServer,
+  stopServer,
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
@@ -26,13 +27,7 @@ describe('server process smoke test', () => {
   })
 
   afterEach(async () => {
-    if (running && running.child.exitCode === null) {
-      running.child.kill('SIGTERM')
-      await Promise.race([
-        once(running.child, 'exit'),
-        new Promise((resolve) => setTimeout(resolve, 5000)).then(() => running?.child.kill('SIGKILL')),
-      ])
-    }
+    if (running) await stopServer(running)
     running = undefined
     if (fakeAbs) {
       // The child's undici fetch holds keep-alive connections; close() alone would hang.

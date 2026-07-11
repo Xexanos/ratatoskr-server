@@ -1,5 +1,4 @@
 import { execFileSync } from 'node:child_process'
-import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -9,6 +8,7 @@ import {
   contractValidator,
   freePort,
   spawnServer,
+  stopServer,
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
@@ -37,16 +37,25 @@ const ROOT_PASS = 'rootpassword'
 const STREAMER_USER = 'streamer'
 const STREAMER_PASS = 'streampassword'
 
-// Skip cleanly when Docker is unavailable so `pnpm test:integration` still passes locally
-// without a container runtime; CI runners have Docker, so it runs there.
+// Probe for a reachable container runtime. On any throw — missing CLI, daemon down, or a slow
+// daemon that exceeds the timeout — log *why* and return false: a bare `false` would make a
+// skipped-because-Docker-is-genuinely-absent run indistinguishable from a skipped-because-the-
+// probe-flaked run. The timeout is generous so a slow-but-present daemon is not misread as absent.
 function dockerAvailable(): boolean {
   try {
-    execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 15_000 })
+    execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 60_000 })
     return true
-  } catch {
+  } catch (error) {
+    console.warn(`[absLive] Docker probe failed; live-ABS test cannot run against a real container: ${String(error)}`)
     return false
   }
 }
+
+const DOCKER_READY = dockerAvailable()
+// In CI (or when explicitly demanded) a missing runtime must FAIL rather than silently skip —
+// otherwise the whole point of the live-ABS test could vanish while CI still goes green. Locally,
+// with no runtime, it skips cleanly so `pnpm test:integration` still passes.
+const REQUIRE_LIVE = process.env.CI === 'true' || process.env.ABS_IT_REQUIRE === '1'
 
 async function poll(label: string, predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -62,7 +71,28 @@ async function poll(label: string, predicate: () => Promise<boolean>, timeoutMs:
   throw new Error(`timed out waiting for ${label} after ${timeoutMs}ms${lastError ? ` (last error: ${String(lastError)})` : ''}`)
 }
 
-describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
+// First-contact seeding calls race Audiobookshelf's warm-up: the wait strategy proves the HTTP
+// layer answers, but /init and the seeding API may still be coming up, so a transient network
+// error or 5xx is expected on the first attempt. Retry those; return any <500 response to the
+// caller so a real 4xx (our bug) surfaces immediately instead of being retried into a timeout.
+async function seedFetch(label: string, url: string, init: RequestInit, timeoutMs = 30_000): Promise<Response> {
+  const deadline = Date.now() + timeoutMs
+  let last: unknown
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, init)
+      if (res.status < 500) return res
+      last = `HTTP ${res.status}`
+      await res.body?.cancel()
+    } catch (error) {
+      last = error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`${label} did not succeed within ${timeoutMs}ms (last: ${String(last)})`)
+}
+
+describe.skipIf(!DOCKER_READY && !REQUIRE_LIVE)('live Audiobookshelf integration', () => {
   let container: StartedTestContainer | undefined
   let server: SpawnedServer | undefined
   let serverBase = ''
@@ -73,7 +103,7 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
   // Log in against ABS directly (seeding only), tolerant of small shape differences across
   // versions, to obtain the admin access token used for the seeding API calls.
   async function absAdminToken(absBase: string): Promise<string> {
-    const res = await fetch(`${absBase}/login`, {
+    const res = await seedFetch('ABS admin login', `${absBase}/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-return-tokens': 'true' },
       body: JSON.stringify({ username: ROOT_USER, password: ROOT_PASS }),
@@ -90,6 +120,14 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
 
   beforeAll(async () => {
     assertServerBuilt()
+    // Reached only when the suite was not skipped. If we got here without a runtime, it is
+    // because REQUIRE_LIVE forced the run — fail loud rather than let live coverage vanish.
+    if (!DOCKER_READY) {
+      throw new Error(
+        'Docker is required for the live-ABS integration test (CI or ABS_IT_REQUIRE=1) but ' +
+          '`docker info` did not succeed. Refusing to skip silently — see the probe warning above.',
+      )
+    }
 
     // 1. Boot a real Audiobookshelf with the fixture audiobook copied in.
     container = await new GenericContainer(ABS_IMAGE)
@@ -102,8 +140,9 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
       .start()
     const absBase = `http://${container.getHost()}:${container.getMappedPort(ABS_PORT)}`
 
-    // 2. Create the root user on the fresh install.
-    const initRes = await fetch(`${absBase}/init`, {
+    // 2. Create the root user on the fresh install. Retried: /init may not be serving the
+    //    instant the wait strategy's HTTP probe first succeeds.
+    const initRes = await seedFetch('ABS /init', `${absBase}/init`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ newRoot: { username: ROOT_USER, password: ROOT_PASS } }),
@@ -115,7 +154,7 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
     const authHeader = { authorization: `Bearer ${adminToken}` }
 
     // 4. Create a book library pointing at the copied-in audiobook folder.
-    const libRes = await fetch(`${absBase}/api/libraries`, {
+    const libRes = await seedFetch('ABS create library', `${absBase}/api/libraries`, {
       method: 'POST',
       headers: { ...authHeader, 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Books', folders: [{ fullPath: '/audiobooks' }], mediaType: 'book' }),
@@ -126,18 +165,23 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
     if (!libraryId) throw new Error('ABS create library returned no id')
 
     // 5. Force a scan of the new library (the scan auto-queued on creation does not reliably
-    //    pick up the freshly-copied files), then wait for the book to appear.
-    const scanRes = await fetch(`${absBase}/api/libraries/${libraryId}/scan`, { method: 'POST', headers: authHeader })
+    //    pick up the freshly-copied files), then wait for the book to be fully scanned.
+    const scanRes = await seedFetch('ABS library scan', `${absBase}/api/libraries/${libraryId}/scan`, {
+      method: 'POST',
+      headers: authHeader,
+    })
     if (!scanRes.ok) throw new Error(`ABS library scan failed: ${scanRes.status} ${await scanRes.text()}`)
 
     await poll(
-      'the seeded book to be scanned',
+      'the seeded book to be scanned with a probed duration',
       async () => {
         const res = await fetch(`${absBase}/api/libraries/${libraryId}/items`, { headers: authHeader })
         if (!res.ok) return false
-        const data = (await res.json()) as { results?: { id?: string }[] }
+        const data = (await res.json()) as { results?: { id?: string; media?: { duration?: number } }[] }
         const first = data.results?.[0]
-        if (first?.id) {
+        // ABS inserts the item row before ffprobe fills in the duration — gate on both so the
+        // library tests can assert durationSeconds > 0 without racing the probe on a slow runner.
+        if (first?.id && typeof first.media?.duration === 'number' && first.media.duration > 0) {
           seededItemId = first.id
           return true
         }
@@ -147,7 +191,7 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
     )
 
     // 6. Seed the streamer identity (forward-compat; not exercised by these endpoints).
-    const userRes = await fetch(`${absBase}/api/users`, {
+    const userRes = await seedFetch('ABS create streamer user', `${absBase}/api/users`, {
       method: 'POST',
       headers: { ...authHeader, 'content-type': 'application/json' },
       body: JSON.stringify({ username: STREAMER_USER, password: STREAMER_PASS, type: 'user' }),
@@ -170,8 +214,9 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
     )
     await waitUntilReady(server, port)
 
-    // A valid pair for the authenticated tests below.
-    const loginRes = await fetch(`${serverBase}/v1/auth/login`, {
+    // A valid pair for the authenticated tests below. Retried through the server's upstream
+    // path, which returns 502 while ABS is still settling right after boot.
+    const loginRes = await seedFetch('server /v1/auth/login', `${serverBase}/v1/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: ROOT_USER, password: ROOT_PASS }),
@@ -182,13 +227,7 @@ describe.skipIf(!dockerAvailable())('live Audiobookshelf integration', () => {
   })
 
   afterAll(async () => {
-    if (server && server.child.exitCode === null) {
-      server.child.kill('SIGTERM')
-      await Promise.race([
-        once(server.child, 'exit'),
-        new Promise((resolve) => setTimeout(resolve, 5000)).then(() => server?.child.kill('SIGKILL')),
-      ])
-    }
+    if (server) await stopServer(server)
     await container?.stop()
   })
 
