@@ -101,10 +101,16 @@ describe('SonosClient', () => {
       expect(manager.InitializeWithDiscovery).toHaveBeenCalledOnce()
     })
 
-    it('uses the seed host when configured', async () => {
+    it('uses the seed host when configured, defaulting to the Sonos port 1400', async () => {
       const manager = fakeManager(SOLO)
       await clientWith(manager, '192.168.1.5').listSpeakers()
-      expect(manager.InitializeFromDevice).toHaveBeenCalledWith('192.168.1.5')
+      expect(manager.InitializeFromDevice).toHaveBeenCalledWith('192.168.1.5', 1400)
+    })
+
+    it('accepts an explicit host:port seed (for the containerized fake Sonos)', async () => {
+      const manager = fakeManager(SOLO)
+      await clientWith(manager, '127.0.0.1:54321').listSpeakers()
+      expect(manager.InitializeFromDevice).toHaveBeenCalledWith('127.0.0.1', 54321)
     })
 
     it('maps a discovery exception to SonosUpstreamError', async () => {

@@ -1,6 +1,7 @@
 import type { components } from '@ratatoskr/contract'
-import type { FastifyRequest } from 'fastify'
+import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
+import type { SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 
 type Health = components['schemas']['Health']
@@ -11,6 +12,8 @@ type LibraryItem = components['schemas']['LibraryItem']
 type Speaker = components['schemas']['Speaker']
 type LoginRequest = components['schemas']['LoginRequest']
 type RefreshRequest = components['schemas']['RefreshRequest']
+type Session = components['schemas']['Session']
+type StartSessionRequest = components['schemas']['StartSessionRequest']
 
 async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
   // probe() verifies the host is genuinely Audiobookshelf (GET /ping) rather than accepting any
@@ -35,6 +38,7 @@ async function checkSonos(sonos: SonosClient): Promise<DependencyStatus> {
 export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
+  sessions: SessionManager
 }
 
 // Implements the contract operations, one method per operationId. fastify-openapi-glue resolves
@@ -44,10 +48,12 @@ export interface ApiServiceDeps {
 export class ApiService {
   private readonly abs: AbsClient
   private readonly sonos: SonosClient
+  private readonly sessions: SessionManager
 
   constructor(deps: ApiServiceDeps) {
     this.abs = deps.abs
     this.sonos = deps.sonos
+    this.sessions = deps.sessions
   }
 
   async getHealth(): Promise<Health> {
@@ -79,5 +85,29 @@ export class ApiService {
 
   async listSpeakers(): Promise<Speaker[]> {
     return this.sonos.listSpeakers()
+  }
+
+  // --- Playback (SPEC sections 4 and 5) ---
+
+  // getCurrentSession/stopSession never forward the caller's token to ABS on their own, so validate
+  // it upstream first — otherwise the presence-only bearer check would let any non-empty bearer read
+  // or stop the session on the untrusted LAN (SPEC section 14). startSession needs no explicit check:
+  // it already presents the token to ABS via getPlaybackManifest, which 401s an invalid one.
+  async getCurrentSession(request: FastifyRequest): Promise<Session> {
+    await this.abs.validateToken(request.absToken as string)
+    return this.sessions.current()
+  }
+
+  async startSession(request: FastifyRequest): Promise<Session> {
+    const { itemId, speakerId, refreshToken } = request.body as StartSessionRequest
+    return this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
+  }
+
+  // Slice 1 always returns 204 (stopped). The 200 + rotatedTokens path (a pending rotated pair)
+  // arrives with the token-rotation handover in a later slice.
+  async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    await this.abs.validateToken(request.absToken as string)
+    await this.sessions.stop()
+    await reply.code(204).send()
   }
 }
