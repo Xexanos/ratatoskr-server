@@ -29,7 +29,21 @@ async function main(): Promise<void> {
     process.exit(1)
   }
   // The media URLs handed to speakers carry a long-lived stream-only ABS API key (ABS_STREAMER_API_KEY,
-  // SPEC section 14) — no login/token-refresh to do at startup, so nothing streamer-related here.
+  // SPEC section 14). There is no login to do, but exercise the key once against a reachable ABS so a
+  // wrong / inactive / revoked key fails loud here rather than as a silent playback failure later.
+  // Only when ABS is actually reachable: if it is merely down, defer — /health reports it and the
+  // first playback will surface a genuinely bad key.
+  if (absStatus === 'ok') {
+    try {
+      await abs.validateToken(config.absStreamerApiKey)
+    } catch {
+      console.error(
+        'ABS_STREAMER_API_KEY was rejected by a reachable Audiobookshelf (invalid, inactive, or ' +
+          'revoked). Check the dedicated stream-only API key (SPEC section 14). Refusing to start.',
+      )
+      process.exit(1)
+    }
+  }
   const app = await buildApp(config, { absClient: abs })
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw
