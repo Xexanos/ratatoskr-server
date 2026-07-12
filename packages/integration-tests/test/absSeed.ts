@@ -6,14 +6,11 @@ import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainer
 // plus the Docker gating and the pinned images. Consumed by globalSetup, which runs the
 // boot + seed ONCE per vitest run and hands the connection info to the test files.
 
-// Both ends of the supported ABS range (README: >= 2.26), pinned by multi-arch manifest digest so
-// the tests are reproducible and can't slide onto a moving tag. Bump CURRENT as ABS releases.
-// Version coverage lives in CI: two parallel jobs pass ABS_IT_IMAGE — the pinned minimum and the
-// deliberately unpinned :latest tag (drift canary for new ABS releases).
-export const ABS_MIN = {
-  label: '2.26.0 (minimum)',
-  image: 'ghcr.io/advplyr/audiobookshelf@sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5',
-}
+// The local default ABS image (README supports >= 2.26), pinned by multi-arch manifest digest so
+// local runs are reproducible and can't slide onto a moving tag. Bump as ABS releases.
+// Version coverage lives in CI: two parallel jobs pass ABS_IT_IMAGE — the pinned 2.26.0 minimum
+// (whose digest is owned by .github/workflows/ci.yml, the single source of truth for it) and the
+// deliberately unpinned :latest tag (a drift canary for new ABS releases).
 export const ABS_CURRENT = {
   label: '2.35.1 (current)',
   image: 'ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d',
@@ -110,16 +107,25 @@ export async function createAbsUser(
   username: string,
   password: string,
 ): Promise<void> {
+  const authHeader = { authorization: `Bearer ${adminAccessToken}` }
   const res = await seedFetch(`ABS create user ${username}`, `${absBase}/api/users`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${adminAccessToken}`, 'content-type': 'application/json' },
+    headers: { ...authHeader, 'content-type': 'application/json' },
     body: JSON.stringify({ username, password, type: 'user', isActive: true }),
   })
-  if (!res.ok) {
-    const text = await res.text()
-    if (/username.*taken|already exists/i.test(text)) return
-    throw new Error(`ABS create user ${username} failed: ${res.status} ${text}`)
-  }
+  if (res.ok) return
+
+  // The user may already exist (vitest watch mode re-runs a file against the still-warm container).
+  // Confirm that STRUCTURALLY — the username is present in GET /api/users — rather than by matching
+  // ABS's error wording: this suite runs an unpinned :latest leg precisely because upstream drifts,
+  // so a reworded/localized message must not turn a benign re-run into a hard failure, nor an
+  // unrelated 4xx that happens to contain "already exists" into a silent pass.
+  const failure = `ABS create user ${username} failed: ${res.status} ${await res.text()}`
+  const listRes = await fetch(`${absBase}/api/users`, { headers: authHeader })
+  if (!listRes.ok) throw new Error(failure)
+  const list = (await listRes.json()) as { users?: { username?: unknown }[] }
+  const exists = list.users?.some((user) => user.username === username) ?? false
+  if (!exists) throw new Error(failure)
 }
 
 export interface SeededAbs {

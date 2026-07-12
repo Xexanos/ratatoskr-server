@@ -34,7 +34,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Keep in sync with ABS_MIN in packages/integration-tests/test/absSeed.ts
+          # This workflow is the single source of truth for the supported-minimum ABS digest
+          # (no test code pins it — globalSetup uses ABS_IT_IMAGE or the current default). Bump
+          # here when the minimum supported version changes.
           - name: abs-2.26.0-min
             image: ghcr.io/advplyr/audiobookshelf@sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5
           # Intentionally UNPINNED: this leg exists to catch upstream drift early.
