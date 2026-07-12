@@ -118,6 +118,10 @@ must build on:
 - When the position reaches the end within a small tolerance, mark the item finished in ABS.
 - On start, read stored progress from ABS and seek the speaker to it before entering the
   loop.
+- On a termination signal (SIGTERM/SIGINT), stop the active session — writing the reached
+  position back to ABS — before exiting, bounded by `SHUTDOWN_TIMEOUT_MS` so a hung write cannot
+  wedge the process. (Progress still survives an ungraceful kill, since it is written periodically
+  during playback; this just captures the last few seconds on a clean `docker stop`.)
 
 ## 6. API and versioning
 
@@ -168,6 +172,8 @@ if something required is missing:
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid (section 8).
+- `SHUTDOWN_TIMEOUT_MS` (optional, default 5000) — upper bound on the graceful-shutdown drain
+  (section 5); the process exits after this even if the final write is still hung.
 
 ## 8. Auth
 

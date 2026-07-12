@@ -59,6 +59,30 @@ async function main(): Promise<void> {
     app.log.error(err)
     process.exit(1)
   }
+
+  installShutdownHandlers(app, config.shutdownTimeoutMs)
+}
+
+// Graceful shutdown (SPEC section 5): on a termination signal, close the server — the onClose hook
+// stops any active session, writing the reached position back to ABS — then exit. Bounded by a drain
+// timeout so a hung final write can't wedge the process. The first signal wins (a second, arriving
+// while draining, has no handler left and takes the default terminate). SIGTERM is what a container
+// runtime sends on `docker stop`; SIGINT covers Ctrl-C in the foreground.
+function installShutdownHandlers(app: Awaited<ReturnType<typeof buildApp>>, drainTimeoutMs: number): void {
+  let shuttingDown = false
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) return
+    shuttingDown = true
+    app.log.info({ signal }, 'received signal, shutting down')
+    const drained = app.close().catch((err: unknown) => app.log.error(err))
+    const timedOut = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, drainTimeoutMs)
+      timer.unref?.()
+    })
+    void Promise.race([drained, timedOut]).then(() => process.exit(0))
+  }
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
 }
 
 void main()
