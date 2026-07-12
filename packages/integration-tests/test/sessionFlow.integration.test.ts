@@ -10,7 +10,7 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import { createAbsUser, poll } from './absSeed.js'
+import { createAbsUser, createStreamerApiKey, poll } from './absSeed.js'
 
 // End-to-end playback flow (SPEC §4/§5): the compiled server against the shared live Audiobookshelf
 // (globalSetup) and the REAL fake-Sonos UPnP/SOAP double, driving the full session lifecycle —
@@ -56,7 +56,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     itemId = seededItemId
 
     await createAbsUser(absBase, adminToken, SESSION_USER, SESSION_PASS)
-    await createAbsUser(absBase, adminToken, SESSION_STREAMER, SESSION_STREAMER_PASS)
+    const streamerApiKey = await createStreamerApiKey(absBase, adminToken, SESSION_STREAMER, SESSION_STREAMER_PASS)
 
     fake = new FakeSonos({ uuid: SPEAKER_UUID, roomName: 'Test Room' })
     const sonosInfo = await fake.start()
@@ -67,8 +67,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
       cleanEnv({
         ABS_URL: absBase,
         ABS_ALLOW_PLAIN_HTTP: 'true',
-        ABS_STREAMER_USER: SESSION_STREAMER,
-        ABS_STREAMER_PASSWORD: SESSION_STREAMER_PASS,
+        ABS_STREAMER_API_KEY: streamerApiKey,
         ALLOW_PLAIN_HTTP: 'true',
         SONOS_SEED_HOST: sonosInfo.seedHost,
         SONOS_DISABLE_EVENTS: '1',
@@ -125,6 +124,15 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     expect(fake?.queue[0]?.metadata).toMatch(/protocolInfo="http-get:\*:audio\/[^"]+:\*"/)
     expect(fake?.transportState).toBe('PLAYING')
     expect(fake?.relTimeSeconds).toBe(1)
+
+    // The media URL carries the stream-only API key (SPEC §14) and actually streams from the real
+    // ABS — i.e. an API key works as ?token= on the file endpoint, on every supported ABS version.
+    const mediaUrl = fake?.queue[0]?.uri
+    if (mediaUrl === undefined) throw new Error('no media URL enqueued')
+    const streamRes = await fetch(mediaUrl, { headers: { range: 'bytes=0-1023' } })
+    expect(streamRes.status).toBeGreaterThanOrEqual(200)
+    expect(streamRes.status).toBeLessThan(300)
+    await streamRes.body?.cancel()
   })
 
   it('reports the active session with a live position', async () => {

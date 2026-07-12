@@ -46,7 +46,7 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
 
 ## Cross-cutting types
 
-- **Security:** HTTPS enforced unless `ALLOW_PLAIN_HTTP=true`; the streamer token
+- **Security:** HTTPS enforced unless `ALLOW_PLAIN_HTTP=true`; the streamer API key
   appears only in the media URLs handed to speakers; secrets never appear in logs
   (redaction); bearer auth + refresh-token rotation.
 - **Contract runtime-conformance:** the running server's responses are validated
@@ -90,8 +90,8 @@ The strategy above is the target. Current state:
   Vitest `globalSetup` (root user, a book library with a fixture audiobook, forced scan);
   the connection info reaches the test files via `provide()`/`inject()`. **Isolation on the
   shared container is per-file ABS users**: root is seeding-only, and every test file
-  creates its own end user + streamer user (progress in ABS is per-user) and spawns its own
-  compiled server. `absLive.integration.test.ts` drives the ABS-backed `/v1` endpoints
+  creates its own end user + a stream-only streamer account whose ABS API key it embeds in the
+  media URLs (progress in ABS is per-user) and spawns its own compiled server. `absLive.integration.test.ts` drives the ABS-backed `/v1` endpoints
   (auth login/refresh, library list/detail) with Ajv contract-conformance. **Version
   coverage lives in CI:** the `integration` job is a two-leg blocking matrix — the pinned
   2.26.0 minimum and the deliberately **unpinned `:latest`** tag as a drift canary for new
@@ -119,7 +119,12 @@ The strategy above is the target. Current state:
   cross-file isolation on the shared container comes from this file's own ABS users, not from
   per-test resets. The double runs in-process here via `SONOS_SEED_HOST=host:port` +
   `SONOS_DISABLE_EVENTS=1`.
-- **Lands with the later playback slice:** the streamer-token transport-URI re-set on expiry
-  and the SPEC §8 rotation handover.
+- **Phase 4, playback slice 3 (token rotation / shutdown / streamer identity) — present:** the
+  **token-rotation handover** (§8) — unit-tested with fake timers + fake JWTs (renew-before-expiry,
+  owner-gated redelivery until adoption, the `stopSession` 200/204 split); **graceful shutdown**
+  (§5) — an integration test SIGTERMs the spawned server and asserts the reached position was
+  written (Linux-only, so CI exercises it); and the **stream-only ABS API key** in media URLs (§14)
+  — the session-flow integration test fetches the enqueued media URL from real ABS to prove the key
+  streams as `?token=` on every supported ABS version.
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the
   central E2E repo to consume.

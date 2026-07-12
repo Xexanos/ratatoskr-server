@@ -7,8 +7,7 @@ const KEY = fileURLToPath(new URL('./fixtures/tls/key.pem', import.meta.url))
 
 const REQUIRED = {
   ABS_URL: 'http://abs.invalid',
-  ABS_STREAMER_USER: 'streamer',
-  ABS_STREAMER_PASSWORD: 'secret',
+  ABS_STREAMER_API_KEY: 'streamer-key',
   ALLOW_PLAIN_HTTP: 'true',
   ABS_ALLOW_PLAIN_HTTP: 'true',
 }
@@ -52,8 +51,7 @@ describe('loadConfig', () => {
     expectConfigError(
       { ALLOW_PLAIN_HTTP: 'true' },
       'ABS_URL is required',
-      'ABS_STREAMER_USER is required',
-      'ABS_STREAMER_PASSWORD is required',
+      'ABS_STREAMER_API_KEY is required',
     )
   })
 
@@ -72,8 +70,7 @@ describe('loadConfig', () => {
   it('accepts TLS when both cert and key are readable, without requiring ALLOW_PLAIN_HTTP', () => {
     const config = loadConfig({
       ABS_URL: REQUIRED.ABS_URL,
-      ABS_STREAMER_USER: REQUIRED.ABS_STREAMER_USER,
-      ABS_STREAMER_PASSWORD: REQUIRED.ABS_STREAMER_PASSWORD,
+      ABS_STREAMER_API_KEY: REQUIRED.ABS_STREAMER_API_KEY,
       ABS_ALLOW_PLAIN_HTTP: 'true',
       TLS_CERT_PATH: CERT,
       TLS_KEY_PATH: KEY,
@@ -84,8 +81,7 @@ describe('loadConfig', () => {
   it('accepts an https ABS_URL without requiring ABS_ALLOW_PLAIN_HTTP', () => {
     const config = loadConfig({
       ABS_URL: 'https://abs.invalid',
-      ABS_STREAMER_USER: REQUIRED.ABS_STREAMER_USER,
-      ABS_STREAMER_PASSWORD: REQUIRED.ABS_STREAMER_PASSWORD,
+      ABS_STREAMER_API_KEY: REQUIRED.ABS_STREAMER_API_KEY,
       ALLOW_PLAIN_HTTP: 'true',
     })
     expect(config.absUrl).toBe('https://abs.invalid')
@@ -147,8 +143,7 @@ describe('loadConfig', () => {
     expectConfigError(
       {
         ABS_URL: REQUIRED.ABS_URL,
-        ABS_STREAMER_USER: REQUIRED.ABS_STREAMER_USER,
-        ABS_STREAMER_PASSWORD: REQUIRED.ABS_STREAMER_PASSWORD,
+        ABS_STREAMER_API_KEY: REQUIRED.ABS_STREAMER_API_KEY,
       },
       'no TLS configured',
     )

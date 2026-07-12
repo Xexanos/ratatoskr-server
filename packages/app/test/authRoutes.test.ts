@@ -7,8 +7,7 @@ import type { Config } from '../src/config/index.js'
 function testConfig(): Config {
   return {
     absUrl: 'http://abs.invalid',
-    absStreamerUser: 'streamer',
-    absStreamerPassword: 'secret',
+    absStreamerApiKey: 'streamer-key',
     sonosSeedHost: undefined,
     port: 0,
     pollIntervalSeconds: 15,

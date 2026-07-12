@@ -128,6 +128,36 @@ export async function createAbsUser(
   if (!exists) throw new Error(failure)
 }
 
+// Create a stream-only-style ABS API key for a (freshly created, active) per-file user and return
+// the key string. This is what the media URLs carry (SPEC §14): an ABS API key works as `?token=`
+// on the file endpoint when created `isActive: true`. The account here is a plain per-file user;
+// real deployments lock it down to read/stream only.
+export async function createStreamerApiKey(
+  absBase: string,
+  adminAccessToken: string,
+  username: string,
+  password: string,
+): Promise<string> {
+  await createAbsUser(absBase, adminAccessToken, username, password)
+  const authHeader = { authorization: `Bearer ${adminAccessToken}` }
+  const usersRes = await fetch(`${absBase}/api/users`, { headers: authHeader })
+  if (!usersRes.ok) throw new Error(`ABS list users failed: ${usersRes.status} ${await usersRes.text()}`)
+  const users = (await usersRes.json()) as { users?: { id?: string; username?: string }[] }
+  const userId = users.users?.find((user) => user.username === username)?.id
+  if (userId === undefined) throw new Error(`streamer user ${username} not found after creation`)
+
+  const keyRes = await seedFetch(`ABS create api key ${username}`, `${absBase}/api/api-keys`, {
+    method: 'POST',
+    headers: { ...authHeader, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: `ratatoskr-${username}`, userId, isActive: true }),
+  })
+  if (!keyRes.ok) throw new Error(`ABS create api key failed: ${keyRes.status} ${await keyRes.text()}`)
+  const body = (await keyRes.json()) as { apiKey?: { apiKey?: unknown } }
+  const key = body.apiKey?.apiKey
+  if (typeof key !== 'string') throw new Error('ABS create api key returned no key string')
+  return key
+}
+
 export interface SeededAbs {
   container: StartedTestContainer
   absBase: string

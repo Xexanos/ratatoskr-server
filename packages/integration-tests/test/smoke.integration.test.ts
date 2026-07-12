@@ -39,15 +39,9 @@ describe('server process smoke test', () => {
 
   it('boots, serves /v1/health over real HTTP, and conforms to the contract', async () => {
     // A real HTTP upstream standing in for Audiobookshelf: answer /ping like ABS so the startup
-    // probe and the health check treat it as a genuine, reachable ABS, and answer /login with a
-    // token pair so the startup streamer login succeeds (a reachable ABS + failed login now aborts).
-    fakeAbs = createServer((req, res) => {
-      if (req.url === '/login') {
-        res.end(JSON.stringify({ user: { id: '1', username: 'streamer', accessToken: 'a', refreshToken: 'r' } }))
-        return
-      }
-      res.end(JSON.stringify({ success: true }))
-    })
+    // probe and the health check treat it as a genuine, reachable ABS. No streamer login happens at
+    // startup anymore — the media path uses a static API key — so only /ping needs answering.
+    fakeAbs = createServer((_req, res) => res.end(JSON.stringify({ success: true })))
     await new Promise<void>((resolve) => fakeAbs?.listen(0, '127.0.0.1', resolve))
     const absPort = (fakeAbs.address() as AddressInfo).port
 
@@ -55,8 +49,7 @@ describe('server process smoke test', () => {
     running = spawnServer(
       cleanEnv({
         ABS_URL: `http://127.0.0.1:${absPort}`,
-        ABS_STREAMER_USER: 'streamer',
-        ABS_STREAMER_PASSWORD: 'secret',
+        ABS_STREAMER_API_KEY: 'streamer-key',
         ALLOW_PLAIN_HTTP: 'true',
         ABS_ALLOW_PLAIN_HTTP: 'true',
         PORT: String(port),
@@ -84,36 +77,6 @@ describe('server process smoke test', () => {
     expect(valid).toBe(true)
   })
 
-  it('refuses to start when the streamer login fails against a reachable Audiobookshelf', async () => {
-    // /ping is fine (probe ok) but /login is rejected: a reachable ABS with bad streamer creds is a
-    // real misconfiguration, so startup must fail loud rather than defer to first playback.
-    fakeAbs = createServer((req, res) => {
-      if (req.url === '/login') {
-        res.statusCode = 401
-        res.end('unauthorized')
-        return
-      }
-      res.end(JSON.stringify({ success: true }))
-    })
-    await new Promise<void>((resolve) => fakeAbs?.listen(0, '127.0.0.1', resolve))
-    const absPort = (fakeAbs.address() as AddressInfo).port
-
-    running = spawnServer(
-      cleanEnv({
-        ABS_URL: `http://127.0.0.1:${absPort}`,
-        ABS_STREAMER_USER: 'streamer',
-        ABS_STREAMER_PASSWORD: 'wrong',
-        ALLOW_PLAIN_HTTP: 'true',
-        ABS_ALLOW_PLAIN_HTTP: 'true',
-        PORT: String(await freePort()),
-      }),
-    )
-    const [code] = (await once(running.child, 'exit')) as [number | null]
-
-    expect(code).toBe(1)
-    expect(running.stderr()).toContain('Streamer login failed')
-  })
-
   it('refuses to start when ABS_URL responds but is not Audiobookshelf', async () => {
     // A host that is up but does not answer /ping like ABS is almost always a misconfiguration —
     // the startup probe should fail loud rather than let it leak into runtime.
@@ -124,8 +87,7 @@ describe('server process smoke test', () => {
     running = spawnServer(
       cleanEnv({
         ABS_URL: `http://127.0.0.1:${absPort}`,
-        ABS_STREAMER_USER: 'streamer',
-        ABS_STREAMER_PASSWORD: 'secret',
+        ABS_STREAMER_API_KEY: 'streamer-key',
         ALLOW_PLAIN_HTTP: 'true',
         ABS_ALLOW_PLAIN_HTTP: 'true',
         PORT: String(await freePort()),
@@ -144,8 +106,7 @@ describe('server process smoke test', () => {
     expect(code).toBe(1)
     const stderr = running.stderr()
     expect(stderr).toContain('ABS_URL is required')
-    expect(stderr).toContain('ABS_STREAMER_USER is required')
-    expect(stderr).toContain('ABS_STREAMER_PASSWORD is required')
+    expect(stderr).toContain('ABS_STREAMER_API_KEY is required')
     expect(stderr).toContain('no TLS configured')
   })
 })

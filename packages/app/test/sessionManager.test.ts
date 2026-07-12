@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient, PlaybackManifest } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
-import type { StreamerSession } from '../src/abs/streamerSession.js'
 import type { Config } from '../src/config/index.js'
 import type { SonosClient } from '../src/sonos/client.js'
 import { SessionManager } from '../src/playback/sessionManager.js'
@@ -34,7 +33,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 // A TrackURI the coordinator reports that belongs to our queue (matches a session media URL). The
 // foreign-content guard compares TrackURI against the session's URLs, so the getPosition mocks must
 // report one of ours or the sync loop treats the speaker as taken over.
-const OUR_TRACK_URI = 'http://abs.invalid/api/items/li_1/file/20?token=streamer-tok'
+const OUR_TRACK_URI = 'http://abs.invalid/api/items/li_1/file/20?token=streamer-key'
 
 function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {}) {
   const abs = {
@@ -56,12 +55,9 @@ function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {
     getPosition: vi.fn().mockResolvedValue({ trackIndex: 1, relTimeSeconds: 50, trackUri: OUR_TRACK_URI }),
     getTransportState: vi.fn().mockResolvedValue('PLAYING'),
   }
-  const streamer = {
-    currentToken: vi.fn().mockReturnValue('streamer-tok'),
-    refresh: vi.fn().mockResolvedValue('refreshed-tok'),
-  }
   const config = {
     absUrl: 'http://abs.invalid',
+    absStreamerApiKey: 'streamer-key',
     seekSettleMs: 0,
     seekToleranceSeconds: 3,
     seekRetries: 2,
@@ -73,10 +69,9 @@ function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {
   const manager = new SessionManager({
     abs: abs as unknown as AbsClient,
     sonos: sonos as unknown as SonosClient,
-    streamer: streamer as unknown as StreamerSession,
     config,
   })
-  return { manager, abs, sonos, streamer }
+  return { manager, abs, sonos }
 }
 
 describe('SessionManager', () => {
@@ -84,14 +79,14 @@ describe('SessionManager', () => {
   beforeEach(() => (ctx = build()))
 
   describe('start', () => {
-    it('builds media URLs with the streamer token and plays the queue', async () => {
+    it('builds media URLs with the streamer API key and plays the queue', async () => {
       await ctx.manager.start('user-tok', 'refresh-tok', 'li_1', 'RINCON_1')
 
       const [speakerId, plan] = ctx.sonos.startPlayback.mock.calls[0] as [string, { tracks: { url: string }[] }]
       expect(speakerId).toBe('RINCON_1')
       expect(plan.tracks.map((track) => track.url)).toEqual([
-        'http://abs.invalid/api/items/li_1/file/10?token=streamer-tok',
-        'http://abs.invalid/api/items/li_1/file/20?token=streamer-tok',
+        'http://abs.invalid/api/items/li_1/file/10?token=streamer-key',
+        'http://abs.invalid/api/items/li_1/file/20?token=streamer-key',
       ])
     })
 
@@ -127,16 +122,6 @@ describe('SessionManager', () => {
       // The first session's progress was written on replacement.
       expect(ctx.abs.writeProgress).toHaveBeenCalledTimes(1)
       expect(ctx.sonos.stop).toHaveBeenCalledTimes(1)
-    })
-
-    it('logs the streamer in lazily when no token is cached yet', async () => {
-      ctx.streamer.currentToken.mockImplementation(() => {
-        throw new Error('not logged in')
-      })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      const [, plan] = ctx.sonos.startPlayback.mock.calls[0] as [string, { tracks: { url: string }[] }]
-      expect(plan.tracks[0]?.url).toContain('token=refreshed-tok')
-      expect(ctx.streamer.refresh).toHaveBeenCalled()
     })
 
     it('restarts a finished book from the beginning instead of seeking to the end', async () => {
