@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import { AddressInfo } from 'node:net'
-import { hmsToSeconds, secondsToHms } from '../src/sonos/time.js'
+import { hmsToSeconds, secondsToHms } from './time.js'
 
 // A stateful UPnP/SOAP double for one Sonos speaker, owned by this repo (docs/testing.md). It is
 // a REAL HTTP server that @svrooij/sonos talks to via InitializeFromDevice(host, port) — point the
@@ -9,8 +9,9 @@ import { hmsToSeconds, secondsToHms } from '../src/sonos/time.js'
 // the SPEC §4 quirks: DIDL-Lite metadata is REQUIRED to enqueue (a bare URL is rejected like the
 // real 714), TrackDuration is always 0:00:00, and RelTime is the authoritative elapsed position.
 //
-// One behavioral definition, so the component tests here and (later) the GHCR image the central
-// E2E repo consumes cannot drift apart.
+// One behavioral definition, consumed two ways: imported in-process by the server's tests, and
+// run standalone (main.ts) inside the container image the central E2E repo consumes — so the
+// component tests and the E2E stack cannot drift apart.
 
 export interface EnqueuedTrack {
   uri: string
@@ -53,12 +54,22 @@ function param(body: string, name: string): string | undefined {
 export interface FakeSonosOptions {
   uuid?: string
   roomName?: string
+  /** Bind address. In-process tests keep the loopback default; the container binds 0.0.0.0. */
+  host?: string
+  /** Fixed listen port; 0 (default) picks an ephemeral one — right for parallel test workers. */
+  port?: number
+  /**
+   * Host advertised in the zone-group Location URL (defaults to the bind address). A
+   * containerized fake binds 0.0.0.0 but must advertise its externally reachable name.
+   */
+  advertiseHost?: string
 }
 
 export class FakeSonos {
   private server: Server | undefined
-  private host = '127.0.0.1'
-  private port = 0
+  private readonly host: string
+  private port: number
+  private readonly advertiseHost: string
   private readonly uuid: string
   private readonly roomName: string
 
@@ -79,6 +90,9 @@ export class FakeSonos {
   constructor(options: FakeSonosOptions = {}) {
     this.uuid = options.uuid ?? 'RINCON_FAKE000001400'
     this.roomName = options.roomName ?? 'Test Room'
+    this.host = options.host ?? '127.0.0.1'
+    this.port = options.port ?? 0
+    this.advertiseHost = options.advertiseHost ?? this.host
   }
 
   get speakerId(): string {
@@ -87,7 +101,7 @@ export class FakeSonos {
 
   async start(): Promise<{ host: string; port: number; seedHost: string }> {
     this.server = createServer((req, res) => this.handle(req, res))
-    await new Promise<void>((resolve) => this.server?.listen(0, this.host, resolve))
+    await new Promise<void>((resolve) => this.server?.listen(this.port, this.host, resolve))
     this.port = (this.server.address() as AddressInfo).port
     return { host: this.host, port: this.port, seedHost: `${this.host}:${this.port}` }
   }
@@ -97,6 +111,21 @@ export class FakeSonos {
     this.server.closeAllConnections()
     await new Promise<void>((resolve) => this.server?.close(() => resolve()))
     this.server = undefined
+  }
+
+  /**
+   * Restore the pristine post-start state (empty queue, stopped transport, hooks cleared) so
+   * tests sharing one instance are order-independent. The HTTP server keeps running.
+   */
+  reset(): void {
+    this.queue = []
+    this.transportUri = ''
+    this.transportState = 'STOPPED'
+    this.currentTrack = 1
+    this.relTimeSeconds = 0
+    this.actions.length = 0
+    this.seekFaultsRemaining = 0
+    this.positionReport = undefined
   }
 
   private handle(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): void {
@@ -207,7 +236,7 @@ export class FakeSonos {
   }
 
   private getZoneGroupState(): string {
-    const location = `http://${this.host}:${this.port}/xml/device_description.xml`
+    const location = `http://${this.advertiseHost}:${this.port}/xml/device_description.xml`
     const inner =
       `<ZoneGroupState><ZoneGroups>` +
       `<ZoneGroup Coordinator="${this.uuid}" ID="${this.uuid}:1">` +

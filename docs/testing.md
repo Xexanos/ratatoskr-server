@@ -61,12 +61,15 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
 - **Fake ABS** — a small HTTP server standing in for Audiobookshelf in component
   and integration tests.
 - **Fake Sonos** — a stateful local-UPnP/SOAP double for a speaker, **owned by
-  this repo**. It runs in **two modes**: imported **in-process** by the component
-  tests here, and built as a **container image** (published to GHCR) that the
-  central E2E repo pulls, pinned by digest. One behavioral definition, so the
-  server's component tests and the E2E stack can never drift apart. It reproduces
-  the real quirks recorded in [`SPEC.md §4`](./SPEC.md): DIDL-Lite metadata is
-  required, `TrackDuration` is unreliable, `RelTime` is authoritative.
+  this repo** as its own workspace package (`packages/fake-sonos`,
+  `@ratatoskr/fake-sonos`). It runs in **two modes**: imported **in-process** by
+  the component and integration tests, and built as a **container image** (the
+  package carries the Dockerfile and standalone entrypoint; publishing to GHCR
+  lands with the E2E work) that the central E2E repo pulls, pinned by digest. One
+  behavioral definition, so the server's component tests and the E2E stack can
+  never drift apart. It reproduces the real quirks recorded in
+  [`SPEC.md §4`](./SPEC.md): DIDL-Lite metadata is required, `TrackDuration` is
+  unreliable, `RelTime` is authoritative.
 
 ## Running
 
@@ -81,31 +84,41 @@ pnpm lint
 The strategy above is the target. Current state:
 
 - **Present:** unit tests; a process-level integration smoke test (config validation and
-  `/health` against a trivial fake ABS, no Docker); and a **live-Audiobookshelf integration
-  test** (`packages/app/test-integration/absLive.integration.test.ts`) that boots a real,
-  digest-pinned Audiobookshelf in a container (Testcontainers), seeds it (root user, a book
-  library with a fixture audiobook, streamer user), spawns the compiled server against it,
-  and drives the ABS-backed `/v1` endpoints (auth login/refresh, library list/detail) with
-  Ajv contract-conformance. It is Docker-gated: local runs with no container runtime skip
-  cleanly, but in CI (or with `ABS_IT_REQUIRE=1`) a missing runtime **fails** the test instead
-  of skipping, so live coverage can never silently disappear while CI stays green. It runs in
-  CI's `build-test` job. 90% coverage thresholds; the `oasdiff`
-  breaking-change gate in CI. (The ABS client is also exercised as a unit test via a stubbed
-  `fetch`; the component-level fake-ABS *HTTP* server described above still lands with the
-  fuller component suite.)
+  `/health` against a trivial fake ABS, no Docker); and **live-Audiobookshelf integration
+  tests** in their own workspace package (`packages/integration-tests`). One real
+  Audiobookshelf container (Testcontainers) is booted and seeded **once per run** in a
+  Vitest `globalSetup` (root user, a book library with a fixture audiobook, forced scan);
+  the connection info reaches the test files via `provide()`/`inject()`. **Isolation on the
+  shared container is per-file ABS users**: root is seeding-only, and every test file
+  creates its own end user + streamer user (progress in ABS is per-user) and spawns its own
+  compiled server. `absLive.integration.test.ts` drives the ABS-backed `/v1` endpoints
+  (auth login/refresh, library list/detail) with Ajv contract-conformance. **Version
+  coverage lives in CI:** the `integration` job is a two-leg blocking matrix — the pinned
+  2.26.0 minimum and the deliberately **unpinned `:latest`** tag as a drift canary for new
+  ABS releases — selected via `ABS_IT_IMAGE`; locally the default is the pinned current
+  digest. The suite is Docker-gated in `globalSetup`: local runs with no container runtime
+  skip the live files cleanly (the smoke test still runs), but in CI (or with
+  `ABS_IT_REQUIRE=1`) a missing runtime **fails** the run instead of skipping, so live
+  coverage can never silently disappear while CI stays green. 90% coverage thresholds; the
+  `oasdiff` breaking-change gate in CI. (The ABS client is also exercised as a unit test via
+  a stubbed `fetch`; the component-level fake-ABS *HTTP* server described above still lands
+  with the fuller component suite.)
 - **Phase 4, playback slices 1–2 (start / resume / stop / pause / resume / seek + sync loop) —
-  present:** the **fake Sonos** UPnP/SOAP double (`packages/app/test-support/fakeSonos.ts`), a
+  present:** the **fake Sonos** UPnP/SOAP double (`packages/fake-sonos`), a
   **Sonos-control component test** driving the real `SonosClient` against it
   (`test/sonosPlayback.test.ts`, asserting DIDL-Lite is required, `RelTime` trusted,
   `TrackDuration` ignored — SPEC §4, plus pause/resume), **session-manager unit tests**
   (`test/sessionManager.test.ts`) covering the sync loop's write-back threshold, finished
   detection, and device-side stop/pause reactions with fake timers, and a **playback
-  session-flow integration test** (`test-integration/sessionFlow.integration.test.ts`) that
-  drives `PUT/GET/POST(pause|resume|seek)/DELETE /v1/sessions/current` through the compiled
-  server against a real ABS container **and** the fake Sonos — starting a book, resuming from
+  session-flow integration test** (`packages/integration-tests/test/sessionFlow.integration.test.ts`)
+  that drives `PUT/GET/POST(pause|resume|seek)/DELETE /v1/sessions/current` through the compiled
+  server against the shared live ABS **and** the fake Sonos — starting a book, resuming from
   the ABS position, pausing/resuming/seeking, observing the background sync loop write a
-  **device-side** pause's position back to ABS, and writing progress back on stop. The double
-  runs in-process here via `SONOS_SEED_HOST=host:port` + `SONOS_DISABLE_EVENTS=1`.
+  **device-side** pause's position back to ABS, and writing progress back on stop. Its tests
+  run as one **session-lifecycle sequence** (each builds on the previous test's state); the
+  cross-file isolation on the shared container comes from this file's own ABS users, not from
+  per-test resets. The double runs in-process here via `SONOS_SEED_HOST=host:port` +
+  `SONOS_DISABLE_EVENTS=1`.
 - **Lands with the later playback slice:** the streamer-token transport-URI re-set on expiry
   and the SPEC §8 rotation handover.
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the

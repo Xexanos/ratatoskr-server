@@ -1,0 +1,20 @@
+{
+  "name": "@ratatoskr/fake-sonos",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "description": "Stateful UPnP/SOAP double for one Sonos speaker (SPEC section 4 quirks). Imported in-process by the server's tests and built as the standalone container image the central E2E stack consumes — one behavioral definition, so the two cannot drift apart.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^6.0.3"
+  }
+}

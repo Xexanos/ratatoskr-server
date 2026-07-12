@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { StartedTestContainer } from 'testcontainers'
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
+import { FakeSonos } from '@ratatoskr/fake-sonos'
 import {
   assertServerBuilt,
   cleanEnv,
@@ -10,29 +10,29 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import {
-  ABS_CURRENT,
-  DOCKER_READY,
-  REQUIRE_LIVE,
-  ROOT_PASS,
-  ROOT_USER,
-  STREAMER_PASS,
-  STREAMER_USER,
-  poll,
-  startSeededAbs,
-} from './absSeed.js'
-import { FakeSonos } from '../test-support/fakeSonos.js'
+import { createAbsUser, poll } from './absSeed.js'
 
-// End-to-end playback slice-1 flow (SPEC §4/§5): the compiled server against a REAL Audiobookshelf
-// (Testcontainers) and the REAL fake-Sonos UPnP/SOAP double, driving PUT/GET/DELETE
-// /v1/sessions/current — start resumes from the ABS position, and stop writes progress back.
+// End-to-end playback flow (SPEC §4/§5): the compiled server against the shared live Audiobookshelf
+// (globalSetup) and the REAL fake-Sonos UPnP/SOAP double, driving the full session lifecycle —
+// start (resume from the ABS position), pause/resume, seek, the background sync loop noticing a
+// device-side change, and stop writing the reached position back.
+//
+// These tests are a deliberate SEQUENCE: they model one session's lifecycle, so each builds on the
+// previous test's state (the stop test asserts the position the device-pause test left behind).
+// Cross-FILE isolation on the shared container comes from this file's own ABS users (progress in
+// ABS is per-user), not from per-test resets.
 
-const run = DOCKER_READY || REQUIRE_LIVE ? describe : describe.skip
+const abs = inject('absLive')
 
 const SPEAKER_UUID = 'RINCON_FAKE000001400'
 
-run('playback session flow (real ABS + fake Sonos)', () => {
-  let container: StartedTestContainer | undefined
+// This file's own ABS users (created in beforeAll). Root is seeding-only.
+const SESSION_USER = 'it-session-user'
+const SESSION_PASS = 'it-session-pass'
+const SESSION_STREAMER = 'it-session-streamer'
+const SESSION_STREAMER_PASS = 'it-session-streamer-pass'
+
+describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', () => {
   let fake: FakeSonos | undefined
   let server: SpawnedServer | undefined
   let base = ''
@@ -52,18 +52,11 @@ run('playback session flow (real ABS + fake Sonos)', () => {
 
   beforeAll(async () => {
     assertServerBuilt()
-    if (!DOCKER_READY) throw new Error('Docker is required for the session-flow test (CI/ABS_IT_REQUIRE)')
+    const { absBase, itemId: seededItemId, adminToken } = abs!
+    itemId = seededItemId
 
-    const seeded = await startSeededAbs(ABS_CURRENT.image)
-    container = seeded.container
-    itemId = seeded.itemId
-
-    // Pre-seed the root user's progress so start() has a non-zero position to resume from.
-    await fetch(`${seeded.absBase}/api/me/progress/${itemId}`, {
-      method: 'PATCH',
-      headers: { authorization: `Bearer ${seeded.adminToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ currentTime: 1, isFinished: false }),
-    })
+    await createAbsUser(absBase, adminToken, SESSION_USER, SESSION_PASS)
+    await createAbsUser(absBase, adminToken, SESSION_STREAMER, SESSION_STREAMER_PASS)
 
     fake = new FakeSonos({ uuid: SPEAKER_UUID, roomName: 'Test Room' })
     const sonosInfo = await fake.start()
@@ -72,16 +65,16 @@ run('playback session flow (real ABS + fake Sonos)', () => {
     base = `http://127.0.0.1:${port}`
     server = spawnServer(
       cleanEnv({
-        ABS_URL: seeded.absBase,
+        ABS_URL: absBase,
         ABS_ALLOW_PLAIN_HTTP: 'true',
-        ABS_STREAMER_USER: STREAMER_USER,
-        ABS_STREAMER_PASSWORD: STREAMER_PASS,
+        ABS_STREAMER_USER: SESSION_STREAMER,
+        ABS_STREAMER_PASSWORD: SESSION_STREAMER_PASS,
         ALLOW_PLAIN_HTTP: 'true',
         SONOS_SEED_HOST: sonosInfo.seedHost,
         SONOS_DISABLE_EVENTS: '1',
         SEEK_SETTLE_MS: '10',
         // Tight loop so the continuous sync-loop assertions observe a write within seconds, and a
-        // low threshold so a move inside the 2s fixture still crosses it.
+        // low threshold so even a small position move still crosses it.
         POLL_INTERVAL_SECONDS: '1',
         PROGRESS_WRITE_THRESHOLD_SECONDS: '1',
         PORT: String(port),
@@ -89,15 +82,29 @@ run('playback session flow (real ABS + fake Sonos)', () => {
     )
     await waitUntilReady(server, port)
 
-    const loginRes = await api('POST', '/v1/auth/login', { username: ROOT_USER, password: ROOT_PASS }, '')
+    // The server proxies ABS's own tokens, so this accessToken is also a valid ABS bearer.
+    const loginRes = await api('POST', '/v1/auth/login', { username: SESSION_USER, password: SESSION_PASS }, '')
     if (!loginRes.ok) throw new Error(`server login failed: ${loginRes.status} ${await loginRes.text()}`)
     userToken = ((await loginRes.json()) as { accessToken: string }).accessToken
+
+    // Pre-seed this user's progress so start() has a non-zero position to resume from. The user is
+    // freshly created, so this creates a fresh record that stores exactly what it is given.
+    const patchRes = await fetch(`${absBase}/api/me/progress/${itemId}`, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${userToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ currentTime: 1, isFinished: false }),
+    })
+    if (!patchRes.ok) throw new Error(`progress seed failed: ${patchRes.status} ${await patchRes.text()}`)
   })
 
   afterAll(async () => {
-    if (server) await stopServer(server)
+    // Best effort: don't leave a dangling playback session behind if a test above failed mid-chain.
+    if (server) {
+      await api('DELETE', '/v1/sessions/current').catch(() => undefined)
+      await stopServer(server)
+    }
     await fake?.stop()
-    await container?.stop()
+    // The shared ABS container is stopped by globalSetup, not here.
   })
 
   it('starts playback, resuming from the ABS position, with a DIDL queue on the speaker', async () => {

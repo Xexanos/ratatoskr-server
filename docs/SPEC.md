@@ -350,7 +350,7 @@ logic must be pure and I/O-free. This is enforced architecturally, not by conven
 position logic lives in its own workspace package with zero runtime dependencies, so I/O
 cannot leak into it.
 
-The repository is an npm/pnpm workspace with three packages:
+The repository is an npm/pnpm workspace with five packages:
 
 ```
 ratatoskr-server/
@@ -366,14 +366,21 @@ ratatoskr-server/
 │   │   └── src/generated/     #   request/response types + runtime JSON schemas ($ref-rewritten),
 │   │                          #   emitted by the generate step; never hand-edited (section 11)
 │   │
-│   └── app/                   # @ratatoskr/app — the service (all I/O); depends on the other two
-│       ├── config/             #   load and validate environment variables at startup
-│       ├── abs/                #   Audiobookshelf client: library projection, progress read/write
-│       ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
-│       ├── playback/           #   session manager (the single in-memory session) + the sync loop
-│       ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount,
-│       │                       #   and mapping between the domain and the contract types
-│       └── main.ts             #   startup wiring
+│   ├── app/                   # @ratatoskr/app — the service (all I/O); depends on the two above
+│   │   ├── config/             #   load and validate environment variables at startup
+│   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
+│   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
+│   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
+│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount,
+│   │   │                       #   and mapping between the domain and the contract types
+│   │   └── main.ts             #   startup wiring
+│   │
+│   ├── fake-sonos/           # @ratatoskr/fake-sonos — the UPnP/SOAP speaker double (test-only):
+│   │                          #   imported in-process by tests, and built into the container
+│   │                          #   image the central E2E repo consumes (docs/testing.md)
+│   │
+│   └── integration-tests/    # @ratatoskr/integration-tests — process-level tests that spawn
+│                              #   the compiled app and drive it over real HTTP (docs/testing.md)
 ```
 
 The purity of `@ratatoskr/position` is enforced by it having no runtime dependencies at
@@ -476,7 +483,7 @@ own change with its own tests.
 - **Integration test against a real Audiobookshelf.** *(Done.)* The `abs/` client was
   previously covered only against `fetch` stubs, so it verified our own parsing but not that
   the request/response shapes match a live ABS. Added a Docker-gated integration test
-  (`packages/app/test-integration/absLive.integration.test.ts`) that boots a real,
+  (now `packages/integration-tests/test/absLive.integration.test.ts`) that boots a real,
   digest-pinned Audiobookshelf in a container, seeds it, spawns the compiled server against
   it, and drives login/refresh and the library projection over `/v1`. It skips cleanly where
   no container runtime is available and runs in CI. This closed the phase-3a open item — a

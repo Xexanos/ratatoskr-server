@@ -1,5 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { StartedTestContainer } from 'testcontainers'
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import {
   assertServerBuilt,
   cleanEnv,
@@ -10,36 +9,28 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import {
-  ABS_CURRENT,
-  ABS_MIN,
-  DOCKER_READY,
-  REQUIRE_LIVE,
-  ROOT_PASS,
-  ROOT_USER,
-  STREAMER_PASS,
-  STREAMER_USER,
-  seedFetch,
-  startSeededAbs,
-} from './absSeed.js'
+import { createAbsUser, seedFetch } from './absSeed.js'
 
 // Live-Audiobookshelf integration (SPEC section 15). The abs/ client is otherwise only exercised
 // against fetch stubs, which verify our own parsing but not that our request/response shapes match
-// a real ABS. Here we boot a real, pinned Audiobookshelf in a container, seed it (via the shared
-// startSeededAbs harness), spawn the compiled server against it, and drive the ABS-backed /v1
-// endpoints end to end. Complements smoke.integration.test.ts (no Docker); does not replace it.
+// a real ABS. The shared container is booted + seeded once per run in globalSetup; here we create
+// this file's own users, spawn the compiled server against the live ABS, and drive the ABS-backed
+// /v1 endpoints end to end. Complements smoke.integration.test.ts (no Docker); does not replace it.
+//
+// Version coverage lives in CI: two parallel jobs pass ABS_IT_IMAGE (pinned 2.26.0 minimum and the
+// unpinned :latest drift canary); locally the default is the pinned current digest (absSeed.ts).
 
-// Run against both ends of the supported range (README: >= 2.26) so a request/response-shape drift
-// is caught at either boundary. Override with ABS_IT_IMAGE to run a single image.
-const ABS_VERSIONS = process.env.ABS_IT_IMAGE
-  ? [{ label: process.env.ABS_IT_IMAGE, image: process.env.ABS_IT_IMAGE }]
-  : [ABS_MIN, ABS_CURRENT]
+const abs = inject('absLive')
 
-// Skip cleanly when there is no runtime and it is not required; otherwise run once per version.
-const liveSuite = DOCKER_READY || REQUIRE_LIVE ? describe.each(ABS_VERSIONS) : describe.skip.each(ABS_VERSIONS)
+// This file's own ABS users (created in beforeAll). Root is seeding-only; per-file users keep the
+// progress assertions below isolated from whatever other files do on the shared container.
+const LIVE_USER = 'it-abslive-user'
+const LIVE_PASS = 'it-abslive-pass'
+const LIVE_STREAMER = 'it-abslive-streamer'
+const LIVE_STREAMER_PASS = 'it-abslive-streamer-pass'
 
-liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
-  let container: StartedTestContainer | undefined
+// Skips only when there is no runtime and it is not required — globalSetup already threw otherwise.
+describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabel ?? 'skipped: no Docker'}]`, () => {
   let server: SpawnedServer | undefined
   let serverBase = ''
   let seededItemId = ''
@@ -48,15 +39,11 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
 
   beforeAll(async () => {
     assertServerBuilt()
-    // Reached only when the suite was not skipped; if we're here without a runtime, REQUIRE_LIVE
-    // forced the run — fail loud rather than let live coverage vanish.
-    if (!DOCKER_READY) {
-      throw new Error('Docker is required for the live-ABS integration test (CI or ABS_IT_REQUIRE=1).')
-    }
+    const { absBase, itemId, adminToken } = abs!
+    seededItemId = itemId
 
-    const seeded = await startSeededAbs(image)
-    container = seeded.container
-    seededItemId = seeded.itemId
+    await createAbsUser(absBase, adminToken, LIVE_USER, LIVE_PASS)
+    await createAbsUser(absBase, adminToken, LIVE_STREAMER, LIVE_STREAMER_PASS)
 
     // Spawn the compiled server against the live ABS. (Sonos stays unreachable on the test network,
     // so /health is degraded — irrelevant here, the server still boots.)
@@ -64,10 +51,10 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
     serverBase = `http://127.0.0.1:${port}`
     server = spawnServer(
       cleanEnv({
-        ABS_URL: seeded.absBase,
+        ABS_URL: absBase,
         ABS_ALLOW_PLAIN_HTTP: 'true',
-        ABS_STREAMER_USER: STREAMER_USER,
-        ABS_STREAMER_PASSWORD: STREAMER_PASS,
+        ABS_STREAMER_USER: LIVE_STREAMER,
+        ABS_STREAMER_PASSWORD: LIVE_STREAMER_PASS,
         ALLOW_PLAIN_HTTP: 'true',
         PORT: String(port),
       }),
@@ -79,7 +66,7 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
     const loginRes = await seedFetch('server /v1/auth/login', `${serverBase}/v1/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: ROOT_USER, password: ROOT_PASS }),
+      body: JSON.stringify({ username: LIVE_USER, password: LIVE_PASS }),
     })
     if (!loginRes.ok) throw new Error(`server login failed: ${loginRes.status} ${await loginRes.text()}`)
     const tokens = (await loginRes.json()) as { accessToken: string; refreshToken: string }
@@ -87,22 +74,22 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
   })
 
   afterAll(async () => {
+    // The shared ABS container is stopped by globalSetup, not here.
     if (server) await stopServer(server)
-    await container?.stop()
   })
 
   it('POST /v1/auth/login returns a contract-valid token pair from the real ABS', async () => {
     const res = await fetch(`${serverBase}/v1/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: ROOT_USER, password: ROOT_PASS }),
+      body: JSON.stringify({ username: LIVE_USER, password: LIVE_PASS }),
     })
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 
     expect(typeof body.accessToken).toBe('string')
     expect(typeof body.refreshToken).toBe('string')
-    expect(body.user).toMatchObject({ username: ROOT_USER })
+    expect(body.user).toMatchObject({ username: LIVE_USER })
 
     const validate = contractValidator('AuthTokens')
     expect(validate(body)).toBe(true)
@@ -123,7 +110,7 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
     expect(validate.errors).toBeNull()
     expect(typeof body.accessToken).toBe('string')
     expect(typeof body.refreshToken).toBe('string')
-    expect(body.user).toMatchObject({ username: ROOT_USER })
+    expect(body.user).toMatchObject({ username: LIVE_USER })
     // Note: whether ABS *rotates* the refresh token on use is version-dependent (2.26.0 returns the
     // same token; newer versions rotate), so we assert the contract shape — a usable pair — rather
     // than rotation. The rotation-handover in SPEC section 8 degrades safely either way.
@@ -160,7 +147,8 @@ liveSuite('live Audiobookshelf integration [$label]', ({ image }) => {
     expect(validate.errors).toBeNull()
 
     expect(body.id).toBe(seededItemId)
-    // Nothing has been listened to yet: getProgress maps ABS's 404 to a zeroed Progress.
+    // This file's user has never listened to anything: getProgress maps ABS's 404 to a zeroed
+    // Progress. Holds on the shared container BECAUSE the user is exclusive to this file.
     expect(body.progress).toEqual({ positionSeconds: 0, isFinished: false })
   })
 })

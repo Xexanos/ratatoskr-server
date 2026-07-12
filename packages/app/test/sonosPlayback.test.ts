@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { planPlayback, planSeek, type PlaybackPlan, type SeekTuning } from '@ratatoskr/position'
 import { SonosClient } from '../src/sonos/client.js'
 import { SonosUpstreamError } from '../src/sonos/errors.js'
-import { FakeSonos } from '../test-support/fakeSonos.js'
+import { FakeSonos } from '@ratatoskr/fake-sonos'
 
 // Sonos-control component test: the real SonosClient driving the real UPnP/SOAP double over HTTP
 // (SPEC §4 / docs/testing.md). SONOS_DISABLE_EVENTS makes @svrooij/sonos skip UPnP eventing so the
