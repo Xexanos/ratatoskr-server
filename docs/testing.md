@@ -93,16 +93,20 @@ The strategy above is the target. Current state:
   breaking-change gate in CI. (The ABS client is also exercised as a unit test via a stubbed
   `fetch`; the component-level fake-ABS *HTTP* server described above still lands with the
   fuller component suite.)
-- **Phase 4, playback slice 1 (start / resume / stop) — present:** the **fake Sonos**
-  UPnP/SOAP double (`packages/app/test-support/fakeSonos.ts`), a **Sonos-control component
-  test** driving the real `SonosClient` against it (`test/sonosPlayback.test.ts`, asserting
-  DIDL-Lite is required, `RelTime` trusted, `TrackDuration` ignored — SPEC §4), and a
-  **playback session-flow integration test** (`test-integration/sessionFlow.integration.test.ts`)
-  that drives `PUT/GET/DELETE /v1/sessions/current` through the compiled server against a real
-  ABS container **and** the fake Sonos — starting a book, resuming from the ABS position, and
-  writing progress back on stop. The double runs in-process here via `SONOS_SEED_HOST=host:port`
-  + `SONOS_DISABLE_EVENTS=1`.
-- **Lands with the later playback slices:** the continuous **sync loop** (poll → write-back)
-  and the pause/resume/seek controls, then the rotation handover.
+- **Phase 4, playback slices 1–2 (start / resume / stop / pause / resume / seek + sync loop) —
+  present:** the **fake Sonos** UPnP/SOAP double (`packages/app/test-support/fakeSonos.ts`), a
+  **Sonos-control component test** driving the real `SonosClient` against it
+  (`test/sonosPlayback.test.ts`, asserting DIDL-Lite is required, `RelTime` trusted,
+  `TrackDuration` ignored — SPEC §4, plus pause/resume), **session-manager unit tests**
+  (`test/sessionManager.test.ts`) covering the sync loop's write-back threshold, finished
+  detection, and device-side stop/pause reactions with fake timers, and a **playback
+  session-flow integration test** (`test-integration/sessionFlow.integration.test.ts`) that
+  drives `PUT/GET/POST(pause|resume|seek)/DELETE /v1/sessions/current` through the compiled
+  server against a real ABS container **and** the fake Sonos — starting a book, resuming from
+  the ABS position, pausing/resuming/seeking, observing the background sync loop write a
+  **device-side** pause's position back to ABS, and writing progress back on stop. The double
+  runs in-process here via `SONOS_SEED_HOST=host:port` + `SONOS_DISABLE_EVENTS=1`.
+- **Lands with the later playback slice:** the streamer-token transport-URI re-set on expiry
+  and the SPEC §8 rotation handover.
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the
   central E2E repo to consume.

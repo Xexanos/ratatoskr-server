@@ -18,6 +18,7 @@ import {
   ROOT_USER,
   STREAMER_PASS,
   STREAMER_USER,
+  poll,
   startSeededAbs,
 } from './absSeed.js'
 import { FakeSonos } from '../test-support/fakeSonos.js'
@@ -79,6 +80,10 @@ run('playback session flow (real ABS + fake Sonos)', () => {
         SONOS_SEED_HOST: sonosInfo.seedHost,
         SONOS_DISABLE_EVENTS: '1',
         SEEK_SETTLE_MS: '10',
+        // Tight loop so the continuous sync-loop assertions observe a write within seconds, and a
+        // low threshold so a move inside the 2s fixture still crosses it.
+        POLL_INTERVAL_SECONDS: '1',
+        PROGRESS_WRITE_THRESHOLD_SECONDS: '1',
         PORT: String(port),
       }),
     )
@@ -128,14 +133,66 @@ run('playback session flow (real ABS + fake Sonos)', () => {
     expect(res.status).toBe(401)
   })
 
+  // The reached position ABS currently has stored for the book (via the read projection).
+  async function storedProgress(): Promise<{ positionSeconds: number; isFinished: boolean }> {
+    const res = await api('GET', `/v1/library/items/${itemId}`)
+    const item = (await res.json()) as { progress?: { positionSeconds?: number; isFinished?: boolean } }
+    return { positionSeconds: item.progress?.positionSeconds ?? 0, isFinished: item.progress?.isFinished ?? false }
+  }
+
+  it('pauses on the coordinator and reflects the paused state', async () => {
+    const res = await api('POST', '/v1/sessions/current/pause')
+    expect(res.status).toBe(200)
+    const session = (await res.json()) as Record<string, unknown>
+    expect(contractValidator('Session')(session)).toBe(true)
+    expect(session.state).toBe('paused')
+    expect(fake?.transportState).toBe('PAUSED_PLAYBACK')
+  })
+
+  it('resumes on the coordinator and reflects the playing state', async () => {
+    const res = await api('POST', '/v1/sessions/current/resume')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Record<string, unknown>).state).toBe('playing')
+    expect(fake?.transportState).toBe('PLAYING')
+  })
+
+  it('seeks to a mid-book target and writes the (unfinished) position back to ABS', async () => {
+    const res = await api('POST', '/v1/sessions/current/seek', { positionSeconds: 30 })
+    expect(res.status).toBe(200)
+    const session = (await res.json()) as Record<string, unknown>
+    expect(session.positionSeconds).toBe(30)
+    // The fake moved into the first track at 30s, and ABS now stores 30 / not-finished.
+    expect(fake?.currentTrack).toBe(1)
+    expect(fake?.relTimeSeconds).toBe(30)
+    expect(await storedProgress()).toEqual({ positionSeconds: 30, isFinished: false })
+  })
+
+  it('the sync loop notices a device-side pause and writes the frozen position back', async () => {
+    // Simulate the listener pressing pause on the speaker itself (Sonos app / hardware button): the
+    // transport freezes at 40s. We never called our pause endpoint — the background loop must notice.
+    if (!fake) throw new Error('fake not started')
+    fake.relTimeSeconds = 40
+    fake.transportState = 'PAUSED_PLAYBACK'
+
+    // Within a poll interval the loop writes the moved position (30 -> 40) back to ABS.
+    await poll(
+      'the sync loop to write the device-side position back',
+      async () => (await storedProgress()).positionSeconds === 40,
+      8_000,
+    )
+
+    // And an explicit GET reflects the device-side pause as paused.
+    const res = await api('GET', '/v1/sessions/current')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Record<string, unknown>).state).toBe('paused')
+  })
+
   it('stops with 204 and writes the reached position back to ABS', async () => {
     const res = await api('DELETE', '/v1/sessions/current')
     expect(res.status).toBe(204)
 
-    // Progress was written back: the tiny fixture is within end-tolerance, so it is marked finished.
-    const itemRes = await api('GET', `/v1/library/items/${itemId}`)
-    const item = (await itemRes.json()) as { progress?: { isFinished?: boolean } }
-    expect(item.progress?.isFinished).toBe(true)
+    // The reached position (40s, mid-book) is persisted, not marked finished.
+    expect(await storedProgress()).toEqual({ positionSeconds: 40, isFinished: false })
 
     // And the session is gone.
     expect((await api('GET', '/v1/sessions/current')).status).toBe(404)

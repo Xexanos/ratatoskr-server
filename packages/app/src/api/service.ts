@@ -14,6 +14,7 @@ type LoginRequest = components['schemas']['LoginRequest']
 type RefreshRequest = components['schemas']['RefreshRequest']
 type Session = components['schemas']['Session']
 type StartSessionRequest = components['schemas']['StartSessionRequest']
+type SeekRequest = components['schemas']['SeekRequest']
 
 async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
   // probe() verifies the host is genuinely Audiobookshelf (GET /ping) rather than accepting any
@@ -109,5 +110,23 @@ export class ApiService {
     await this.abs.validateToken(request.absToken as string)
     await this.sessions.stop()
     await reply.code(204).send()
+  }
+
+  // pause/resume/seek validate the bearer upstream first (like getCurrentSession/stopSession), then
+  // command Sonos and write the reached position back to ABS (SPEC section 5).
+  async pauseSession(request: FastifyRequest): Promise<Session> {
+    await this.abs.validateToken(request.absToken as string)
+    return this.sessions.pause()
+  }
+
+  async resumeSession(request: FastifyRequest): Promise<Session> {
+    await this.abs.validateToken(request.absToken as string)
+    return this.sessions.resume()
+  }
+
+  async seekSession(request: FastifyRequest): Promise<Session> {
+    await this.abs.validateToken(request.absToken as string)
+    const { positionSeconds } = request.body as SeekRequest
+    return this.sessions.seek(positionSeconds)
   }
 }

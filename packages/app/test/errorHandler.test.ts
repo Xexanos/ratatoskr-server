@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { InvalidCursorError } from '../src/abs/cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from '../src/abs/errors.js'
 import { MissingBearerError } from '../src/api/bearer.js'
-import { mapError } from '../src/api/errorHandler.js'
+import { mapError, NotImplementedError } from '../src/api/errorHandler.js'
 import { SonosUpstreamError } from '../src/sonos/errors.js'
 
 describe('mapError', () => {
@@ -13,6 +13,8 @@ describe('mapError', () => {
     expect(mapError(new InvalidCursorError())).toMatchObject({ statusCode: 400, code: 'bad_request' })
     expect(mapError(new AbsUpstreamError())).toMatchObject({ statusCode: 502, code: 'upstream_error' })
     expect(mapError(new SonosUpstreamError())).toMatchObject({ statusCode: 502, code: 'upstream_error' })
+    // The fallback for a contract operation with no handler wired (glue's notImplemented stub).
+    expect(mapError(new NotImplementedError())).toMatchObject({ statusCode: 404, code: 'not_found' })
   })
 
   it('distinguishes the 502 message by dependency', () => {
