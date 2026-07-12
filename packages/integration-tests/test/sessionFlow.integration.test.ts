@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { FakeSonos } from '@ratatoskr/fake-sonos'
 import {
   assertServerBuilt,
@@ -10,15 +10,17 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import { createAbsUser } from './absSeed.js'
+import { createAbsUser, poll } from './absSeed.js'
 
-// End-to-end playback slice-1 flow (SPEC §4/§5): the compiled server against the shared live
-// Audiobookshelf (globalSetup) and the REAL fake-Sonos UPnP/SOAP double, driving PUT/GET/DELETE
-// /v1/sessions/current — start resumes from the ABS position, and stop writes progress back.
+// End-to-end playback flow (SPEC §4/§5): the compiled server against the shared live Audiobookshelf
+// (globalSetup) and the REAL fake-Sonos UPnP/SOAP double, driving the full session lifecycle —
+// start (resume from the ABS position), pause/resume, seek, the background sync loop noticing a
+// device-side change, and stop writing the reached position back.
 //
-// Isolation: this file has its own ABS users (progress is per-user, so nothing here can leak into
-// other files on the shared container), and each test is order-independent — beforeEach clears any
-// session, re-seeds the user's progress to 1s, and resets the fake speaker.
+// These tests are a deliberate SEQUENCE: they model one session's lifecycle, so each builds on the
+// previous test's state (the stop test asserts the position the device-pause test left behind).
+// Cross-FILE isolation on the shared container comes from this file's own ABS users (progress in
+// ABS is per-user), not from per-test resets.
 
 const abs = inject('absLive')
 
@@ -34,10 +36,8 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   let fake: FakeSonos | undefined
   let server: SpawnedServer | undefined
   let base = ''
-  let absBase = ''
   let itemId = ''
   let userToken = ''
-  let durationSeconds = 0
 
   async function api(method: string, path: string, body?: unknown, token = userToken): Promise<Response> {
     return fetch(`${base}${path}`, {
@@ -50,20 +50,13 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     })
   }
 
-  // Start playback of the seeded book — each test that needs a running session calls this itself
-  // instead of relying on an earlier test having started one.
-  async function startSession(): Promise<void> {
-    const res = await api('PUT', '/v1/sessions/current', { itemId, speakerId: SPEAKER_UUID })
-    if (res.status !== 200) throw new Error(`startSession failed: ${res.status} ${await res.text()}`)
-  }
-
   beforeAll(async () => {
     assertServerBuilt()
-    absBase = abs!.absBase
-    itemId = abs!.itemId
+    const { absBase, itemId: seededItemId, adminToken } = abs!
+    itemId = seededItemId
 
-    await createAbsUser(absBase, abs!.adminToken, SESSION_USER, SESSION_PASS)
-    await createAbsUser(absBase, abs!.adminToken, SESSION_STREAMER, SESSION_STREAMER_PASS)
+    await createAbsUser(absBase, adminToken, SESSION_USER, SESSION_PASS)
+    await createAbsUser(absBase, adminToken, SESSION_STREAMER, SESSION_STREAMER_PASS)
 
     fake = new FakeSonos({ uuid: SPEAKER_UUID, roomName: 'Test Room' })
     const sonosInfo = await fake.start()
@@ -80,59 +73,32 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
         SONOS_SEED_HOST: sonosInfo.seedHost,
         SONOS_DISABLE_EVENTS: '1',
         SEEK_SETTLE_MS: '10',
+        // Tight loop so the continuous sync-loop assertions observe a write within seconds, and a
+        // low threshold so even a small position move still crosses it.
+        POLL_INTERVAL_SECONDS: '1',
+        PROGRESS_WRITE_THRESHOLD_SECONDS: '1',
         PORT: String(port),
       }),
     )
     await waitUntilReady(server, port)
 
+    // The server proxies ABS's own tokens, so this accessToken is also a valid ABS bearer.
     const loginRes = await api('POST', '/v1/auth/login', { username: SESSION_USER, password: SESSION_PASS }, '')
     if (!loginRes.ok) throw new Error(`server login failed: ${loginRes.status} ${await loginRes.text()}`)
-    // The server proxies ABS's own tokens, so this accessToken is also a valid ABS bearer — used
-    // by the beforeEach progress reset directly against ABS.
     userToken = ((await loginRes.json()) as { accessToken: string }).accessToken
 
-    const itemRes = await api('GET', `/v1/library/items/${itemId}`)
-    if (!itemRes.ok) throw new Error(`item detail failed: ${itemRes.status} ${await itemRes.text()}`)
-    durationSeconds = ((await itemRes.json()) as { durationSeconds: number }).durationSeconds
-  })
-
-  // Order-independence: every test starts from the same state — no active session, this user's
-  // progress at 1s (a non-zero resume position), a pristine speaker.
-  beforeEach(async () => {
-    // 1) Clear any leftover session FIRST — its stop handler writes progress on teardown.
-    await api('DELETE', '/v1/sessions/current') // 204 or (no session) 404, both fine
-    // 2) DELETE this user's progress record, then seed a fresh one. A PATCH cannot do this reset:
-    //    verified against a live ABS, a finished record refuses isFinished:false and instead
-    //    rewinds currentTime to 0 (the tiny-fixture end-tolerance in test 4 marks the book
-    //    finished, so later tests would resume from 0). A freshly created record stores exactly
-    //    what it is given.
-    const authHeader = { authorization: `Bearer ${userToken}` }
-    const meRes = await fetch(`${absBase}/api/me`, { headers: authHeader })
-    if (!meRes.ok) throw new Error(`GET /api/me failed: ${meRes.status} ${await meRes.text()}`)
-    const me = (await meRes.json()) as { mediaProgress?: { id?: string; libraryItemId?: string }[] }
-    const record = me.mediaProgress?.find((p) => p.libraryItemId === itemId)
-    if (record?.id) {
-      const delRes = await fetch(`${absBase}/api/me/progress/${record.id}`, { method: 'DELETE', headers: authHeader })
-      if (!delRes.ok) throw new Error(`progress record delete failed: ${delRes.status} ${await delRes.text()}`)
-    }
-    // Full field set on purpose: ABS stores only what it is given (see abs/client.ts writeProgress).
+    // Pre-seed this user's progress so start() has a non-zero position to resume from. The user is
+    // freshly created, so this creates a fresh record that stores exactly what it is given.
     const patchRes = await fetch(`${absBase}/api/me/progress/${itemId}`, {
       method: 'PATCH',
-      headers: { ...authHeader, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        currentTime: 1,
-        duration: durationSeconds,
-        progress: 1 / durationSeconds,
-        isFinished: false,
-      }),
+      headers: { authorization: `Bearer ${userToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ currentTime: 1, isFinished: false }),
     })
-    if (!patchRes.ok) throw new Error(`progress reset failed: ${patchRes.status} ${await patchRes.text()}`)
-    // 3) Pristine speaker state.
-    fake!.reset()
+    if (!patchRes.ok) throw new Error(`progress seed failed: ${patchRes.status} ${await patchRes.text()}`)
   })
 
   afterAll(async () => {
-    // Best effort: don't leave a dangling playback session behind on the shared container.
+    // Best effort: don't leave a dangling playback session behind if a test above failed mid-chain.
     if (server) {
       await api('DELETE', '/v1/sessions/current').catch(() => undefined)
       await stopServer(server)
@@ -162,7 +128,6 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   })
 
   it('reports the active session with a live position', async () => {
-    await startSession()
     const res = await api('GET', '/v1/sessions/current')
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
@@ -175,15 +140,66 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     expect(res.status).toBe(401)
   })
 
+  // The reached position ABS currently has stored for the book (via the read projection).
+  async function storedProgress(): Promise<{ positionSeconds: number; isFinished: boolean }> {
+    const res = await api('GET', `/v1/library/items/${itemId}`)
+    const item = (await res.json()) as { progress?: { positionSeconds?: number; isFinished?: boolean } }
+    return { positionSeconds: item.progress?.positionSeconds ?? 0, isFinished: item.progress?.isFinished ?? false }
+  }
+
+  it('pauses on the coordinator and reflects the paused state', async () => {
+    const res = await api('POST', '/v1/sessions/current/pause')
+    expect(res.status).toBe(200)
+    const session = (await res.json()) as Record<string, unknown>
+    expect(contractValidator('Session')(session)).toBe(true)
+    expect(session.state).toBe('paused')
+    expect(fake?.transportState).toBe('PAUSED_PLAYBACK')
+  })
+
+  it('resumes on the coordinator and reflects the playing state', async () => {
+    const res = await api('POST', '/v1/sessions/current/resume')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Record<string, unknown>).state).toBe('playing')
+    expect(fake?.transportState).toBe('PLAYING')
+  })
+
+  it('seeks to a mid-book target and writes the (unfinished) position back to ABS', async () => {
+    const res = await api('POST', '/v1/sessions/current/seek', { positionSeconds: 30 })
+    expect(res.status).toBe(200)
+    const session = (await res.json()) as Record<string, unknown>
+    expect(session.positionSeconds).toBe(30)
+    // The fake moved into the first track at 30s, and ABS now stores 30 / not-finished.
+    expect(fake?.currentTrack).toBe(1)
+    expect(fake?.relTimeSeconds).toBe(30)
+    expect(await storedProgress()).toEqual({ positionSeconds: 30, isFinished: false })
+  })
+
+  it('the sync loop notices a device-side pause and writes the frozen position back', async () => {
+    // Simulate the listener pressing pause on the speaker itself (Sonos app / hardware button): the
+    // transport freezes at 40s. We never called our pause endpoint — the background loop must notice.
+    if (!fake) throw new Error('fake not started')
+    fake.relTimeSeconds = 40
+    fake.transportState = 'PAUSED_PLAYBACK'
+
+    // Within a poll interval the loop writes the moved position (30 -> 40) back to ABS.
+    await poll(
+      'the sync loop to write the device-side position back',
+      async () => (await storedProgress()).positionSeconds === 40,
+      8_000,
+    )
+
+    // And an explicit GET reflects the device-side pause as paused.
+    const res = await api('GET', '/v1/sessions/current')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Record<string, unknown>).state).toBe('paused')
+  })
+
   it('stops with 204 and writes the reached position back to ABS', async () => {
-    await startSession()
     const res = await api('DELETE', '/v1/sessions/current')
     expect(res.status).toBe(204)
 
-    // Progress was written back: the tiny fixture is within end-tolerance, so it is marked finished.
-    const itemRes = await api('GET', `/v1/library/items/${itemId}`)
-    const item = (await itemRes.json()) as { progress?: { isFinished?: boolean } }
-    expect(item.progress?.isFinished).toBe(true)
+    // The reached position (40s, mid-book) is persisted, not marked finished.
+    expect(await storedProgress()).toEqual({ positionSeconds: 40, isFinished: false })
 
     // And the session is gone.
     expect((await api('GET', '/v1/sessions/current')).status).toBe(404)

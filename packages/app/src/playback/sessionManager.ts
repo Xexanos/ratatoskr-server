@@ -1,6 +1,6 @@
 import type { components } from '@ratatoskr/contract'
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
-import type { AbsClient, PlaybackTrack } from '../abs/client.js'
+import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
 import type { StreamerSession } from '../abs/streamerSession.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
@@ -33,6 +33,9 @@ interface ActiveSession {
   refreshToken: string | undefined
   trackDurations: number[]
   totalDurationSeconds: number
+  // The queue's media URLs, so the sync loop can tell our book from a LAN takeover (a household
+  // member starting other content on the speaker) by comparing the coordinator's reported TrackURI.
+  mediaUrls: string[]
 }
 
 // Owns the one in-memory session and drives ABS + Sonos to start / report / stop playback
@@ -44,6 +47,14 @@ export class SessionManager {
   // time — otherwise concurrent starts orphan a playing speaker, or a start/stop race clears a
   // freshly-started session (GET/DELETE 404 while the speaker plays on).
   private opChain: Promise<unknown> = Promise.resolve()
+  // The self-scheduling sync-loop timer, and the last absolute position written to ABS for the
+  // current session, so the loop only writes once the position has moved by the threshold.
+  private syncTimer: ReturnType<typeof setTimeout> | undefined
+  private lastWrittenSeconds = 0
+  // Bumped by every startLoop/stopLoop. A tick captures the generation it was scheduled under and
+  // bails (won't run, won't reschedule) once it no longer matches — so a tick that fired just before
+  // a replace-start()/stop can't spawn a second, orphaned poll chain.
+  private loopGeneration = 0
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -93,8 +104,44 @@ export class SessionManager {
         refreshToken,
         trackDurations: [...plan.trackDurations],
         totalDurationSeconds: plan.totalDurationSeconds,
+        mediaUrls: plan.tracks.map((track) => track.url),
       }
+      this.lastWrittenSeconds = resumeSeconds
+      this.startLoop()
       return this.toSession('playing', resumeSeconds)
+    })
+  }
+
+  // Pause playback and write the current position immediately (SPEC section 5). The sync loop keeps
+  // running so a later resume — or a device-side action — is still reflected.
+  async pause(): Promise<Session> {
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      await this.deps.sonos.pause(session.speakerId)
+      const absolute = await this.readAbsolute(session)
+      if (absolute !== undefined) await this.writeBack(session, absolute)
+      return this.toSession('paused', absolute ?? this.lastWrittenSeconds)
+    })
+  }
+
+  // Resume playback on the existing queue.
+  async resume(): Promise<Session> {
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      await this.deps.sonos.play(session.speakerId)
+      const absolute = await this.readAbsolute(session)
+      return this.toSession('playing', absolute ?? this.lastWrittenSeconds)
+    })
+  }
+
+  // Seek to an absolute book position and write it back immediately.
+  async seek(positionSeconds: number): Promise<Session> {
+    return this.serialize(async () => {
+      const session = this.requireSession()
+      const target = Math.min(Math.max(positionSeconds, 0), session.totalDurationSeconds)
+      await this.deps.sonos.seek(session.speakerId, planSeek([...session.trackDurations], target, this.seekTuning()))
+      await this.writeBack(session, target)
+      return this.toSession(await this.readState(session), target)
     })
   }
 
@@ -103,12 +150,8 @@ export class SessionManager {
   async current(): Promise<Session> {
     return this.serialize(async () => {
       const session = this.requireSession()
-      const [position, transportState] = await Promise.all([
-        this.deps.sonos.getPosition(session.speakerId),
-        this.deps.sonos.getTransportState(session.speakerId),
-      ])
-      const absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
-      return this.toSession(mapTransportState(transportState), absolute)
+      const { absolute, state } = await this.readLive(session)
+      return this.toSession(state, absolute)
     })
   }
 
@@ -129,40 +172,189 @@ export class SessionManager {
   private async stopInternal(): Promise<void> {
     const session = this.session
     if (session === undefined) return
-
-    // Read the reached position. If the read FAILS, do not write: writeProgress stores exactly what
-    // it is given, so writing a fallback 0 would wipe the user's real stored position (e.g. speaker
-    // unplugged 20h into a book). Only write a position we actually read.
-    let absolute: number | undefined
+    // Read the reached position. Skip the write if the read FAILS or the speaker is on foreign
+    // content: writeProgress stores exactly what it is given, so writing a fallback or a foreign
+    // position would wipe the user's real stored position (e.g. speaker unplugged 20h into a book,
+    // or a LAN takeover). Only persist a position we actually read from our own queue.
+    let write: ProgressUpdate | undefined
     try {
-      const position = await this.deps.sonos.getPosition(session.speakerId)
-      absolute = this.toAbsolute(session, position.trackIndex, position.relTimeSeconds)
+      const live = await this.readLive(session)
+      write = this.isOurTrack(session, live.trackUri) ? this.progressAt(session, live.absolute) : undefined
     } catch {
-      absolute = undefined
+      write = undefined
     }
+    await this.finalize(session, write)
+  }
 
-    if (absolute !== undefined) {
-      const isFinished = session.totalDurationSeconds - absolute <= END_OF_BOOK_TOLERANCE_SECONDS
+  // Write the given payload (best-effort), cancel the sync loop, stop the speaker, and clear the
+  // session. Shared by stop(), the replace path in start(), and the loop's end/device-stop handling.
+  // A failed write (e.g. the ~1h listening token expiring mid-book — renewal via the stored
+  // refreshToken lands with the rotation slice) must not block the teardown.
+  private async finalize(session: ActiveSession, write: ProgressUpdate | undefined): Promise<void> {
+    this.stopLoop()
+    if (write !== undefined) {
       try {
-        await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
-          currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
-          durationSeconds: session.totalDurationSeconds,
-          isFinished,
-        })
+        await this.deps.abs.writeProgress(session.listeningToken, session.itemId, write)
       } catch {
-        // Best-effort: a failed write must not block the stop. The common cause is the listening
-        // access token expiring (~1h) partway through a long book — renewing it via the stored
-        // refreshToken lands with the rotation slice; until then a failed final write is dropped
-        // rather than leaving the speaker unsilenceable and the session unclearable.
+        // best-effort
       }
     }
-
     try {
       await this.deps.sonos.stop(session.speakerId)
     } catch {
       // best effort — the session is ending regardless
     }
     this.session = undefined
+  }
+
+  // --- Sync loop (SPEC section 5): poll the coordinator, write progress back on movement, and
+  // finalize on end-of-book or a device-side stop. One tick at a time through the same mutex as the
+  // user operations, so it never races a pause/seek/stop.
+
+  private startLoop(): void {
+    this.stopLoop() // bumps the generation and clears any pending timer
+    this.scheduleTick(this.loopGeneration)
+  }
+
+  private scheduleTick(generation: number): void {
+    this.syncTimer = setTimeout(() => void this.tick(generation), this.deps.config.pollIntervalSeconds * 1000)
+    // Don't keep the process alive solely for the poll timer; shutdown stops the session explicitly.
+    this.syncTimer.unref?.()
+  }
+
+  private async tick(generation: number): Promise<void> {
+    // A tick from a superseded loop (its timer fired just before a replace-start()/stop) must not
+    // run or reschedule — otherwise it would spawn a second, orphaned poll chain.
+    if (generation !== this.loopGeneration) return
+    await this.serialize(() => this.syncOnce()).catch(() => undefined)
+    // Reschedule only while this is still the current loop and a session is active (syncOnce may
+    // have finalized it).
+    if (generation === this.loopGeneration && this.session !== undefined) this.scheduleTick(generation)
+  }
+
+  private async syncOnce(): Promise<void> {
+    const session = this.session
+    if (session === undefined) return
+
+    let live: { absolute: number; state: PlaybackState; trackUri: string }
+    try {
+      live = await this.readLive(session)
+    } catch {
+      return // transient read failure — try again next tick
+    }
+
+    // The coordinator is playing something that isn't our queue — a household member started other
+    // content on the speaker (Sonos app, radio alarm, voice). Relinquish the session rather than
+    // recording the foreign position as book progress (see relinquish). A cleared queue also lands
+    // here (empty TrackURI), which is what stops the `Track 0 / RelTime 0 / STOPPED` zero-write wipe.
+    if (!this.isOurTrack(session, live.trackUri)) {
+      this.relinquish()
+      return
+    }
+
+    // A stopped transport ends the session: near the end it's a finished book (progressAt marks it),
+    // otherwise a device-side stop mid-book. Either way write the reached position and tear down.
+    if (live.state === 'stopped') {
+      await this.finalize(session, this.progressAt(session, live.absolute))
+      return
+    }
+
+    // Otherwise (playing or paused) write back once the position has moved past the threshold. A
+    // device-side pause is captured here too, but only if it had already drifted a threshold from
+    // the last write; a pause within the threshold is persisted later (on resume-drift or stop).
+    // That satisfies SPEC §5, which mandates the immediate write only for our own pause endpoint.
+    if (Math.abs(live.absolute - this.lastWrittenSeconds) >= this.deps.config.progressWriteThresholdSeconds) {
+      await this.writeBack(session, live.absolute)
+    }
+  }
+
+  // Does the coordinator's reported TrackURI belong to this session's queue? Compared without the
+  // query string so a re-issued media URL (streamer token refreshed in a later slice) still matches;
+  // an empty URI (cleared queue) is never ours.
+  private isOurTrack(session: ActiveSession, trackUri: string): boolean {
+    if (trackUri === '') return false
+    const withoutQuery = (url: string): string => {
+      const q = url.indexOf('?')
+      return q === -1 ? url : url.slice(0, q)
+    }
+    const target = withoutQuery(trackUri)
+    return session.mediaUrls.some((url) => withoutQuery(url) === target)
+  }
+
+  private stopLoop(): void {
+    // Invalidate any already-fired tick still queued behind the mutex, then drop the pending timer.
+    this.loopGeneration += 1
+    if (this.syncTimer !== undefined) {
+      clearTimeout(this.syncTimer)
+      this.syncTimer = undefined
+    }
+  }
+
+  // Give up the session WITHOUT writing progress or stopping the speaker — used when the coordinator
+  // is playing content that isn't ours (a LAN takeover). Writing would corrupt the book's progress
+  // with a foreign position; stopping would cut off whatever the household member just started. ABS
+  // keeps the last position we wrote.
+  private relinquish(): void {
+    this.stopLoop()
+    this.session = undefined
+  }
+
+  // Write an in-progress position back to ABS (never `isFinished` — the book is not done until the
+  // transport stops), best-effort, tracking it as the last written position.
+  private async writeBack(session: ActiveSession, absolute: number): Promise<void> {
+    try {
+      await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
+        currentTimeSeconds: absolute,
+        durationSeconds: session.totalDurationSeconds,
+        isFinished: false,
+      })
+      this.lastWrittenSeconds = absolute
+    } catch {
+      // best-effort; the next tick retries
+    }
+  }
+
+  // The final progress payload for an absolute position — marks finished when within the end-of-book
+  // window (independent of the seek tolerance). Used only on teardown, not for in-progress writes.
+  private progressAt(session: ActiveSession, absolute: number): ProgressUpdate {
+    const isFinished = session.totalDurationSeconds - absolute <= END_OF_BOOK_TOLERANCE_SECONDS
+    return {
+      currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
+      durationSeconds: session.totalDurationSeconds,
+      isFinished,
+    }
+  }
+
+  // One live read of the coordinator — position (as absolute seconds), transport state, and the
+  // playing track's URI — shared by current/syncOnce/stopInternal/pause/resume/seek. The CALLER
+  // decides the catch policy: current() propagates (a GET should surface a dead speaker), the loop
+  // and stopInternal swallow-and-skip, pause/resume/seek fall back to the last written position.
+  private async readLive(session: ActiveSession): Promise<{ absolute: number; state: PlaybackState; trackUri: string }> {
+    const [position, transportState] = await Promise.all([
+      this.deps.sonos.getPosition(session.speakerId),
+      this.deps.sonos.getTransportState(session.speakerId),
+    ])
+    return {
+      absolute: this.toAbsolute(session, position.trackIndex, position.relTimeSeconds),
+      state: mapTransportState(transportState),
+      trackUri: position.trackUri,
+    }
+  }
+
+  private async readAbsolute(session: ActiveSession): Promise<number | undefined> {
+    try {
+      return (await this.readLive(session)).absolute
+    } catch {
+      return undefined
+    }
+  }
+
+  private async readState(session: ActiveSession): Promise<PlaybackState> {
+    try {
+      return (await this.readLive(session)).state
+    } catch {
+      return 'playing'
+    }
   }
 
   // Run session operations one at a time (see opChain). The chain continues regardless of an op's

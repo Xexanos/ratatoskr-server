@@ -21,7 +21,10 @@ function testConfig(): Config {
   }
 }
 
-// The clients are never touched: unimplemented/unknown routes fail before any handler logic.
+// The clients are never touched: the bearer preHandler and the not-found handler both run before
+// any ApiService method. (Every contract operation is implemented as of the playback slices, so the
+// NotImplementedError fallback is now unreachable via the contract; it is covered as a unit in
+// errorHandler.test.ts.)
 function buildTestApp() {
   return buildApp(testConfig(), { absClient: {} as AbsClient, sonosClient: {} as SonosClient })
 }
@@ -31,17 +34,7 @@ const AUTH = { authorization: 'Bearer user-token' }
 describe('routing fallbacks', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  // pause/resume/seek are still unimplemented in this slice (start/get/stop have landed), so they
-  // exercise the NotImplementedError -> 404 fallback and the per-operation bearer enforcement.
-  it('maps an unimplemented session operation to 404 not_found (contract shape)', async () => {
-    const app = await buildTestApp()
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
-    expect(res.statusCode).toBe(404)
-    expect(res.json()).toEqual({ code: 'not_found', message: expect.any(String) })
-    await app.close()
-  })
-
-  it('still enforces the bearer token on an unimplemented operation (401 without it)', async () => {
+  it('enforces the bearer token on a session operation (401 without it, before any handler)', async () => {
     const app = await buildTestApp()
     const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause' })
     expect(res.statusCode).toBe(401)

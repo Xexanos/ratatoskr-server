@@ -146,3 +146,63 @@ describe('DELETE /v1/sessions/current', () => {
     await app.close()
   })
 })
+
+describe('POST /v1/sessions/current/pause | resume | seek', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('pauses and returns the session', async () => {
+    const pause = vi.fn().mockResolvedValue({ ...SESSION, state: 'paused' })
+    const app = await appWith({ pause })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().state).toBe('paused')
+    expect(pause).toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('resumes and returns the session', async () => {
+    const resume = vi.fn().mockResolvedValue(SESSION)
+    const app = await appWith({ resume })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/resume', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().state).toBe('playing')
+    await app.close()
+  })
+
+  it('seeks to the requested position and returns the session', async () => {
+    const seek = vi.fn().mockResolvedValue({ ...SESSION, positionSeconds: 42 })
+    const app = await appWith({ seek })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/sessions/current/seek',
+      headers: AUTH,
+      payload: { positionSeconds: 42 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(seek).toHaveBeenCalledWith(42)
+    await app.close()
+  })
+
+  it('rejects a seek without positionSeconds as 400', async () => {
+    const app = await appWith({ seek: vi.fn() })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/seek', headers: AUTH, payload: {} })
+    expect(res.statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('returns 404 when nothing is playing', async () => {
+    const app = await appWith({ pause: vi.fn().mockRejectedValue(new NoActiveSessionError()) })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    await app.close()
+  })
+
+  it('returns 401 for a non-empty but invalid bearer, without touching the session', async () => {
+    const pause = vi.fn()
+    const app = await appWith({ pause }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
+    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
+    expect(res.statusCode).toBe(401)
+    expect(pause).not.toHaveBeenCalled()
+    await app.close()
+  })
+})
