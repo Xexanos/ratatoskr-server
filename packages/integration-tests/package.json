@@ -1,0 +1,21 @@
+{
+  "name": "@ratatoskr/integration-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "description": "Process-level integration tests: spawn the compiled server (packages/app/dist) and drive it over real HTTP — against a live Audiobookshelf container (Testcontainers) and the fake Sonos. Deliberately has no `test` script so the unit-test run never boots containers.",
+  "scripts": {
+    "test:integration": "vitest run"
+  },
+  "devDependencies": {
+    "@ratatoskr/fake-sonos": "workspace:*",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^26.1.0",
+    "ajv": "^8.17.1",
+    "js-yaml": "^5.2.1",
+    "testcontainers": "^12.0.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

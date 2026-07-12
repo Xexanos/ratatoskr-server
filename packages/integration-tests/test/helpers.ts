@@ -7,10 +7,10 @@ import { load } from 'js-yaml'
 import { Ajv, type ValidateFunction } from 'ajv'
 
 // Shared harness for the process-level integration tests: they spawn the real compiled
-// server (dist/main.js) and talk to it over real HTTP — no inject(), no fetch stubbing.
-// Both the config/health smoke test and the live-Audiobookshelf test build on this.
+// server (packages/app/dist/main.js) and talk to it over real HTTP — no fetch stubbing.
+// Both the config/health smoke test and the live-Audiobookshelf tests build on this.
 
-export const DIST_MAIN = fileURLToPath(new URL('../dist/main.js', import.meta.url))
+export const DIST_MAIN = fileURLToPath(new URL('../../app/dist/main.js', import.meta.url))
 export const CONTRACT = fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url))
 
 // Env keys the config reader consumes — removed from the inherited env so a test is

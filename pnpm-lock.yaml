@@ -51,9 +51,9 @@ importers:
       '@fastify/response-validation':
         specifier: ^3.0.3
         version: 3.0.3
-      '@types/js-yaml':
-        specifier: ^4.0.9
-        version: 4.0.9
+      '@ratatoskr/fake-sonos':
+        specifier: workspace:*
+        version: link:../fake-sonos
       '@types/node':
         specifier: ^26.1.0
         version: 26.1.0
@@ -63,12 +63,6 @@ importers:
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
-      js-yaml:
-        specifier: ^5.2.1
-        version: 5.2.1
-      testcontainers:
-        specifier: ^12.0.4
-        version: 12.0.4(supports-color@10.2.2)
       tsx:
         specifier: ^4.23.0
         version: 4.23.0
@@ -90,6 +84,42 @@ importers:
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
+
+  packages/fake-sonos:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
+  packages/integration-tests:
+    devDependencies:
+      '@ratatoskr/fake-sonos':
+        specifier: workspace:*
+        version: link:../fake-sonos
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+      ajv:
+        specifier: ^8.17.1
+        version: 8.20.0
+      js-yaml:
+        specifier: ^5.2.1
+        version: 5.2.1
+      testcontainers:
+        specifier: ^12.0.4
+        version: 12.0.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.10(@types/node@26.1.0)(@vitest/coverage-v8@4.1.10)(vite@7.3.6(@types/node@26.1.0)(tsx@4.23.0)(yaml@2.9.0))
 
   packages/position:
     devDependencies:
@@ -2172,7 +2202,7 @@ snapshots:
 
   '@js-sdsl/ordered-map@4.4.2': {}
 
-  '@kwsites/file-exists@1.1.1(supports-color@10.2.2)':
+  '@kwsites/file-exists@1.1.1':
     dependencies:
       debug: 4.4.3(supports-color@10.2.2)
     transitivePeerDependencies:
@@ -2759,7 +2789,7 @@ snapshots:
     dependencies:
       yaml: 2.9.0
 
-  docker-modem@5.0.7(supports-color@10.2.2):
+  docker-modem@5.0.7:
     dependencies:
       debug: 4.4.3(supports-color@10.2.2)
       readable-stream: 3.6.2
@@ -2768,12 +2798,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  dockerode@5.0.1(supports-color@10.2.2):
+  dockerode@5.0.1:
     dependencies:
       '@balena/dockerignore': 1.0.2
       '@grpc/grpc-js': 1.14.4
       '@grpc/proto-loader': 0.7.15
-      docker-modem: 5.0.7(supports-color@10.2.2)
+      docker-modem: 5.0.7
       protobufjs: 7.6.5
       tar-fs: 2.1.5
     transitivePeerDependencies:
@@ -3306,9 +3336,9 @@ snapshots:
       retry: 0.12.0
       signal-exit: 3.0.7
 
-  properties-reader@3.0.1(supports-color@10.2.2):
+  properties-reader@3.0.1:
     dependencies:
-      '@kwsites/file-exists': 1.1.1(supports-color@10.2.2)
+      '@kwsites/file-exists': 1.1.1
       mkdirp: 3.0.1
     transitivePeerDependencies:
       - supports-color
@@ -3560,7 +3590,7 @@ snapshots:
       - bare-abort-controller
       - react-native-b4a
 
-  testcontainers@12.0.4(supports-color@10.2.2):
+  testcontainers@12.0.4:
     dependencies:
       '@balena/dockerignore': 1.0.2
       '@types/dockerode': 4.0.1
@@ -3569,10 +3599,10 @@ snapshots:
       byline: 5.0.0
       debug: 4.4.3(supports-color@10.2.2)
       docker-compose: 1.4.2
-      dockerode: 5.0.1(supports-color@10.2.2)
+      dockerode: 5.0.1
       get-port: 5.1.1
       proper-lockfile: 4.1.2
-      properties-reader: 3.0.1(supports-color@10.2.2)
+      properties-reader: 3.0.1
       ssh-remote-port-forward: 1.0.4
       tar-fs: 3.1.3
       tmp: 0.2.7

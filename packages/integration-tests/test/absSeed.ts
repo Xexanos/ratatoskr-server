@@ -2,12 +2,14 @@ import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers'
 
-// Shared harness for the live-Audiobookshelf integration tests: boot + seed a real ABS container,
-// plus the Docker gating and the pinned images both test files use. One definition so the two
-// files (absLive's version matrix and the playback session-flow test) can't drift.
+// Harness for the live-Audiobookshelf integration tests: boot + seed a real ABS container,
+// plus the Docker gating and the pinned images. Consumed by globalSetup, which runs the
+// boot + seed ONCE per vitest run and hands the connection info to the test files.
 
 // Both ends of the supported ABS range (README: >= 2.26), pinned by multi-arch manifest digest so
 // the tests are reproducible and can't slide onto a moving tag. Bump CURRENT as ABS releases.
+// Version coverage lives in CI: two parallel jobs pass ABS_IT_IMAGE — the pinned minimum and the
+// deliberately unpinned :latest tag (drift canary for new ABS releases).
 export const ABS_MIN = {
   label: '2.26.0 (minimum)',
   image: 'ghcr.io/advplyr/audiobookshelf@sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5',
@@ -17,13 +19,20 @@ export const ABS_CURRENT = {
   image: 'ghcr.io/advplyr/audiobookshelf@sha256:1eef6716183c52abafe5405e7d6be8390248ecd59c7488c44af871757ac8fc4d',
 }
 
+// The image to test against: ABS_IT_IMAGE (the CI matrix hook, also a local override), or the
+// pinned current digest so local runs are deterministic.
+export function resolveAbsImage(): string {
+  return process.env.ABS_IT_IMAGE ?? ABS_CURRENT.image
+}
+
 const ABS_PORT = 13378
 const FIXTURE_DIR = fileURLToPath(new URL('./fixtures/audiobooks', import.meta.url))
 
+// Root is SEEDING-ONLY: globalSetup uses it to create the library and per-file users. Tests must
+// not log in as root or touch its progress — each test file creates its own users (see
+// createAbsUser) so files stay isolated on the one shared container.
 export const ROOT_USER = 'root'
 export const ROOT_PASS = 'rootpassword'
-export const STREAMER_USER = 'streamer'
-export const STREAMER_PASS = 'streampassword'
 
 // Probe for a reachable container runtime. On any throw (missing CLI, daemon down, or a slow daemon
 // that exceeds the timeout) log *why* and return false, so a skipped-because-absent run is
@@ -38,7 +47,6 @@ export function dockerAvailable(): boolean {
   }
 }
 
-export const DOCKER_READY = dockerAvailable()
 // In CI (or when explicitly demanded) a missing runtime must FAIL rather than silently skip, so
 // live coverage can't vanish while CI stays green. Locally, with no runtime, it skips cleanly.
 export const REQUIRE_LIVE = process.env.CI === 'true' || process.env.ABS_IT_REQUIRE === '1'
@@ -91,16 +99,40 @@ async function adminToken(absBase: string): Promise<string> {
   return token
 }
 
+// Create an (active) ABS user. Each test file creates its OWN end user and streamer user so
+// files cannot interfere through shared progress or login sessions on the shared container.
+// isActive defaults to false → an inactive user cannot log in (401), and the server logs the
+// streamer in at startup and aborts if that fails, so users must be created active. Tolerant of
+// the user already existing (vitest watch mode re-runs a file against the still-warm container).
+export async function createAbsUser(
+  absBase: string,
+  adminAccessToken: string,
+  username: string,
+  password: string,
+): Promise<void> {
+  const res = await seedFetch(`ABS create user ${username}`, `${absBase}/api/users`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${adminAccessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password, type: 'user', isActive: true }),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    if (/username.*taken|already exists/i.test(text)) return
+    throw new Error(`ABS create user ${username} failed: ${res.status} ${text}`)
+  }
+}
+
 export interface SeededAbs {
   container: StartedTestContainer
   absBase: string
   itemId: string
+  libraryId: string
   adminToken: string
 }
 
-// Start the given ABS image, create the root user, a book library with the fixture audiobook, force
-// a scan, and an (active) streamer user. Returns the base URL, the scanned item's id, and the admin
-// token (e.g. for pre-seeding progress).
+// Start the given ABS image, create the root user, and a book library with the fixture audiobook,
+// then force a scan. Returns the base URL, the scanned item's id, and the admin token (for the
+// per-file user creation). Test users are NOT created here — see createAbsUser.
 export async function startSeededAbs(image: string): Promise<SeededAbs> {
   const container = await new GenericContainer(image)
     // The image binds port 80 by default; pin it to a known port explicitly instead.
@@ -158,14 +190,5 @@ export async function startSeededAbs(image: string): Promise<SeededAbs> {
     90_000,
   )
 
-  // isActive defaults to false → an inactive user cannot log in (401). The server logs the streamer
-  // in at startup and aborts if that fails, so it must be created active.
-  const userRes = await seedFetch('ABS create streamer user', `${absBase}/api/users`, {
-    method: 'POST',
-    headers: { ...authHeader, 'content-type': 'application/json' },
-    body: JSON.stringify({ username: STREAMER_USER, password: STREAMER_PASS, type: 'user', isActive: true }),
-  })
-  if (!userRes.ok) throw new Error(`ABS create streamer user failed: ${userRes.status} ${await userRes.text()}`)
-
-  return { container, absBase, itemId, adminToken: token }
+  return { container, absBase, itemId, libraryId, adminToken: token }
 }

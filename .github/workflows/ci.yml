@@ -19,10 +19,43 @@ jobs:
       - run: pnpm run generate
       - run: pnpm -r run build
       - run: pnpm -r run test:coverage
-      # Needs the build step above: spawns the compiled server (dist/main.js) and talks
-      # to it over real HTTP.
-      - run: pnpm -r --if-present run test:integration
       - run: pnpm run lint
+      # Bitrot guard for the fake-Sonos image the central E2E repo consumes (no push here;
+      # publishing to GHCR lands with the E2E work).
+      - run: docker build -f packages/fake-sonos/Dockerfile .
+
+  # Live-ABS integration matrix: the pinned minimum supported version, plus the moving
+  # :latest tag as a deliberate drift canary so a new ABS release that breaks us turns CI
+  # red instead of surfacing in production. Both legs are blocking. fail-fast is off so a
+  # latest-drift failure still shows the (usually green) pinned leg for contrast.
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep in sync with ABS_MIN in packages/integration-tests/test/absSeed.ts
+          - name: abs-2.26.0-min
+            image: ghcr.io/advplyr/audiobookshelf@sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5
+          # Intentionally UNPINNED: this leg exists to catch upstream drift early.
+          - name: abs-latest
+            image: ghcr.io/advplyr/audiobookshelf:latest
+    name: integration (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run generate
+      # The integration tests spawn the compiled server (packages/app/dist/main.js) and talk
+      # to it over real HTTP, so they need the build first.
+      - run: pnpm -r run build
+      - run: pnpm -r --if-present run test:integration
+        env:
+          ABS_IT_IMAGE: ${{ matrix.image }}
 
   # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
   # change in a breaking way within /v1 without a major version bump.
