@@ -58,9 +58,13 @@ export class SessionManager {
   // a replace-start()/stop can't spawn a second, orphaned poll chain.
   private loopGeneration = 0
   // A rotated ABS token pair the sync loop obtained for the listening user, awaiting delivery to the
-  // client (SPEC section 8). Attached to every Session response until the client authenticates with
-  // the new access token (adoption), then cleared. Discarded whenever the session ends.
+  // client (SPEC section 8), plus the access token the owner still held when we rotated. The pair is
+  // attached to a Session response ONLY for a caller presenting that pre-rotation token — so on a
+  // multi-user ABS a different user polling the session can't receive the owner's refresh token — and
+  // only until the client authenticates with the new access token (adoption). Both are discarded
+  // whenever the session ends.
   private pendingRotatedTokens: RotatedTokens | undefined
+  private preRotationToken: string | undefined
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -116,8 +120,9 @@ export class SessionManager {
       // Fresh session baseline: `userToken` is the client's current access token, so any pending pair
       // from a previous session is stale.
       this.pendingRotatedTokens = undefined
+      this.preRotationToken = undefined
       this.startLoop()
-      return this.toSession('playing', resumeSeconds)
+      return this.toSession(userToken, 'playing', resumeSeconds)
     })
   }
 
@@ -130,7 +135,7 @@ export class SessionManager {
       await this.deps.sonos.pause(session.speakerId)
       const absolute = await this.readAbsolute(session)
       if (absolute !== undefined) await this.writeBack(session, absolute)
-      return this.toSession('paused', absolute ?? this.lastWrittenSeconds)
+      return this.toSession(callerToken, 'paused', absolute ?? this.lastWrittenSeconds)
     })
   }
 
@@ -141,7 +146,7 @@ export class SessionManager {
       this.noteCaller(callerToken)
       await this.deps.sonos.play(session.speakerId)
       const absolute = await this.readAbsolute(session)
-      return this.toSession('playing', absolute ?? this.lastWrittenSeconds)
+      return this.toSession(callerToken, 'playing', absolute ?? this.lastWrittenSeconds)
     })
   }
 
@@ -153,7 +158,7 @@ export class SessionManager {
       const target = Math.min(Math.max(positionSeconds, 0), session.totalDurationSeconds)
       await this.deps.sonos.seek(session.speakerId, planSeek([...session.trackDurations], target, this.seekTuning()))
       await this.writeBack(session, target)
-      return this.toSession(await this.readState(session), target)
+      return this.toSession(callerToken, await this.readState(session), target)
     })
   }
 
@@ -164,7 +169,7 @@ export class SessionManager {
       const session = this.requireSession()
       this.noteCaller(callerToken)
       const { absolute, state } = await this.readLive(session)
-      return this.toSession(state, absolute)
+      return this.toSession(callerToken, state, absolute)
     })
   }
 
@@ -177,7 +182,8 @@ export class SessionManager {
     return this.serialize(async () => {
       const session = this.requireSession()
       if (callerToken !== undefined) this.noteCaller(callerToken)
-      const pending = this.pendingRotatedTokens
+      // Only hand the pair back if this caller is the owner (same gate as toSession).
+      const pending = callerToken !== undefined && this.shouldDeliverRotated(callerToken) ? this.pendingRotatedTokens : undefined
       const { itemId, speakerId, totalDurationSeconds } = session
       const reached = await this.stopInternal() // writes the final position, then clears the session
       if (pending === undefined) return undefined
@@ -244,6 +250,7 @@ export class SessionManager {
     // The listening user's tokens are discarded on stop (SPEC section 8); a pair still pending here
     // was already handed back in stop()'s final Session (or is lost on shutdown, by design).
     this.pendingRotatedTokens = undefined
+    this.preRotationToken = undefined
   }
 
   // --- Sync loop (SPEC section 5): poll the coordinator, write progress back on movement, and
@@ -341,6 +348,7 @@ export class SessionManager {
     this.stopLoop()
     this.session = undefined
     this.pendingRotatedTokens = undefined
+    this.preRotationToken = undefined
   }
 
   // Adoption (SPEC section 8): once the client authenticates with the rotated access token, delivery
@@ -358,12 +366,18 @@ export class SessionManager {
   // the margin before expiry. No-op without a stored refresh token, or when the access token carries
   // no decodable `exp` (older ABS / non-JWT) — then proactive renewal simply does not engage.
   private async maybeRotateTokens(session: ActiveSession): Promise<void> {
+    // Rotate at most one pair ahead of the client: while a pair is still awaiting delivery/adoption,
+    // don't rotate again. This bounds a mis-set margin (>= the token lifetime) to a single rotation
+    // instead of one per tick, and keeps `preRotationToken` equal to the token the client still holds
+    // (so the delivery gate can't be outrun by back-to-back rotations).
+    if (this.pendingRotatedTokens !== undefined) return
     if (session.refreshToken === undefined) return
     const exp = jwtExpSeconds(session.listeningToken)
     if (exp === undefined) return
     if (Date.now() / 1000 < exp - this.deps.config.listeningTokenRefreshMarginSeconds) return
     try {
       const rotated = await this.deps.abs.refresh(session.refreshToken)
+      this.preRotationToken = session.listeningToken // the token the owner still holds until it expires
       session.listeningToken = rotated.accessToken
       session.refreshToken = rotated.refreshToken
       this.pendingRotatedTokens = { accessToken: rotated.accessToken, refreshToken: rotated.refreshToken }
@@ -447,7 +461,7 @@ export class SessionManager {
     return trackToAbsolute(session.trackDurations, boundedIndex, relTimeSeconds)
   }
 
-  private toSession(state: PlaybackState, positionSeconds: number): Session {
+  private toSession(callerToken: string, state: PlaybackState, positionSeconds: number): Session {
     const session = this.requireSession()
     const result: Session = {
       itemId: session.itemId,
@@ -457,10 +471,16 @@ export class SessionManager {
       durationSeconds: session.totalDurationSeconds,
       updatedAt: new Date().toISOString(),
     }
-    // Redeliver a pending rotated pair (SPEC section 8) until the client adopts it. Never logged:
-    // the server does not log response bodies, and the request serializer strips the URL query.
-    if (this.pendingRotatedTokens !== undefined) result.rotatedTokens = this.pendingRotatedTokens
+    if (this.shouldDeliverRotated(callerToken)) result.rotatedTokens = this.pendingRotatedTokens
     return result
+  }
+
+  // Deliver a pending rotated pair (SPEC section 8) only to the caller presenting the pre-rotation
+  // access token — the session owner, whose old token stays valid until its own expiry. Ties the
+  // handover to the owner so a different valid ABS user can't collect it. Never logged: the server
+  // does not log response bodies, and the request serializer strips the URL query (section 14).
+  private shouldDeliverRotated(callerToken: string): boolean {
+    return this.pendingRotatedTokens !== undefined && callerToken === this.preRotationToken
   }
 
   private requireSession(): ActiveSession {

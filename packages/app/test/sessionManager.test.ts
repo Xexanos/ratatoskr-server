@@ -269,7 +269,7 @@ describe('SessionManager', () => {
     it('seeks to the target and writes it back', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
-      const session = await ctx.manager.seek('user-tok',220)
+      const session = await ctx.manager.seek('user-tok', 220)
       // 220 into [100,200] -> track index 1, offset 120
       const [, seekPlan] = ctx.sonos.seek.mock.calls.at(-1) as [string, { trackIndex: number; offsetSeconds: number }]
       expect(seekPlan).toMatchObject({ trackIndex: 1, offsetSeconds: 120 })
@@ -283,13 +283,13 @@ describe('SessionManager', () => {
 
     it('clamps a seek beyond the end into the book', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      expect((await ctx.manager.seek('user-tok',99999)).positionSeconds).toBe(300)
+      expect((await ctx.manager.seek('user-tok', 99999)).positionSeconds).toBe(300)
     })
 
     it('throw when nothing is playing', async () => {
       await expect(ctx.manager.pause('user-tok')).rejects.toBeInstanceOf(NoActiveSessionError)
       await expect(ctx.manager.resume('user-tok')).rejects.toBeInstanceOf(NoActiveSessionError)
-      await expect(ctx.manager.seek('user-tok',10)).rejects.toBeInstanceOf(NoActiveSessionError)
+      await expect(ctx.manager.seek('user-tok', 10)).rejects.toBeInstanceOf(NoActiveSessionError)
     })
 
     it('pauses using the last written position (and writes nothing) when the live read fails', async () => {
@@ -306,7 +306,7 @@ describe('SessionManager', () => {
     it('reports playing after a seek when the transport-state read fails', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.sonos.getTransportState.mockRejectedValueOnce(new Error('blip'))
-      expect((await ctx.manager.seek('user-tok',120)).state).toBe('playing')
+      expect((await ctx.manager.seek('user-tok', 120)).state).toBe('playing')
     })
   })
 
@@ -449,29 +449,48 @@ describe('SessionManager', () => {
     afterEach(() => vi.useRealTimers())
 
     // Start a session whose listening access token is within the refresh margin of expiry, with a
-    // refresh token, so the first sync tick renews it.
-    async function startNearExpiry(): Promise<void> {
+    // refresh token, so the first sync tick renews it. Returns the pre-rotation token (the owner's).
+    async function startNearExpiry(): Promise<string> {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
-      const nearExp = Date.now() / 1000 + 100 // < the 300s margin -> refresh on the next tick
+      const ownerToken = fakeJwt(Date.now() / 1000 + 100) // < the 300s margin -> refresh on the next tick
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start(fakeJwt(nearExp), 'refresh-0', 'li_1', 'RINCON_1')
+      await ctx.manager.start(ownerToken, 'refresh-0', 'li_1', 'RINCON_1')
+      return ownerToken
     }
 
-    it('renews the listening token before expiry and offers the rotated pair until adopted', async () => {
-      await startNearExpiry()
+    it('renews the listening token before expiry and offers the pair to the owner until adopted', async () => {
+      const ownerToken = await startNearExpiry()
       await vi.advanceTimersByTimeAsync(10_000) // one tick -> maybeRotateTokens refreshes
       expect(ctx.abs.refresh).toHaveBeenCalledWith('refresh-0')
 
-      // The rotated pair rides along on a Session response while the client still uses its old token.
-      const offered = await ctx.manager.current('old-token-still-valid')
+      // The pair rides along on a Session response for the OWNER (its still-valid pre-rotation token).
+      const offered = await ctx.manager.current(ownerToken)
       expect(offered.rotatedTokens).toEqual({ accessToken: 'new-access', refreshToken: 'new-refresh' })
+
+      // A DIFFERENT valid ABS user polling the session must NOT receive the owner's rotated pair.
+      expect((await ctx.manager.current('another-users-token')).rotatedTokens).toBeUndefined()
 
       // The loop's own writes now use the renewed listening token.
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('new-access', 'li_1', expect.objectContaining({ isFinished: false }))
 
       // Adoption: once the client authenticates with the new access token, it stops being redelivered.
       expect((await ctx.manager.current('new-access')).rotatedTokens).toBeUndefined()
-      expect((await ctx.manager.current('anything-else')).rotatedTokens).toBeUndefined()
+      expect((await ctx.manager.current(ownerToken)).rotatedTokens).toBeUndefined()
+    })
+
+    it('rotates at most one pair ahead of the client (no refresh storm while one is pending)', async () => {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      ctx = build({ positionSeconds: 0 })
+      // Every rotation yields another near-expiry JWT, so absent the pending-guard the exp check would
+      // pass on every tick and the loop would refresh continuously.
+      ctx.abs.refresh.mockResolvedValue({
+        accessToken: fakeJwt(Date.now() / 1000 + 10),
+        refreshToken: 'refresh-next',
+        user: { id: 'u', username: 'x' },
+      })
+      await ctx.manager.start(fakeJwt(Date.now() / 1000 + 10), 'refresh-0', 'li_1', 'RINCON_1')
+      await vi.advanceTimersByTimeAsync(50_000) // many ticks
+      expect(ctx.abs.refresh).toHaveBeenCalledTimes(1) // exactly one rotation, awaiting adoption
     })
 
     it('does not rotate without a stored refresh token', async () => {
@@ -511,12 +530,17 @@ describe('SessionManager', () => {
       expect(ctx.manager.hasSession()).toBe(true)
     })
 
-    it('hands a still-pending pair back in the stop Session (200), and nothing when none pending', async () => {
-      await startNearExpiry()
+    it('hands a still-pending pair back in the owner stop Session (200), and nothing otherwise', async () => {
+      const ownerToken = await startNearExpiry()
       await vi.advanceTimersByTimeAsync(10_000) // pending pair set
-      const finalStop = await ctx.manager.stop('old-token') // caller has not adopted yet
+      const finalStop = await ctx.manager.stop(ownerToken) // owner, has not adopted yet
       expect(finalStop?.rotatedTokens).toEqual({ accessToken: 'new-access', refreshToken: 'new-refresh' })
       expect(['stopped', 'finished']).toContain(finalStop?.state)
+
+      // A non-owner stopping while a pair is pending gets the 204 path (no pair leaked).
+      await startNearExpiry()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await ctx.manager.stop('another-users-token')).toBeUndefined()
 
       // A fresh session that never rotated -> stop returns undefined (the 204 path).
       ctx = build({ positionSeconds: 0 })
