@@ -165,6 +165,9 @@ if something required is missing:
   `SEEK_RETRIES` (optional, default 2) — tuning knobs for section 4; defaults come from the
   spike findings there.
 - `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default a few seconds).
+- `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
+  user's access token expires the sync loop renews it, so the rotated pair reaches the client while
+  its old access token is still valid (section 8).
 
 ## 8. Auth
 

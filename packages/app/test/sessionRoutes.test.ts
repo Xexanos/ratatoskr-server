@@ -107,6 +107,17 @@ describe('GET /v1/sessions/current', () => {
     await app.close()
   })
 
+  it('passes a pending rotated token pair through on the session (contract-valid)', async () => {
+    const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
+    const current = vi.fn().mockResolvedValue({ ...SESSION, rotatedTokens })
+    const app = await appWith({ current })
+    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().rotatedTokens).toEqual(rotatedTokens)
+    expect(current).toHaveBeenCalledWith('user-token')
+    await app.close()
+  })
+
   it('returns 401 for a non-empty but invalid bearer, without reading the session', async () => {
     const current = vi.fn()
     const app = await appWith({ current }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
@@ -134,6 +145,17 @@ describe('DELETE /v1/sessions/current', () => {
     const app = await appWith({ stop: vi.fn().mockRejectedValue(new NoActiveSessionError()) })
     const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(404)
+    await app.close()
+  })
+
+  it('returns 200 with the final Session when a rotated token pair was pending at stop', async () => {
+    const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
+    const stop = vi.fn().mockResolvedValue({ ...SESSION, state: 'stopped', rotatedTokens })
+    const app = await appWith({ stop })
+    const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().rotatedTokens).toEqual(rotatedTokens)
+    expect(stop).toHaveBeenCalledWith('user-token') // caller token forwarded for adoption
     await app.close()
   })
 
@@ -179,7 +201,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
       payload: { positionSeconds: 42 },
     })
     expect(res.statusCode).toBe(200)
-    expect(seek).toHaveBeenCalledWith(42)
+    expect(seek).toHaveBeenCalledWith('user-token', 42) // caller token forwarded for adoption
     await app.close()
   })
 
