@@ -7,11 +7,14 @@ import { SonosUpstreamError } from './errors.js'
 
 type Speaker = components['schemas']['Speaker']
 
-// Where the coordinator currently is: which queue track (0-based) and elapsed seconds within it.
-// RelTime is authoritative; Sonos's TrackDuration is not (SPEC section 4), so it is not returned.
+// Where the coordinator currently is: which queue track (0-based), elapsed seconds within it, and
+// the URI of the track it is actually playing. RelTime is authoritative; Sonos's TrackDuration is
+// not (SPEC section 4), so it is not returned. trackUri lets the caller tell "our book" from a
+// LAN takeover (someone starting other content on the speaker); '' when the queue is empty.
 export interface SonosPosition {
   trackIndex: number
   relTimeSeconds: number
+  trackUri: string
 }
 
 // SonosManager.InitializeWithDiscovery resolves as soon as one device answers SSDP; this
@@ -160,7 +163,11 @@ export class SonosClient {
     try {
       const info = await coordinator.AVTransportService.GetPositionInfo({ InstanceID: 0 })
       const track = typeof info.Track === 'number' ? info.Track : 1
-      return { trackIndex: Math.max(0, track - 1), relTimeSeconds: hmsToSeconds(info.RelTime) }
+      return {
+        trackIndex: Math.max(0, track - 1),
+        relTimeSeconds: hmsToSeconds(info.RelTime),
+        trackUri: typeof info.TrackURI === 'string' ? info.TrackURI : '',
+      }
     } catch (err) {
       throw asUpstream(err)
     }

@@ -16,6 +16,19 @@ const MANIFEST: PlaybackManifest = {
   totalDurationSeconds: 300,
 }
 
+// A promise whose resolution the test controls — to hold an operation mid-flight (holding the
+// session mutex) while a timer fires behind it.
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => (resolve = r))
+  return { promise, resolve }
+}
+
+// A TrackURI the coordinator reports that belongs to our queue (matches a session media URL). The
+// foreign-content guard compares TrackURI against the session's URLs, so the getPosition mocks must
+// report one of ours or the sync loop treats the speaker as taken over.
+const OUR_TRACK_URI = 'http://abs.invalid/api/items/li_1/file/20?token=streamer-tok'
+
 function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {}) {
   const abs = {
     getPlaybackManifest: vi.fn().mockResolvedValue(MANIFEST),
@@ -30,7 +43,7 @@ function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {
     stop: vi.fn().mockResolvedValue(undefined),
     pause: vi.fn().mockResolvedValue(undefined),
     play: vi.fn().mockResolvedValue(undefined),
-    getPosition: vi.fn().mockResolvedValue({ trackIndex: 1, relTimeSeconds: 50 }),
+    getPosition: vi.fn().mockResolvedValue({ trackIndex: 1, relTimeSeconds: 50, trackUri: OUR_TRACK_URI }),
     getTransportState: vi.fn().mockResolvedValue('PLAYING'),
   }
   const streamer = {
@@ -186,7 +199,7 @@ describe('SessionManager', () => {
     it('marks the item finished when stopped within tolerance of the end', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       // Near the end: track index 1, offset 199 -> absolute 299 (300 total, within the 5s window).
-      ctx.sonos.getPosition.mockResolvedValueOnce({ trackIndex: 1, relTimeSeconds: 199 })
+      ctx.sonos.getPosition.mockResolvedValueOnce({ trackIndex: 1, relTimeSeconds: 199, trackUri: OUR_TRACK_URI })
       await ctx.manager.stop()
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
         currentTimeSeconds: 300,
@@ -267,6 +280,23 @@ describe('SessionManager', () => {
       await expect(ctx.manager.resume()).rejects.toBeInstanceOf(NoActiveSessionError)
       await expect(ctx.manager.seek(10)).rejects.toBeInstanceOf(NoActiveSessionError)
     })
+
+    it('pauses using the last written position (and writes nothing) when the live read fails', async () => {
+      ctx = build({ positionSeconds: 42 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1') // lastWritten = 42
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockRejectedValueOnce(new Error('speaker blip'))
+      const session = await ctx.manager.pause()
+      expect(ctx.sonos.pause).toHaveBeenCalled()
+      expect(session).toMatchObject({ state: 'paused', positionSeconds: 42 })
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled() // no position read -> nothing to persist
+    })
+
+    it('reports playing after a seek when the transport-state read fails', async () => {
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.sonos.getTransportState.mockRejectedValueOnce(new Error('blip'))
+      expect((await ctx.manager.seek(120)).state).toBe('playing')
+    })
   })
 
   describe('sync loop', () => {
@@ -277,7 +307,7 @@ describe('SessionManager', () => {
       ctx = build({ positionSeconds: 0 })
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
-      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 80 }) // absolute 80
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 80, trackUri: OUR_TRACK_URI }) // absolute 80
       await vi.advanceTimersByTimeAsync(10_000) // one poll interval
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
         currentTimeSeconds: 80,
@@ -290,7 +320,7 @@ describe('SessionManager', () => {
       ctx = build({ positionSeconds: 100 }) // lastWritten starts at 100
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
-      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 2 }) // absolute 102, moved 2 < 5
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 2, trackUri: OUR_TRACK_URI }) // absolute 102, moved 2 < 5
       await vi.advanceTimersByTimeAsync(10_000)
       expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
     })
@@ -299,7 +329,7 @@ describe('SessionManager', () => {
       ctx = build({ positionSeconds: 0 })
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
-      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 200 }) // absolute 300 (end)
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 200, trackUri: OUR_TRACK_URI }) // absolute 300 (end)
       ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
       await vi.advanceTimersByTimeAsync(10_000)
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
@@ -315,7 +345,7 @@ describe('SessionManager', () => {
       ctx = build({ positionSeconds: 0 })
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
-      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 50 }) // absolute 50 (mid-book)
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 50, trackUri: OUR_TRACK_URI }) // absolute 50 (mid-book)
       ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
       await vi.advanceTimersByTimeAsync(10_000)
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
@@ -324,6 +354,82 @@ describe('SessionManager', () => {
         isFinished: false,
       })
       await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
+    })
+
+    it('relinquishes without writing or stopping when the speaker is taken over (foreign track)', async () => {
+      ctx = build({ positionSeconds: 100 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.stop.mockClear()
+      // A household member started a radio on the speaker: the transport reports a foreign URI. Even
+      // the zero-write worst case (Track 0 / STOPPED) must not wipe the stored position.
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 0, trackUri: 'x-sonosapi-stream:radio' })
+      ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
+      await vi.advanceTimersByTimeAsync(10_000)
+      // Neither a (foreign/zero) progress write nor a Stop of the foreign content — just relinquish.
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
+      expect(ctx.sonos.stop).not.toHaveBeenCalled()
+      await expect(ctx.manager.current()).rejects.toBeInstanceOf(NoActiveSessionError)
+    })
+
+    it('skips a tick without writing (keeping the session) when the coordinator read fails', async () => {
+      ctx = build({ positionSeconds: 0 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockRejectedValue(new Error('unreachable'))
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
+      expect(ctx.manager.hasSession()).toBe(true) // transient failure — try again next tick
+    })
+
+    it('relinquishes without wiping when the queue is cleared (empty TrackURI, STOPPED)', async () => {
+      ctx = build({ positionSeconds: 100 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.stop.mockClear()
+      // The exact zero-write worst case: a cleared queue reports Track 0 / RelTime 0 / STOPPED. The
+      // empty TrackURI marks it as not-ours, so we relinquish instead of writing currentTime 0.
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 0, trackUri: '' })
+      ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
+      expect(ctx.sonos.stop).not.toHaveBeenCalled()
+      expect(ctx.manager.hasSession()).toBe(false)
+    })
+
+    it('retries a failed write-back on the next tick (lastWrittenSeconds does not advance on failure)', async () => {
+      ctx = build({ positionSeconds: 0 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      // Position moved to 80 (past the 5s threshold). The first write fails, the second succeeds.
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 80, trackUri: OUR_TRACK_URI })
+      ctx.abs.writeProgress.mockRejectedValueOnce(new Error('ABS blip'))
+      await vi.advanceTimersByTimeAsync(10_000) // tick 1: write rejected -> lastWrittenSeconds stays 0
+      await vi.advanceTimersByTimeAsync(10_000) // tick 2: still 80s from 0 -> retried
+      const writes = ctx.abs.writeProgress.mock.calls.filter(
+        ([, , update]) => (update as { currentTimeSeconds: number }).currentTimeSeconds === 80,
+      )
+      expect(writes.length).toBe(2)
+    })
+
+    it('a tick that fires while a replace-start() is in flight does not spawn a second poll chain', async () => {
+      ctx = build({ positionSeconds: 0 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1') // loop L1, timer T1 pending
+
+      // Hold the replacing start() mid-flight (mutex held on getPlaybackManifest) so L1's timer fires
+      // and queues its tick BEHIND the running start — the exact interleaving that used to orphan a
+      // timer and leave two self-perpetuating poll chains.
+      const manifestGate = deferred<PlaybackManifest>()
+      ctx.abs.getPlaybackManifest.mockReturnValueOnce(manifestGate.promise)
+      const replacing = ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_2')
+      await vi.advanceTimersByTimeAsync(10_000) // T1 fires; its tick's syncOnce waits behind the hung start
+      manifestGate.resolve(MANIFEST) // let the replace finish: it tears down L1 and starts L2
+      await replacing
+      await vi.advanceTimersByTimeAsync(1) // drain the superseded tick (which must NOT reschedule)
+
+      ctx.sonos.getPosition.mockClear()
+      await vi.advanceTimersByTimeAsync(10_000) // exactly one live loop -> one poll, not two in lockstep
+      expect(ctx.sonos.getPosition).toHaveBeenCalledTimes(1)
     })
   })
 })

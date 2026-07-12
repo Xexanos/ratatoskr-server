@@ -66,7 +66,11 @@ describe('SonosClient playback against the fake Sonos', () => {
     await client.seek(SPEAKER, planSeek([100, 200], 250, TUNING))
     expect(fake.currentTrack).toBe(2) // 1-based on the wire
     expect(fake.relTimeSeconds).toBe(150)
-    expect(await client.getPosition(SPEAKER)).toEqual({ trackIndex: 1, relTimeSeconds: 150 })
+    expect(await client.getPosition(SPEAKER)).toEqual({
+      trackIndex: 1,
+      relTimeSeconds: 150,
+      trackUri: 'http://abs/api/items/li_1/file/20?token=s',
+    })
   })
 
   it('reads transport state and stops', async () => {
