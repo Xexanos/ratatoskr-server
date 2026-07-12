@@ -164,7 +164,10 @@ if something required is missing:
 - `SEEK_SETTLE_MS` (optional, default 1000), `SEEK_TOLERANCE_SECONDS` (optional, default 3),
   `SEEK_RETRIES` (optional, default 2) — tuning knobs for section 4; defaults come from the
   spike findings there.
-- `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default a few seconds).
+- `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default 5).
+- `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
+  user's access token expires the sync loop renews it, so the rotated pair reaches the client while
+  its old access token is still valid (section 8).
 
 ## 8. Auth
 
@@ -225,7 +228,13 @@ Server behavior:
   operation returns a `Session`, so the pair reaches the client through the polling it
   already does for its now-playing view — no new endpoint. (v1 has exactly one session and
   one session user, so "this client" is simply the authenticated caller of a session
-  endpoint.)
+  endpoint.) To keep the pair from reaching a *different* valid ABS user on a multi-user
+  server — v1 has no general same-user check (section 16) — delivery is gated on the caller
+  presenting the **pre-rotation access token** (the one the owner still holds, valid until
+  its own expiry); a caller with any other token is not offered the pair. The loop also
+  rotates at most one pair ahead of the client (it does not refresh again while a pair is
+  awaiting adoption), which bounds a mis-configured refresh margin and keeps that
+  pre-rotation token equal to the one the client is still using.
 - `stopSession` discards the in-memory tokens, so a pair still pending at stop cannot be
   redelivered afterwards. To close that race, `stopSession` returns **200 with a final
   `Session`** carrying the pending `rotatedTokens` (instead of the usual 204) whenever a
