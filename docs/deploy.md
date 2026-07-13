@@ -97,6 +97,26 @@ Manual promotion example:
 gh workflow run promote.yml -f source=sha256:<tested-digest> -f channels=latest,stable -f version=1.2.3
 ```
 
+### 3. `registry-cleanup.yml` — prune throwaway images
+
+Every build publishes two tags onto the same manifest — `testing-<sha>` and `sha-<full-sha>` —
+so without cleanup GHCR fills up. A scheduled job prunes both (they are the disposable identity
+of one commit's build) once older than **14 days**, keeping the **3 most recent** as a safety
+floor and never touching promoted channels (`latest`, `stable`).
+
+- **Triggers:** daily cron, plus `workflow_dispatch` with a `dry-run` input to preview.
+- **How:** [`dataaxiom/ghcr-cleanup-action`](https://github.com/dataaxiom/ghcr-cleanup-action),
+  which understands multi-arch manifest lists — it removes the untagged per-platform child
+  manifests along with each deleted image and leaves nothing orphaned. (A hand-rolled
+  delete-by-tag would either strand child layers or delete a manifest a co-located release tag
+  still points at.)
+
+Preview what a run would remove, without deleting:
+
+```sh
+gh workflow run registry-cleanup.yml -f dry-run=true
+```
+
 ## One-time setup
 
 - **`E2E_DISPATCH_TOKEN` secret** (in this repo): a token that can dispatch to
@@ -104,6 +124,11 @@ gh workflow run promote.yml -f source=sha256:<tested-digest> -f channels=latest,
   reach across. Absent this secret, `container.yml` still builds and pushes `testing-<sha>` and
   simply logs a notice instead of triggering E2E. A fine-grained PAT (or GitHub App token) with
   *Contents: read/write* (or *Actions*) on the E2E repo, restricted to that repo, is enough.
+- **`GHCR_CLEANUP_TOKEN` secret** (optional, for `registry-cleanup.yml`): the injected
+  `GITHUB_TOKEN` can delete versions of a package owned by an **organization**, but for a
+  **user-owned** package it may lack delete rights. If the cleanup job fails to delete, add a
+  classic PAT with `read:packages` + `delete:packages` as this secret; the job uses it in
+  preference to `GITHUB_TOKEN`. Verify safely first with `gh workflow run registry-cleanup.yml -f dry-run=true`.
 - **Package visibility:** the first push creates the GHCR package private. For
   `Xexanos/ratatoskr-e2e` to pull it, either make the package **public** (Package settings →
   Change visibility) or grant that repo read access (Package settings → Manage Actions access →

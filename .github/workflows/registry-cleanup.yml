@@ -1,0 +1,60 @@
+name: Registry cleanup
+
+# Prunes throwaway per-commit server images from GHCR so the registry does not fill up with
+# every build. container.yml publishes two tags per build onto the SAME manifest: testing-<sha>
+# (the E2E artifact) and sha-<full-sha> (the immutable handle) — both are the disposable
+# identity of one commit's build, so both are pruned together (deleting only testing-* would
+# leave the bytes alive under sha-*). Promoted release channels (latest, stable) are protected.
+#
+# Inspired by ratatoskr-app's release-validation.yml scheduled prune (14-day window,
+# keep-most-recent floor, daily cron + workflow_dispatch). That prunes GitHub *releases* with
+# plain gh; container images are manifest lists carrying multiple tags plus untagged platform
+# children, so a GHCR-aware action is used here to avoid orphaning layers or deleting a
+# manifest that a co-located release tag still points at.
+
+on:
+  # Daily, off-peak; an arbitrary minute to stay off the top-of-hour rush.
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List what would be deleted without deleting anything
+        type: boolean
+        default: false
+
+concurrency:
+  # Never cancel a prune in flight, and never run two at once.
+  group: registry-cleanup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Deleting package versions needs packages: write. For a user-owned package the injected
+  # GITHUB_TOKEN may lack delete rights; set the GHCR_CLEANUP_TOKEN secret (a PAT with
+  # read:packages + delete:packages) to override — see docs/deploy.md.
+  packages: write
+
+jobs:
+  prune-testing-images:
+    name: Prune stale testing images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete testing-*/sha-* images older than the retention window
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          owner: ${{ github.repository_owner }}
+          package: ratatoskr-server
+          token: ${{ secrets.GHCR_CLEANUP_TOKEN || github.token }}
+          # The two disposable tags of each per-commit build. Promoted channels are kept.
+          delete-tags: testing-*,sha-*
+          exclude-tags: latest,stable
+          older-than: 14 days
+          # Safety floor: always keep the few newest builds, so E2E has something to fetch
+          # even during a quiet spell (mirrors the app repo's keep-most-recent).
+          keep-n-tagged: 3
+          # Sweep any manifests left dangling by earlier deletions.
+          delete-ghost-images: true
+          delete-partial-images: true
+          dry-run: ${{ inputs.dry-run || false }}
