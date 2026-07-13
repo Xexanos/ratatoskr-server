@@ -1,4 +1,5 @@
 import { XMLBuilder } from 'fast-xml-parser'
+import { secondsToHms } from './time.js'
 
 // DIDL-Lite metadata for the transport URI (SPEC section 4). Setting a bare ABS file URL fails
 // with UPnP 714 ("Illegal MIME-Type") because the URL has no extension for Sonos to sniff — the
@@ -25,28 +26,44 @@ export interface DidlTrack {
   title: string
   mimeType: string
   url: string
+  /** Track length in seconds — becomes res@duration so the Sonos app can show a timeline (Sonos's
+   * own reported TrackDuration is 0 for these streams, SPEC §4). */
+  durationSeconds: number
+  /** Display author; becomes upnp:artist. Empty string → omitted. */
+  author: string
 }
 
 export function buildTrackMetadata(track: DidlTrack): string {
+  const item: Record<string, unknown> = {
+    '@_id': '-1',
+    '@_parentID': '-1',
+    '@_restricted': 'true',
+    // res@duration gives the app the track length (progress bar); Sonos reports it as 0 (SPEC §4).
+    res: {
+      '@_protocolInfo': `http-get:*:${track.mimeType}:*`,
+      '@_duration': secondsToHms(track.durationSeconds),
+      '#text': track.url,
+    },
+    'dc:title': track.title,
+    'upnp:class': 'object.item.audioItem.musicTrack',
+    desc: {
+      '@_id': 'cdudn',
+      '@_nameSpace': 'urn:schemas-rinconnetworks-com:metadata-1-0/',
+      '#text': 'RINCON_AssociatedZPUDN',
+    },
+  }
+  // Author shows as the artist in the Sonos app; omit it entirely when ABS gave us none.
+  if (track.author !== '') {
+    item['upnp:artist'] = track.author
+    item['upnp:album'] = track.title
+  }
   return builder.build({
     'DIDL-Lite': {
       '@_xmlns:dc': 'http://purl.org/dc/elements/1.1/',
       '@_xmlns:upnp': 'urn:schemas-upnp-org:metadata-1-0/upnp/',
       '@_xmlns:r': 'urn:schemas-rinconnetworks-com:metadata-1-0/',
       '@_xmlns': 'urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/',
-      item: {
-        '@_id': '-1',
-        '@_parentID': '-1',
-        '@_restricted': 'true',
-        res: { '@_protocolInfo': `http-get:*:${track.mimeType}:*`, '#text': track.url },
-        'dc:title': track.title,
-        'upnp:class': 'object.item.audioItem.musicTrack',
-        desc: {
-          '@_id': 'cdudn',
-          '@_nameSpace': 'urn:schemas-rinconnetworks-com:metadata-1-0/',
-          '#text': 'RINCON_AssociatedZPUDN',
-        },
-      },
+      item,
     },
   }) as string
 }

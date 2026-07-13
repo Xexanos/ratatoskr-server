@@ -36,6 +36,10 @@ export interface PlaybackManifest {
   itemId: string
   tracks: PlaybackTrack[]
   totalDurationSeconds: number
+  // Display metadata for the DIDL-Lite the speakers show (title/author in the Sonos app). Not used
+  // for playback itself; falls back to a placeholder title / empty author when ABS omits them.
+  title: string
+  author: string
 }
 
 export interface ProgressUpdate {
@@ -148,7 +152,7 @@ export class AbsClient {
   // mime, or a non-positive/non-finite duration) so the position module never sees bad data.
   async getPlaybackManifest(token: string, itemId: string): Promise<PlaybackManifest> {
     const data = await this.getJson(`/api/items/${encodeURIComponent(itemId)}`, token)
-    const media = (data as { media?: { audioFiles?: unknown } }).media
+    const media = (data as { media?: { audioFiles?: unknown; metadata?: { title?: unknown; authorName?: unknown } } }).media
     const rawFiles = Array.isArray(media?.audioFiles) ? media.audioFiles : []
     if (rawFiles.length === 0) {
       throw new ItemNotPlayableError(itemId, 'no audio files')
@@ -172,7 +176,10 @@ export class AbsClient {
     })
 
     const totalDurationSeconds = tracks.reduce((sum, track) => sum + track.durationSeconds, 0)
-    return { itemId, tracks, totalDurationSeconds }
+    const meta = media?.metadata ?? {}
+    const title = typeof meta.title === 'string' && meta.title !== '' ? meta.title : '(unknown title)'
+    const author = typeof meta.authorName === 'string' ? meta.authorName : ''
+    return { itemId, tracks, totalDurationSeconds, title, author }
   }
 
   // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts.

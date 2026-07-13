@@ -57,6 +57,10 @@ describe('SonosClient playback against the fake Sonos', () => {
     // DIDL-Lite must carry the mime per track (a bare URL would 714 — SPEC §4).
     expect(fake.queue[0]?.metadata).toContain('protocolInfo="http-get:*:audio/mpeg:*"')
     expect(fake.queue[1]?.metadata).toContain('protocolInfo="http-get:*:audio/mp4:*"')
+    // …and the display title + a res@duration (so the Sonos app shows the track and a timeline).
+    expect(fake.queue[0]?.metadata).toContain('<dc:title>One</dc:title>')
+    expect(fake.queue[0]?.metadata).toContain('duration="0:01:40"') // 100s
+    expect(fake.queue[1]?.metadata).toContain('duration="0:03:20"') // 200s
     expect(fake.transportUri).toBe(`x-rincon-queue:${SPEAKER}#0`)
     expect(fake.transportState).toBe('PLAYING')
   })

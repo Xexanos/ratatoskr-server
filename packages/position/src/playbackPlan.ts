@@ -16,6 +16,8 @@ export interface TrackInput {
   durationSeconds: number
   /** Optional display title; defaults to "Track N". */
   title?: string
+  /** Optional display author/artist; defaults to "". */
+  author?: string
 }
 
 export interface PlannedTrack {
@@ -23,6 +25,7 @@ export interface PlannedTrack {
   readonly mimeType: string
   readonly durationSeconds: number
   readonly title: string
+  readonly author: string
 }
 
 export interface PlaybackPlan {
@@ -61,6 +64,7 @@ export function planPlayback(tracks: readonly TrackInput[]): PlaybackPlan {
     mimeType: track.mimeType,
     durationSeconds: track.durationSeconds,
     title: track.title !== undefined && track.title.trim() !== '' ? track.title : `Track ${index + 1}`,
+    author: track.author ?? '',
   }))
 
   return { tracks: planned, trackDurations, totalDurationSeconds }
