@@ -62,10 +62,12 @@ on the LAN can read those URLs, so this account is deliberately not a real user'
 key is scoped to read/stream only):
 
 1. In Audiobookshelf, go to **Settings → Users → Add User**.
-2. Create a user, e.g. `ratatoskr-streamer` (a password is fine — Ratatoskr won't use it).
-3. Give it the **User** account type (read/stream access), not **Admin**. Grant it access
-   to the libraries you want to play. Do not give it download/upload/delete permissions.
-4. Create an **API key** for that user under **Settings → Users → API Keys** (make sure it
+2. Create a **Guest** account, e.g. `ratatoskr-streamer` (a password is fine — Ratatoskr won't
+   use it). Guest has the same read/stream access as a normal user but is even more limited (it
+   can't change its own password); a plain **User** works too. Do not use **Admin**.
+3. Restrict it to the audiobook library you want to play, and turn **off** the *download*
+   permission — it only needs to stream; it needs no upload/delete either.
+4. Create an **API key** for that account under **Settings → Users → API Keys** (make sure it
    is **active**), and put the key into `ABS_STREAMER_API_KEY` (below).
 
 The key is long-lived: an API key can't be exchanged for a short-lived token, and the URL
