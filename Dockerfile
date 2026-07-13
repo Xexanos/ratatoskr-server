@@ -50,8 +50,13 @@ FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 # The server binds 0.0.0.0:PORT (default 8080). Override PORT at runtime if needed.
 ENV PORT=8080
+# openssl: the entrypoint generates a self-signed certificate when no transport is configured
+# (see docker-entrypoint.sh / SPEC section 14). /tls is its default output dir; pre-create it
+# owned by the runtime user so a fresh named volume inherits writable ownership.
+RUN apk add --no-cache openssl && mkdir -p /tls && chown node:node /tls
 WORKDIR /app
 COPY --from=build --chown=node:node /prod ./
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Run unprivileged (SPEC section 14: the container runs as a non-root user). `node` is a
 # built-in uid 1000 in the official images.
@@ -65,5 +70,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD \
   node -e "require('net').connect(Number(process.env.PORT||8080),'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})"
 
-# One process, one container. SIGTERM triggers the graceful-shutdown drain (SPEC section 5).
+# The entrypoint selects the transport (own cert / plain HTTP / auto self-signed) then execs the
+# CMD. One process, one container. SIGTERM triggers the graceful-shutdown drain (SPEC section 5).
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/main.js"]

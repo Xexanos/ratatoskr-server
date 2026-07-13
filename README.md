@@ -106,6 +106,13 @@ networking so it can reach the Sonos speakers (SPEC section 12); where host netw
 available, switch to the bridge block and set `SONOS_SEED_HOST`. To build the image locally
 instead of pulling it, run `docker build -t ratatoskr-server .` from the repo root.
 
+**TLS out of the box.** If you configure no TLS certificate and do not opt into plain HTTP, the
+container generates a persistent self-signed certificate (stored in `./tls`) and serves HTTPS, so
+credentials never cross the network in cleartext. On first connect the app shows the certificate's
+SHA-256 fingerprint — compare it with the one printed in `docker compose logs` to trust the server
+(trust-on-first-use). You can instead bring your own certificate (`TLS_CERT_PATH`/`TLS_KEY_PATH`)
+or serve plain HTTP (`ALLOW_PLAIN_HTTP=true`, e.g. behind a TLS-terminating reverse proxy).
+
 ## Development
 
 This is a pnpm workspace of three packages: `position` (pure position-mapping logic),

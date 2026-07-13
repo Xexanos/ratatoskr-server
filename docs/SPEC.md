@@ -351,7 +351,12 @@ Decided with the implementing agent. Rationale in brief, so it is not re-litigat
   Sonos (in-process here, published as a GHCR image the central E2E repo consumes), and the
   CI conformance gates — is documented in [`docs/testing.md`](./testing.md).
 - **Deployment:** a single multi-stage Dockerfile, built for `amd64` and `arm64`
-  (multi-arch), on a slim Node base image. One process, one container.
+  (multi-arch), on a slim Node base image. One process, one container. The container entrypoint
+  provides a zero-config transport default: when neither TLS (`TLS_CERT_PATH`/`TLS_KEY_PATH`) nor
+  `ALLOW_PLAIN_HTTP=true` is set, it generates a persistent self-signed certificate (stored on a
+  volume, reused across restarts) and serves HTTPS, logging its SHA-256 fingerprint — see the TLS
+  decision in section 14. The application itself remains strict (it refuses to start without a
+  transport decision); the convenience lives only in the container.
 - **Container networking (Sonos):** Sonos discovery and UPnP eventing rely on UDP multicast
   and on the speakers being able to reach the server (event callbacks). Docker's default
   bridge network NATs the container onto its own subnet, which blocks both: SSDP discovery
@@ -452,11 +457,15 @@ Decisions (binding for the implementation):
   (no download/upload/delete, minimal library access).
 - **TLS between clients and Ratatoskr.** Login credentials and the 30-day refresh token
   must not cross the network in cleartext. Ratatoskr serves HTTPS using a self-signed
-  certificate or a local CA (`TLS_CERT_PATH` / `TLS_KEY_PATH`); the Android app pins that
-  certificate via its network security configuration (works with the hermetic F-Droid
-  build; no public CA involved). Plain HTTP requires the explicit opt-out
-  `ALLOW_PLAIN_HTTP=true` — for setups that terminate TLS in a reverse proxy or accept
-  the risk knowingly.
+  certificate or a local CA (`TLS_CERT_PATH` / `TLS_KEY_PATH`); the Android app trusts it on
+  first connect by its SHA-256 certificate fingerprint (trust-on-first-use — the fingerprint is
+  shown on the connect screen), so hostname/CA validation is not required and no public CA is
+  involved. Because trust is pinned to the exact certificate, that certificate must be stable
+  across restarts. The container image leans on this: with no TLS configured and no plain-HTTP
+  opt-out, its entrypoint generates a **persistent** self-signed certificate (on a mounted volume)
+  and logs the fingerprint to verify against the app — a secure zero-config default that is
+  strictly better than cleartext. Plain HTTP requires the explicit opt-out `ALLOW_PLAIN_HTTP=true`
+  — for setups that terminate TLS in a reverse proxy or accept the risk knowingly.
 - **Log redaction is normative.** Never log `Authorization` headers, query strings
   containing `token`, the request bodies of the `/auth/*` endpoints, or response bodies
   that carry tokens — specifically the `AuthTokens` returned by `/auth/*` and the
