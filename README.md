@@ -57,14 +57,20 @@ sync. Multiroom grouping, chapter awareness, and podcasts are planned for later.
 
 Individual listeners log in with their own Audiobookshelf accounts, so their progress is
 saved to the right person. Separately, Ratatoskr needs one **dedicated, low-privilege
-account** whose token it puts into the audio URLs handed to the speakers (any device on
-the LAN can read those URLs, so this account is deliberately not a real user's):
+account** whose **API key** it puts into the audio URLs handed to the speakers (any device
+on the LAN can read those URLs, so this account is deliberately not a real user's, and the
+key is scoped to read/stream only):
 
 1. In Audiobookshelf, go to **Settings → Users → Add User**.
-2. Create a user, e.g. `ratatoskr-streamer`, with a strong password.
+2. Create a user, e.g. `ratatoskr-streamer` (a password is fine — Ratatoskr won't use it).
 3. Give it the **User** account type (read/stream access), not **Admin**. Grant it access
-   to the libraries you want to play. Do not give it upload/delete permissions.
-4. Put the credentials into `ABS_STREAMER_USER` / `ABS_STREAMER_PASSWORD` (below).
+   to the libraries you want to play. Do not give it download/upload/delete permissions.
+4. Create an **API key** for that user under **Settings → Users → API Keys** (make sure it
+   is **active**), and put the key into `ABS_STREAMER_API_KEY` (below).
+
+The key is long-lived: an API key can't be exchanged for a short-lived token, and the URL
+must keep working across a multi-hour book. A leaked media URL is therefore bounded by
+*scope* — read/stream of the library only, never a real account — rather than by expiry.
 
 ## Configuration
 
@@ -76,7 +82,7 @@ cp .env.example .env
 
 The `dev` and `start` scripts load `.env` automatically (Node's `--env-file`). The full
 list of variables, with defaults, lives in [`.env.example`](.env.example). The required
-ones are `ABS_URL`, `ABS_STREAMER_USER`, and `ABS_STREAMER_PASSWORD`; the server also
+ones are `ABS_URL` and `ABS_STREAMER_API_KEY`; the server also
 requires TLS (`TLS_CERT_PATH` / `TLS_KEY_PATH`) unless you set `ALLOW_PLAIN_HTTP=true`,
 so credentials aren't sent in cleartext. On startup, any missing or invalid variable is
 reported — all problems at once — and the server refuses to run.
