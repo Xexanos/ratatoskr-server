@@ -1,0 +1,111 @@
+name: Promote image
+
+# Publishes a *tested* server image to a release channel — the second half of the flow that
+# starts in container.yml. The key property: it does NOT rebuild. It re-tags the exact
+# multi-arch manifest that E2E validated (identical bytes, addressed by digest), so what
+# ships is provably what passed. Rebuilding here would risk publishing something E2E never saw.
+#
+# Triggers:
+#   - repository_dispatch (type: e2e-passed) — the E2E repo fires this on a green run, passing
+#     the digest (and optional channels/version) it just tested. This is the automatic path:
+#     container.yml -> E2E -> (on pass) promote.yml.
+#   - workflow_dispatch — manual promotion of a known-good tag/digest.
+
+on:
+  repository_dispatch:
+    types: [e2e-passed]
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Tested tag or digest to promote (e.g. testing-abc1234 or sha256:...)
+        required: true
+      channels:
+        description: Comma-separated release tags to publish (e.g. latest,stable)
+        default: latest
+      version:
+        description: Optional immutable version tag to also publish (e.g. 1.2.3)
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve source and target tags
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_SOURCE: ${{ github.event.client_payload.digest }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          DISPATCH_CHANNELS: ${{ github.event.client_payload.channels }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          INPUT_SOURCE: ${{ inputs.source }}
+          INPUT_CHANNELS: ${{ inputs.channels }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME,,}"
+
+          if [ "$EVENT" = "repository_dispatch" ]; then
+            source="${DISPATCH_SOURCE:-$DISPATCH_TAG}"
+            channels="${DISPATCH_CHANNELS:-latest}"
+            version="${DISPATCH_VERSION:-}"
+          else
+            source="$INPUT_SOURCE"
+            channels="${INPUT_CHANNELS:-latest}"
+            version="$INPUT_VERSION"
+          fi
+
+          if [ -z "$source" ]; then
+            echo "::error::No source tag/digest to promote."
+            exit 1
+          fi
+
+          # A digest addresses the exact tested bytes; a bare tag is resolved by the registry.
+          case "$source" in
+            sha256:*) srcref="${image}@${source}" ;;
+            *)        srcref="${image}:${source}" ;;
+          esac
+
+          # version, if given, becomes an extra immutable channel.
+          [ -n "$version" ] && channels="${channels},${version}"
+
+          echo "image=${image}"   >> "$GITHUB_OUTPUT"
+          echo "srcref=${srcref}" >> "$GITHUB_OUTPUT"
+          echo "channels=${channels}" >> "$GITHUB_OUTPUT"
+
+      - name: Re-tag the tested manifest onto the release channels
+        env:
+          IMAGE: ${{ steps.plan.outputs.image }}
+          SRCREF: ${{ steps.plan.outputs.srcref }}
+          CHANNELS: ${{ steps.plan.outputs.channels }}
+        run: |
+          set -euo pipefail
+          echo "Promoting ${SRCREF} -> ${CHANNELS}"
+          targets=""
+          IFS=',' read -ra chans <<< "$CHANNELS"
+          for ch in "${chans[@]}"; do
+            ch="$(echo "$ch" | xargs)"   # trim
+            [ -n "$ch" ] || continue
+            targets="${targets} --tag ${IMAGE}:${ch}"
+          done
+          # imagetools copies the multi-arch manifest referenced by SRCREF under each new tag,
+          # without pulling or rebuilding layers — a pure server-side re-tag of the tested bytes.
+          docker buildx imagetools create ${targets} "${SRCREF}"
+          echo "Published: ${targets}"

@@ -89,6 +89,24 @@ requires TLS (`TLS_CERT_PATH` / `TLS_KEY_PATH`) unless you set `ALLOW_PLAIN_HTTP
 so credentials aren't sent in cleartext. On startup, any missing or invalid variable is
 reported — all problems at once — and the server refuses to run.
 
+## Running with Docker
+
+The server ships as a single multi-arch container image (see [`docs/deploy.md`](docs/deploy.md)).
+Build it from the repo root and run it with host networking so it can reach the Sonos speakers:
+
+```sh
+docker build -t ratatoskr-server .
+docker run --rm --network host \
+  -e ABS_URL=https://abs.lan:13378 \
+  -e ABS_STREAMER_API_KEY=... \
+  -e ALLOW_PLAIN_HTTP=true \
+  ratatoskr-server
+```
+
+Configuration is the same set of environment variables as above. Where host networking is not
+available, set `SONOS_SEED_HOST` (SPEC section 12). Published images live at
+`ghcr.io/xexanos/ratatoskr-server`.
+
 ## Development
 
 This is a pnpm workspace of three packages: `position` (pure position-mapping logic),

@@ -126,5 +126,10 @@ The strategy above is the target. Current state:
   written (Linux-only, so CI exercises it); and the **stream-only ABS API key** in media URLs (§14)
   — the session-flow integration test fetches the enqueued media URL from real ABS to prove the key
   streams as `?token=` on every supported ABS version.
+- **Server container image — present:** a single multi-stage, multi-arch
+  [`Dockerfile`](../Dockerfile) and a `container.yml` workflow publish the server to GHCR as
+  `ghcr.io/xexanos/ratatoskr-server:testing-<sha>` for the central E2E repo to consume; a
+  separate `promote.yml` re-tags a *tested* digest (no rebuild) to a release channel after E2E
+  passes. The full flow is documented in [`docs/deploy.md`](./deploy.md).
 - **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the
   central E2E repo to consume.
