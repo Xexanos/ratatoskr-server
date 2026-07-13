@@ -59,6 +59,41 @@ async function main(): Promise<void> {
     app.log.error(err)
     process.exit(1)
   }
+
+  installShutdownHandlers(app, config.shutdownTimeoutMs)
+}
+
+// Graceful shutdown (SPEC section 5): on a termination signal, close the server — the onClose hook
+// stops any active session, writing the reached position back to ABS — then exit. Bounded by a drain
+// timeout so a hung final write can't wedge the process. The first signal wins (a second, arriving
+// while draining, has no handler left and takes the default terminate). SIGTERM is what a container
+// runtime sends on `docker stop`; SIGINT covers Ctrl-C in the foreground.
+function installShutdownHandlers(app: Awaited<ReturnType<typeof buildApp>>, drainTimeoutMs: number): void {
+  let shuttingDown = false
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) return
+    shuttingDown = true
+    app.log.info({ signal }, 'received signal, shutting down')
+    const drained = app.close().then(
+      () => 'drained' as const,
+      (err: unknown) => {
+        app.log.error(err)
+        return 'drained' as const
+      },
+    )
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      const timer = setTimeout(() => resolve('timeout'), drainTimeoutMs)
+      timer.unref?.()
+    })
+    void Promise.race([drained, timedOut]).then((outcome) => {
+      // A timed-out drain means the final write may be truncated — say so, so it isn't mistaken for
+      // a clean stop (progress still survives via the periodic write-back, hence exit 0 either way).
+      if (outcome === 'timeout') app.log.warn({ drainTimeoutMs }, 'shutdown drain timed out; exiting anyway')
+      process.exit(0)
+    })
+  }
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
 }
 
 void main()

@@ -21,6 +21,9 @@ export interface Config {
   // (SPEC section 8: renew proactively, before expiry, so the client's still-valid old token can
   // authenticate the request that fetches the rotated pair).
   listeningTokenRefreshMarginSeconds: number
+  // Upper bound on the graceful-shutdown drain (SPEC section 5): a hung final write can't hold the
+  // process past this before it exits anyway.
+  shutdownTimeoutMs: number
   tls: TlsConfig | undefined
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
   // production; the tests turn it on. See src/api/responseValidation.ts.
@@ -188,6 +191,7 @@ export function loadConfig(env: Env = process.env): Config {
     seekRetries: reader.positiveNumber('SEEK_RETRIES', 2),
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     listeningTokenRefreshMarginSeconds: reader.positiveNumber('LISTENING_TOKEN_REFRESH_MARGIN_SECONDS', 300),
+    shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),
     absCaCert: absTls.caCert,
