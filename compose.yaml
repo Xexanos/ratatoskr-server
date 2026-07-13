@@ -1,0 +1,90 @@
+# docker compose deployment for the Ratatoskr server.
+#
+# Quick start:
+#   1. cp .env.example .env    and fill in ABS_URL + ABS_STREAMER_API_KEY.
+#   2. Pick a transport: keep ALLOW_PLAIN_HTTP=true (trusted LAN, or TLS terminated by a reverse
+#      proxy in front of this container) OR set TLS_CERT_PATH/TLS_KEY_PATH + the ./tls mount below.
+#   3. docker compose up -d
+#
+# Configuration is entirely via environment variables, supplied by the .env file next to this
+# compose file (loaded via `env_file` below). Every variable is documented in the block above
+# `env_file` — this file is the single reference; SPEC sections 7 and 14 carry the deeper
+# rationale. Any missing/invalid values are reported together at startup and the server refuses to
+# run. The image is published at ghcr.io/xexanos/ratatoskr-server (run `docker login ghcr.io`
+# first if the package is private).
+
+services:
+  ratatoskr:
+    image: ghcr.io/xexanos/ratatoskr-server:${RATATOSKR_IMAGE_TAG:-latest}
+    container_name: ratatoskr-server
+    restart: unless-stopped
+
+    # Sonos discovery (SSDP multicast) and UPnP event callbacks need the host LAN stack, so host
+    # networking is the robust default for a LAN appliance (SPEC section 12). The server then
+    # listens on PORT (default 8080) directly on the host; under host networking `ports:` is
+    # ignored. Host networking is a Linux feature — on Docker Desktop it behaves differently, so
+    # deploy on a Linux host.
+    network_mode: host
+
+    # --- Bridge-networking alternative ---
+    # If you cannot use host networking, remove `network_mode: host` above, uncomment the ports,
+    # and set SONOS_SEED_HOST (see below) to a speaker IP — multicast SSDP won't cross the bridge,
+    # but the topology then loads by a direct unicast call, and outbound control + the speaker
+    # fetching audio from ABS still work.
+    # ports:
+    #   - "8080:8080"
+
+    # Give the graceful-shutdown drain (SPEC section 5) room to write the final position back to
+    # ABS before the container is killed — comfortably above SHUTDOWN_TIMEOUT_MS (default 5000).
+    stop_grace_period: 15s
+
+    # ───────────────────────────────────────────────────────────────────────────────────────────
+    # Environment variables — set these in .env (this block is the reference for what each does).
+    #
+    # Required:
+    #   ABS_URL                 Audiobookshelf base URL, e.g. https://192.168.1.50:13378. Use
+    #                           https:// (SPEC section 14); for an http:// URL also set
+    #                           ABS_ALLOW_PLAIN_HTTP=true.
+    #   ABS_STREAMER_API_KEY    API key of a dedicated, low-privilege, stream-only ABS account
+    #                           (README → "Set up the streamer account"). It is embedded in the
+    #                           media URLs handed to speakers, so it must never be a real listener's.
+    #
+    # Ratatoskr's own listener / TLS (SPEC section 14) — the server refuses to start without one of:
+    #   ALLOW_PLAIN_HTTP=true         Serve plain HTTP. Trusted LAN, or TLS terminated by a proxy.
+    #   TLS_CERT_PATH, TLS_KEY_PATH   Serve HTTPS directly (mount the files via the volume below).
+    #
+    # Audiobookshelf transport (SPEC section 14):
+    #   ABS_ALLOW_PLAIN_HTTP=true        Accept a plain-http ABS_URL (cleartext) — trusted LAN only.
+    #   ABS_CA_CERT / ABS_CA_CERT_PATH   Trust a self-signed / private-CA ABS certificate (inline
+    #                                    PEM, or a mounted file path; set only one).
+    #   ABS_TLS_INSECURE=true            Disable ABS cert verification entirely (MITM-vulnerable;
+    #                                    last resort, mutually exclusive with ABS_CA_CERT*).
+    #
+    # Sonos:
+    #   SONOS_SEED_HOST         A speaker's IP. Only needed where SSDP multicast is unreliable (or
+    #                           under bridge networking); discovery is automatic otherwise.
+    #
+    # Listener port:
+    #   PORT                    Default 8080.
+    #
+    # Optional tuning (defaults shown):
+    #   POLL_INTERVAL_SECONDS=15                     how often the sync loop polls speaker position
+    #   SEEK_SETTLE_MS=1000                          settle delay after a seek before verifying
+    #   SEEK_TOLERANCE_SECONDS=3                     acceptable post-seek position error
+    #   SEEK_RETRIES=2                               seek retry attempts
+    #   PROGRESS_WRITE_THRESHOLD_SECONDS=5           min movement before writing progress to ABS
+    #   LISTENING_TOKEN_REFRESH_MARGIN_SECONDS=300   renew the ABS token this long before it expires
+    #   SHUTDOWN_TIMEOUT_MS=5000                     upper bound on the graceful-shutdown drain
+    #   VALIDATE_RESPONSES=true                      validate responses against the contract (dev aid)
+    #
+    # Deployment-only (read by compose, not the app):
+    #   RATATOSKR_IMAGE_TAG     Image tag to deploy (default: latest).
+    # ───────────────────────────────────────────────────────────────────────────────────────────
+    env_file:
+      - path: .env
+        required: false
+
+    # TLS certificates (and/or an ABS CA PEM) for the *_PATH variables above. Uncomment together
+    # with TLS_CERT_PATH/TLS_KEY_PATH (or ABS_CA_CERT_PATH), and drop the files into ./tls.
+    # volumes:
+    #   - ./tls:/tls:ro

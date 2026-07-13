@@ -91,21 +91,20 @@ reported — all problems at once — and the server refuses to run.
 
 ## Running with Docker
 
-The server ships as a single multi-arch container image (see [`docs/deploy.md`](docs/deploy.md)).
-Build it from the repo root and run it with host networking so it can reach the Sonos speakers:
+The server ships as a single multi-arch container image published at
+`ghcr.io/xexanos/ratatoskr-server` (build details and the publishing pipeline are in
+[`docs/deploy.md`](docs/deploy.md)). The recommended way to deploy it is the provided
+[`compose.yaml`](compose.yaml):
 
 ```sh
-docker build -t ratatoskr-server .
-docker run --rm --network host \
-  -e ABS_URL=https://abs.lan:13378 \
-  -e ABS_STREAMER_API_KEY=... \
-  -e ALLOW_PLAIN_HTTP=true \
-  ratatoskr-server
+cp .env.example .env      # fill in ABS_URL + ABS_STREAMER_API_KEY
+docker compose up -d
 ```
 
-Configuration is the same set of environment variables as above. Where host networking is not
-available, set `SONOS_SEED_HOST` (SPEC section 12). Published images live at
-`ghcr.io/xexanos/ratatoskr-server`.
+`compose.yaml` documents every environment variable inline and runs the container with host
+networking so it can reach the Sonos speakers (SPEC section 12); where host networking is not
+available, switch to the bridge block and set `SONOS_SEED_HOST`. To build the image locally
+instead of pulling it, run `docker build -t ratatoskr-server .` from the repo root.
 
 ## Development
 
