@@ -1,4 +1,5 @@
 import { XMLBuilder } from 'fast-xml-parser'
+import { secondsToHms } from './time.js'
 
 // DIDL-Lite metadata for the transport URI (SPEC section 4). Setting a bare ABS file URL fails
 // with UPnP 714 ("Illegal MIME-Type") because the URL has no extension for Sonos to sniff — the
@@ -25,6 +26,11 @@ export interface DidlTrack {
   title: string
   mimeType: string
   url: string
+  /** Track length in seconds — becomes res@duration so the Sonos app can show a timeline (Sonos's
+   * own reported TrackDuration is 0 for these streams, SPEC §4). */
+  durationSeconds: number
+  /** Display author; becomes upnp:artist. Empty string → omitted. */
+  author: string
 }
 
 export function buildTrackMetadata(track: DidlTrack): string {
@@ -38,8 +44,19 @@ export function buildTrackMetadata(track: DidlTrack): string {
         '@_id': '-1',
         '@_parentID': '-1',
         '@_restricted': 'true',
-        res: { '@_protocolInfo': `http-get:*:${track.mimeType}:*`, '#text': track.url },
+        // res@duration gives the app the track length (progress bar); Sonos reports it as 0 (SPEC §4).
+        res: {
+          '@_protocolInfo': `http-get:*:${track.mimeType}:*`,
+          '@_duration': secondsToHms(track.durationSeconds),
+          '#text': track.url,
+        },
         'dc:title': track.title,
+        // The author is the artist — omitted when ABS gave none. The book title is always the album
+        // (independent of the author), so a multi-file book's tracks group under it in the app. Until
+        // chapter titles land (§16), dc:title is also the book title; the target mapping is
+        // title=chapter / album=book / artist=author.
+        ...(track.author !== '' ? { 'upnp:artist': track.author } : {}),
+        'upnp:album': track.title,
         'upnp:class': 'object.item.audioItem.musicTrack',
         desc: {
           '@_id': 'cdudn',

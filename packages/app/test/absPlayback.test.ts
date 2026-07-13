@@ -22,6 +22,7 @@ describe('AbsClient.getPlaybackManifest', () => {
       jsonResponse({
         media: {
           duration: 999,
+          metadata: { title: 'A Book', authorName: 'Jane Doe' },
           audioFiles: [
             { ino: '20', index: 2, duration: 200, mimeType: 'audio/mp4' },
             { ino: '10', index: 1, duration: 100, mimeType: 'audio/mpeg' },
@@ -39,6 +40,17 @@ describe('AbsClient.getPlaybackManifest', () => {
       { ino: '20', durationSeconds: 200, mimeType: 'audio/mp4' },
     ])
     expect(manifest.totalDurationSeconds).toBe(300)
+    expect(manifest.title).toBe('A Book')
+    expect(manifest.author).toBe('Jane Doe')
+  })
+
+  it('falls back to a placeholder title / empty author when ABS omits metadata', async () => {
+    stubFetch(() =>
+      jsonResponse({ media: { audioFiles: [{ ino: '1', index: 1, duration: 100, mimeType: 'audio/mpeg' }] } }),
+    )
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
+    expect(manifest.title).toBe('(unknown title)')
+    expect(manifest.author).toBe('')
   })
 
   it('rejects a book with no audio files', async () => {

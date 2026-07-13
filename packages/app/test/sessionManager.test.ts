@@ -13,6 +13,8 @@ const MANIFEST: PlaybackManifest = {
     { ino: '20', durationSeconds: 200, mimeType: 'audio/mp4' },
   ],
   totalDurationSeconds: 300,
+  title: 'The Test Book',
+  author: 'Jane Doe',
 }
 
 // A minimal JWT (header.payload.signature, base64url) carrying an `exp` claim, so the manager's

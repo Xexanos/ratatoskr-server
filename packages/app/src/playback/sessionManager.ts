@@ -85,6 +85,9 @@ export class SessionManager {
           url: this.mediaUrl(itemId, track.ino),
           mimeType: track.mimeType,
           durationSeconds: track.durationSeconds,
+          // The book's title/author on every track, so the Sonos app shows the book (SPEC §4).
+          title: manifest.title,
+          author: manifest.author,
         })),
       )
 
