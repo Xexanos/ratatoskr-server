@@ -72,7 +72,11 @@ it never rebuilds.
 - **Triggers:** `push` to `main` and `workflow_dispatch` (build + push + trigger E2E);
   `pull_request` (build both arches as a bitrot guard, **no push**).
 - **Publishes:** `ghcr.io/xexanos/ratatoskr-server:testing-<short-sha>` (the E2E artifact) and
-  `sha-<full-sha>` (an immutable handle for digest-based promotion), multi-arch.
+  `sha-<full-sha>` (an immutable handle for digest-based promotion), multi-arch. It also builds
+  and publishes the fake Sonos double (`packages/fake-sonos/Dockerfile`) to
+  `ghcr.io/xexanos/ratatoskr-fake-sonos` with the same tags, so the E2E stack pulls the fake
+  matching the tested server commit (`sha-<sha>`). Only the server image is promoted to a
+  release channel; the fake is test-only.
 - **Then:** dispatches `event_type: server-image` to `Xexanos/ratatoskr-e2e` with the image ref
   and digest, so E2E runs against exactly this build.
 
@@ -129,10 +133,11 @@ gh workflow run registry-cleanup.yml -f dry-run=true
   **user-owned** package it may lack delete rights. If the cleanup job fails to delete, add a
   classic PAT with `read:packages` + `delete:packages` as this secret; the job uses it in
   preference to `GITHUB_TOKEN`. Verify safely first with `gh workflow run registry-cleanup.yml -f dry-run=true`.
-- **Package visibility:** the first push creates the GHCR package private. For
-  `Xexanos/ratatoskr-e2e` to pull it, either make the package **public** (Package settings →
-  Change visibility) or grant that repo read access (Package settings → Manage Actions access →
-  add the E2E repo). Pulls in the E2E workflow authenticate with its own `GITHUB_TOKEN`.
+- **Package visibility:** the first push creates each GHCR package private. For
+  `Xexanos/ratatoskr-e2e` to pull them, do this for **both** packages (`ratatoskr-server` **and**
+  `ratatoskr-fake-sonos`): either make the package **public** (Package settings → Change
+  visibility) or grant that repo read access (Package settings → Manage Actions access → add the
+  E2E repo). Pulls in the E2E workflow authenticate with its own `GITHUB_TOKEN`.
 - **E2E-side callback:** on a successful run, the E2E workflow promotes the image it just tested:
   ```yaml
   # in Xexanos/ratatoskr-e2e, after the E2E job succeeds

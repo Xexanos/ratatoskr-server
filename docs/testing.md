@@ -131,5 +131,7 @@ The strategy above is the target. Current state:
   `ghcr.io/xexanos/ratatoskr-server:testing-<sha>` for the central E2E repo to consume; a
   separate `promote.yml` re-tags a *tested* digest (no rebuild) to a release channel after E2E
   passes. The full flow is documented in [`docs/deploy.md`](./deploy.md).
-- **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the
-  central E2E repo to consume.
+- **Fake Sonos image — present:** the same `container.yml` also builds
+  `packages/fake-sonos` and publishes it to GHCR as `ghcr.io/xexanos/ratatoskr-fake-sonos`
+  with the same `testing-<sha>` / `sha-<sha>` tags, so the central E2E repo pulls the fake
+  that matches the exact server commit under test.

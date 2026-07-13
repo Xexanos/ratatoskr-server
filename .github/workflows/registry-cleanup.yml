@@ -1,7 +1,8 @@
 name: Registry cleanup
 
-# Prunes throwaway per-commit server images from GHCR so the registry does not fill up with
-# every build. container.yml publishes two tags per build onto the SAME manifest: testing-<sha>
+# Prunes throwaway per-commit images from GHCR (both the server and the fake Sonos package) so
+# the registry does not fill up with every build. container.yml publishes two tags per build
+# onto the SAME manifest for each package: testing-<sha>
 # (the E2E artifact) and sha-<full-sha> (the immutable handle) — both are the disposable
 # identity of one commit's build, so both are pruned together (deleting only testing-* would
 # leave the bytes alive under sha-*). Promoted release channels (latest, stable) are protected.
@@ -37,15 +38,19 @@ permissions:
 
 jobs:
   prune-testing-images:
-    name: Prune stale testing images
+    name: Prune stale testing images (${{ matrix.package }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [ratatoskr-server, ratatoskr-fake-sonos]
     steps:
       - name: Delete testing-*/sha-* images older than the retention window
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           owner: ${{ github.repository_owner }}
-          package: ratatoskr-server
+          package: ${{ matrix.package }}
           token: ${{ secrets.GHCR_CLEANUP_TOKEN || github.token }}
           # The two disposable tags of each per-commit build. Promoted channels are kept.
           delete-tags: testing-*,sha-*

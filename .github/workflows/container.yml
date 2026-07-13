@@ -2,9 +2,11 @@ name: Container image
 
 # Builds the multi-arch server image (SPEC section 12) and publishes it to GHCR as
 # `testing-<short-sha>` — the artifact the central E2E stack (Xexanos/ratatoskr-e2e)
-# pulls to run the full app + server + ABS + fake-Sonos suite. After pushing, it hands
-# the exact image ref to the E2E repo via repository_dispatch. Promotion of a *tested*
-# image to a release channel is a separate, no-rebuild step (see promote.yml).
+# pulls to run the full app + server + ABS + fake-Sonos suite. It also publishes the fake Sonos
+# double (packages/fake-sonos) with the same tags, so the E2E stack pulls the fake matching the
+# server commit under test. After pushing, it hands the exact image ref to the E2E repo via
+# repository_dispatch. Promotion of a *tested* image to a release channel is a separate,
+# no-rebuild step (see promote.yml).
 #
 # - pull_request : build both arches as a bitrot guard; never pushes (fork PRs have no
 #                  registry write anyway).
@@ -32,6 +34,10 @@ env:
   # GHCR requires a lowercase path; the owner (Xexanos) is mixed-case, so metadata-action
   # lowercases it for the tags below, and the dispatch job lowercases it explicitly.
   IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server
+  # The fake Sonos double lives in this repo (packages/fake-sonos) and is published alongside
+  # the server with the SAME tags, so the central E2E stack can pull the fake matching the exact
+  # commit under test (sha-<sha>). Consumed by Xexanos/ratatoskr-e2e; not a user-facing artifact.
+  FAKE_IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-fake-sonos
 
 jobs:
   build:
@@ -88,6 +94,33 @@ jobs:
           cache-to: type=gha,mode=max
           # Keep the manifest list clean (no extra attestation entries) so the E2E stack can
           # pull it by tag or digest without surprises.
+          provenance: false
+          sbom: false
+
+      # Publish the fake Sonos double alongside the server, with the SAME tags (testing-<sha> +
+      # sha-<full-sha>). The E2E repo derives its ref from the dispatched sha (sha-<sha>), so the
+      # fake always matches the server commit under test. Its Dockerfile builds from the repo root.
+      - name: Fake Sonos image metadata
+        id: meta-fake
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.FAKE_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.image.outputs.tag }}
+            type=sha,format=long
+
+      - name: Build and push the fake Sonos
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/fake-sonos/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-fake.outputs.tags }}
+          labels: ${{ steps.meta-fake.outputs.labels }}
+          # Separate cache scope so it doesn't collide with the server image's layers.
+          cache-from: type=gha,scope=fake-sonos
+          cache-to: type=gha,mode=max,scope=fake-sonos
           provenance: false
           sbom: false
 
