@@ -16,9 +16,11 @@ central E2E stack and **promotes** it to a release channel only after E2E passes
   ```sh
   docker build -t ratatoskr-server .
   ```
-- **Configuration** is entirely via environment variables — see [`.env.example`](../.env.example)
-  and SPEC section 7. `ABS_URL` and `ABS_STREAMER_API_KEY` are required; TLS is required unless
-  `ALLOW_PLAIN_HTTP=true`. Invalid config is reported (all problems at once) and the container
+- **Configuration** is entirely via environment variables — documented inline in
+  [`compose.yaml`](../compose.yaml) (the operator reference) and SPEC section 7. `ABS_URL` and
+  `ABS_STREAMER_API_KEY` are required; for the listener transport, the container auto-generates a
+  self-signed certificate unless you set `TLS_CERT_PATH`/`TLS_KEY_PATH` or `ALLOW_PLAIN_HTTP=true`
+  (see "TLS" in the README). Invalid config is reported (all problems at once) and the container
   exits non-zero at startup.
 - **Health:** the image's `HEALTHCHECK` is a raw TCP connect to `PORT` (liveness only — works
   for both HTTP and HTTPS). Application health, including ABS/Sonos reachability, is the
@@ -28,17 +30,21 @@ central E2E stack and **promotes** it to a release channel only after E2E passes
 
 ### Running
 
-Sonos discovery and UPnP eventing need the host LAN, so on Linux run with host networking; where
-that is not possible, set `SONOS_SEED_HOST` (SPEC section 12, "Container networking"):
+Operators deploy with the single [`compose.yaml`](../compose.yaml) (see the README) — no repository
+checkout required. Sonos discovery and UPnP eventing need the host LAN, so it runs with host
+networking; where that is not possible, switch to the bridge block and set `SONOS_SEED_HOST` (SPEC
+section 12, "Container networking"). For a quick manual run without compose:
 
 ```sh
 docker run --rm --network host \
   -e ABS_URL=https://abs.lan:13378 \
   -e ABS_STREAMER_API_KEY=... \
-  -e TLS_CERT_PATH=/tls/cert.pem -e TLS_KEY_PATH=/tls/key.pem \
-  -v /path/to/tls:/tls:ro \
+  -v "$PWD/tls:/tls" \
   ghcr.io/xexanos/ratatoskr-server:latest
 ```
+
+With no TLS variables set, the entrypoint generates a persistent self-signed certificate in the
+mounted `/tls` and serves HTTPS (fingerprint logged for the app's trust-on-first-use).
 
 ## Publishing pipeline
 

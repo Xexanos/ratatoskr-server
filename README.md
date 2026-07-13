@@ -93,18 +93,20 @@ reported — all problems at once — and the server refuses to run.
 
 The server ships as a single multi-arch container image published at
 `ghcr.io/xexanos/ratatoskr-server` (build details and the publishing pipeline are in
-[`docs/deploy.md`](docs/deploy.md)). The recommended way to deploy it is the provided
-[`compose.yaml`](compose.yaml):
+[`docs/deploy.md`](docs/deploy.md)). To deploy it, download the single
+[`compose.yaml`](compose.yaml), set `ABS_URL` and `ABS_STREAMER_API_KEY` in its `environment:`
+block, and start it — you don't need the rest of the repository:
 
 ```sh
-cp .env.example .env      # fill in ABS_URL + ABS_STREAMER_API_KEY
+curl -O https://raw.githubusercontent.com/Xexanos/ratatoskr-server/main/compose.yaml
+# edit ABS_URL + ABS_STREAMER_API_KEY in compose.yaml, then:
 docker compose up -d
 ```
 
 `compose.yaml` documents every environment variable inline and runs the container with host
 networking so it can reach the Sonos speakers (SPEC section 12); where host networking is not
 available, switch to the bridge block and set `SONOS_SEED_HOST`. To build the image locally
-instead of pulling it, run `docker build -t ratatoskr-server .` from the repo root.
+instead of pulling it, run `docker build -t ratatoskr-server .` from a repository checkout.
 
 **TLS out of the box.** If you configure no TLS certificate and do not opt into plain HTTP, the
 container generates a persistent self-signed certificate (stored in `./tls`) and serves HTTPS, so

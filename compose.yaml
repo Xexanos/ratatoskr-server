@@ -1,23 +1,21 @@
 # docker compose deployment for the Ratatoskr server.
 #
 # Quick start:
-#   1. cp .env.example .env    and fill in ABS_URL + ABS_STREAMER_API_KEY.
+#   1. Set ABS_URL and ABS_STREAMER_API_KEY in the `environment:` block below.
 #   2. docker compose up -d
 #
-# That's it — with no TLS configured, the container generates a persistent self-signed certificate
-# in ./tls and serves HTTPS (see the "TLS" section below). On first connect the app shows the
-# certificate's SHA-256 fingerprint; match it against the one printed in `docker compose logs`.
+# Everything is configured in this one file — no separate .env needed. Each variable is documented
+# inline; SPEC sections 7 and 14 carry the deeper rationale. Missing or invalid values are reported
+# together at startup and the server refuses to run.
 #
-# Configuration is entirely via environment variables, supplied by the .env file next to this
-# compose file (loaded via `env_file` below). Every variable is documented in the block above
-# `env_file` — this file is the single reference; SPEC sections 7 and 14 carry the deeper
-# rationale. Any missing/invalid values are reported together at startup and the server refuses to
-# run. The image is published at ghcr.io/xexanos/ratatoskr-server (run `docker login ghcr.io`
-# first if the package is private).
+# With no TLS configured (the default below), the container generates a persistent self-signed
+# certificate in ./tls and serves HTTPS. On first connect the app shows the certificate's SHA-256
+# fingerprint — match it against the one printed in `docker compose logs`.
 
 services:
   ratatoskr:
-    image: ghcr.io/xexanos/ratatoskr-server:${RATATOSKR_IMAGE_TAG:-latest}
+    # Change the tag to pin a specific version instead of tracking the latest release.
+    image: ghcr.io/xexanos/ratatoskr-server:latest
     container_name: ratatoskr-server
     restart: unless-stopped
 
@@ -40,65 +38,60 @@ services:
     # ABS before the container is killed — comfortably above SHUTDOWN_TIMEOUT_MS (default 5000).
     stop_grace_period: 15s
 
-    # ───────────────────────────────────────────────────────────────────────────────────────────
-    # Environment variables — set these in .env (this block is the reference for what each does).
-    #
-    # Required:
-    #   ABS_URL                 Audiobookshelf base URL, e.g. https://192.168.1.50:13378. Use
-    #                           https:// (SPEC section 14); for an http:// URL also set
-    #                           ABS_ALLOW_PLAIN_HTTP=true.
-    #   ABS_STREAMER_API_KEY    API key of a dedicated, low-privilege, stream-only ABS account
-    #                           (README → "Set up the streamer account"). It is embedded in the
-    #                           media URLs handed to speakers, so it must never be a real listener's.
-    #
-    # Ratatoskr's own listener / TLS (SPEC section 14) — pick ONE; the default (none of these) is
-    # a container-generated self-signed cert:
-    #   (default)                     No TLS vars, no ALLOW_PLAIN_HTTP → the entrypoint generates a
-    #                                 persistent self-signed cert in ./tls and serves HTTPS. The app
-    #                                 trusts it on first connect by SHA-256 fingerprint (printed in
-    #                                 the logs). Best zero-config option; keeps credentials off the
-    #                                 wire in cleartext.
-    #   TLS_CERT_PATH, TLS_KEY_PATH   Serve HTTPS with your OWN certificate (drop the files in ./tls
-    #                                 and point at /tls/...). Skips generation.
-    #   ALLOW_PLAIN_HTTP=true         Serve plain HTTP. Trusted LAN, or TLS terminated by a proxy.
-    #
-    # Audiobookshelf transport (SPEC section 14):
-    #   ABS_ALLOW_PLAIN_HTTP=true        Accept a plain-http ABS_URL (cleartext) — trusted LAN only.
-    #   ABS_CA_CERT / ABS_CA_CERT_PATH   Trust a self-signed / private-CA ABS certificate (inline
-    #                                    PEM, or a mounted file path; set only one).
-    #   ABS_TLS_INSECURE=true            Disable ABS cert verification entirely (MITM-vulnerable;
-    #                                    last resort, mutually exclusive with ABS_CA_CERT*).
-    #
-    # Sonos:
-    #   SONOS_SEED_HOST         A speaker's IP. Only needed where SSDP multicast is unreliable (or
-    #                           under bridge networking); discovery is automatic otherwise.
-    #
-    # Listener port:
-    #   PORT                    Default 8080.
-    #
-    # Optional tuning (defaults shown):
-    #   POLL_INTERVAL_SECONDS=15                     how often the sync loop polls speaker position
-    #   SEEK_SETTLE_MS=1000                          settle delay after a seek before verifying
-    #   SEEK_TOLERANCE_SECONDS=3                     acceptable post-seek position error
-    #   SEEK_RETRIES=2                               seek retry attempts
-    #   PROGRESS_WRITE_THRESHOLD_SECONDS=5           min movement before writing progress to ABS
-    #   LISTENING_TOKEN_REFRESH_MARGIN_SECONDS=300   renew the ABS token this long before it expires
-    #   SHUTDOWN_TIMEOUT_MS=5000                     upper bound on the graceful-shutdown drain
-    #   VALIDATE_RESPONSES=true                      validate responses against the contract (dev aid)
-    #
-    # Deployment-only (read by compose, not the app):
-    #   RATATOSKR_IMAGE_TAG     Image tag to deploy (default: latest).
-    # ───────────────────────────────────────────────────────────────────────────────────────────
-    env_file:
-      - path: .env
-        required: false
+    environment:
+      # ─────────────────────────── Required — edit these two ───────────────────────────
+      # Your Audiobookshelf base URL. Use https:// so credentials and tokens are not sent in
+      # cleartext (SPEC section 14); for an http:// URL also uncomment ABS_ALLOW_PLAIN_HTTP below.
+      ABS_URL: "https://192.168.1.50:13378"
+      # API key of a dedicated, low-privilege, stream-only ABS account (README → "Set up the
+      # streamer account"). It is embedded in the media URLs handed to speakers, so it must never
+      # be a real listener's account.
+      ABS_STREAMER_API_KEY: ""
 
-    # ./tls persists the auto-generated self-signed certificate across restarts (so the app's
-    # pinned fingerprint stays valid), and is also where you drop your OWN cert.pem/key.pem or an
-    # ABS CA PEM if you set the *_PATH variables above. The container runs as uid 1000, so this
-    # directory must be writable by it: on Linux, create it first with `mkdir -p tls` (or
-    # `chown 1000:1000 tls` if it already exists root-owned). Prefer a named volume instead? Replace
-    # the line below with `- ratatoskr-tls:/tls` and add a top-level `volumes: { ratatoskr-tls: {} }`
-    # — it inherits writable ownership automatically, at the cost of the cert being less easy to see.
+      # ─────────── Ratatoskr's own listener / TLS (SPEC section 14) — pick ONE ───────────
+      # Default (all three below left commented): the container generates a persistent self-signed
+      # certificate in ./tls and serves HTTPS; the app trusts it on first connect by the SHA-256
+      # fingerprint printed in the logs. Best zero-config option; keeps credentials off the wire.
+      #
+      # Serve plain HTTP instead (trusted LAN, or TLS terminated by a reverse proxy):
+      # ALLOW_PLAIN_HTTP: "true"
+      # Or serve HTTPS with your OWN certificate (drop the files in ./tls):
+      # TLS_CERT_PATH: "/tls/cert.pem"
+      # TLS_KEY_PATH: "/tls/key.pem"
+
+      # ─────────── Audiobookshelf transport (SPEC section 14) ───────────
+      # Accept a plain-http ABS_URL (ABS credentials cross the network in cleartext) — trusted LAN only:
+      # ABS_ALLOW_PLAIN_HTTP: "true"
+      # Trust a self-signed / private-CA ABS certificate — inline PEM OR a mounted path (set one):
+      # ABS_CA_CERT: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
+      # ABS_CA_CERT_PATH: "/tls/abs-ca.pem"
+      # Disable ABS cert verification entirely (MITM-vulnerable; last resort, excludes ABS_CA_CERT*):
+      # ABS_TLS_INSECURE: "true"
+
+      # ─────────── Sonos ───────────
+      # A speaker's IP. Only needed where SSDP multicast is unreliable (or under bridge networking);
+      # discovery is automatic otherwise.
+      # SONOS_SEED_HOST: "192.168.1.60"
+
+      # ─────────── Listener port ───────────
+      # PORT: "8080"
+
+      # ─────────── Optional tuning (defaults shown; uncomment to change) ───────────
+      # POLL_INTERVAL_SECONDS: "15"                     # how often the sync loop polls speaker position
+      # SEEK_SETTLE_MS: "1000"                          # settle delay after a seek before verifying
+      # SEEK_TOLERANCE_SECONDS: "3"                     # acceptable post-seek position error
+      # SEEK_RETRIES: "2"                               # seek retry attempts
+      # PROGRESS_WRITE_THRESHOLD_SECONDS: "5"           # min movement before writing progress to ABS
+      # LISTENING_TOKEN_REFRESH_MARGIN_SECONDS: "300"   # renew the ABS token this long before it expires
+      # SHUTDOWN_TIMEOUT_MS: "5000"                     # upper bound on the graceful-shutdown drain
+      # VALIDATE_RESPONSES: "true"                      # validate responses against the contract (dev aid)
+
+    # ./tls persists the auto-generated self-signed certificate across restarts (so the app's pinned
+    # fingerprint stays valid), and is also where you drop your OWN cert.pem/key.pem or an ABS CA PEM
+    # if you set the *_PATH variables above. The container runs as uid 1000, so this directory must
+    # be writable by it: on Linux, create it first with `mkdir -p tls` (or `chown 1000:1000 tls` if
+    # it already exists root-owned). Prefer a named volume instead? Replace the line below with
+    # `- ratatoskr-tls:/tls` and add a top-level `volumes: { ratatoskr-tls: {} }` — it inherits
+    # writable ownership automatically, at the cost of the cert being less easy to inspect.
     volumes:
       - ./tls:/tls
