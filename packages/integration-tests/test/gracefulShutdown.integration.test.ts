@@ -2,7 +2,7 @@ import { once } from 'node:events'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { FakeSonos } from '@ratatoskr/fake-sonos'
 import { assertServerBuilt, cleanEnv, freePort, spawnServer, stopServer, waitUntilReady, type SpawnedServer } from './helpers.js'
-import { createAbsUser } from './absSeed.js'
+import { createAbsUser, createStreamerApiKey } from './absSeed.js'
 
 // Graceful shutdown (SPEC §5): on SIGTERM the compiled server must stop the active session — writing
 // the reached position back to the real ABS — before exiting cleanly. Skipped on Windows, where Node
@@ -42,7 +42,7 @@ describe.skipIf(abs === null || process.platform === 'win32')('graceful shutdown
     itemId = abs!.itemId
 
     await createAbsUser(absBase, abs!.adminToken, USER, PASS)
-    await createAbsUser(absBase, abs!.adminToken, STREAMER, STREAMER_PASS)
+    const streamerApiKey = await createStreamerApiKey(absBase, abs!.adminToken, STREAMER, STREAMER_PASS)
 
     fake = new FakeSonos({ uuid: SPEAKER_UUID, roomName: 'Test Room' })
     const sonosInfo = await fake.start()
@@ -53,8 +53,7 @@ describe.skipIf(abs === null || process.platform === 'win32')('graceful shutdown
       cleanEnv({
         ABS_URL: absBase,
         ABS_ALLOW_PLAIN_HTTP: 'true',
-        ABS_STREAMER_USER: STREAMER,
-        ABS_STREAMER_PASSWORD: STREAMER_PASS,
+        ABS_STREAMER_API_KEY: streamerApiKey,
         ALLOW_PLAIN_HTTP: 'true',
         SONOS_SEED_HOST: sonosInfo.seedHost,
         SONOS_DISABLE_EVENTS: '1',

@@ -1,5 +1,4 @@
 import { AbsClient } from './abs/client.js'
-import { StreamerSession } from './abs/streamerSession.js'
 import { buildAbsDispatcher } from './abs/transport.js'
 import { buildApp } from './api/app.js'
 import { ConfigError, loadConfig } from './config/index.js'
@@ -29,27 +28,23 @@ async function main(): Promise<void> {
     )
     process.exit(1)
   }
-  // Log the dedicated streamer identity in at startup (SPEC section 8) so its short-lived token is
-  // ready for the media URLs handed to speakers. Only attempt it when ABS is actually reachable:
-  //  - reachable + login fails  -> a real credential misconfiguration; fail loud, like a bad ABS_URL.
-  //  - unreachable at startup    -> logging in is pointless; the session manager logs the streamer in
-  //                                 lazily on first playback, once ABS is back (see /v1/health).
-  const streamer = new StreamerSession(abs, config.absStreamerUser, config.absStreamerPassword)
+  // The media URLs handed to speakers carry a long-lived stream-only ABS API key (ABS_STREAMER_API_KEY,
+  // SPEC section 14). There is no login to do, but exercise the key once against a reachable ABS so a
+  // wrong / inactive / revoked key fails loud here rather than as a silent playback failure later.
+  // Only when ABS is actually reachable: if it is merely down, defer — /health reports it and the
+  // first playback will surface a genuinely bad key.
   if (absStatus === 'ok') {
     try {
-      await streamer.login()
+      await abs.validateToken(config.absStreamerApiKey)
     } catch {
       console.error(
-        'Streamer login failed against a reachable Audiobookshelf. Check ABS_STREAMER_USER / ' +
-          'ABS_STREAMER_PASSWORD (the dedicated streamer account, SPEC section 14). Refusing to start.',
+        'ABS_STREAMER_API_KEY was rejected by a reachable Audiobookshelf (invalid, inactive, or ' +
+          'revoked). Check the dedicated stream-only API key (SPEC section 14). Refusing to start.',
       )
       process.exit(1)
     }
-  } else {
-    console.warn('Audiobookshelf unreachable at startup; deferring streamer login to first playback (see /v1/health).')
   }
-
-  const app = await buildApp(config, { absClient: abs, streamer })
+  const app = await buildApp(config, { absClient: abs })
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw
   // unhandled rejection instead of the same clean, formatted exit the config path gives.

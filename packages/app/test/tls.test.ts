@@ -14,8 +14,7 @@ const FIXTURES = fileURLToPath(new URL('./fixtures/tls/', import.meta.url))
 function testConfig(overrides: Partial<Config> = {}): Config {
   return {
     absUrl: 'http://abs.invalid',
-    absStreamerUser: 'streamer',
-    absStreamerPassword: 'secret',
+    absStreamerApiKey: 'streamer-key',
     sonosSeedHost: undefined,
     port: 0,
     pollIntervalSeconds: 15,

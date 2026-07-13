@@ -6,8 +6,7 @@ import type { Config } from '../src/config/index.js'
 function config(overrides: Partial<Config> = {}): Config {
   return {
     absUrl: 'https://abs.invalid',
-    absStreamerUser: 'streamer',
-    absStreamerPassword: 'secret',
+    absStreamerApiKey: 'streamer-key',
     sonosSeedHost: undefined,
     port: 0,
     pollIntervalSeconds: 15,

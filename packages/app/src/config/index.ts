@@ -8,8 +8,11 @@ export interface TlsConfig {
 
 export interface Config {
   absUrl: string
-  absStreamerUser: string
-  absStreamerPassword: string
+  // An Audiobookshelf API key for a dedicated, stream-only account (SPEC section 14). It is embedded
+  // in the media URLs handed to speakers, so it must be low-privilege: a leaked URL then grants at
+  // most read/stream of the library, never account takeover. Long-lived (no expiry to manage), which
+  // is why the media path uses this rather than the listening user's or a short-lived token.
+  absStreamerApiKey: string
   sonosSeedHost: string | undefined
   port: number
   pollIntervalSeconds: number
@@ -181,8 +184,7 @@ export function loadConfig(env: Env = process.env): Config {
   const absTls = reader.absTls()
   return reader.finalize({
     absUrl: reader.absUrl(),
-    absStreamerUser: reader.requireString('ABS_STREAMER_USER'),
-    absStreamerPassword: reader.requireString('ABS_STREAMER_PASSWORD'),
+    absStreamerApiKey: reader.requireString('ABS_STREAMER_API_KEY'),
     sonosSeedHost: env.SONOS_SEED_HOST,
     port: reader.port(),
     pollIntervalSeconds: reader.positiveNumber('POLL_INTERVAL_SECONDS', 15),

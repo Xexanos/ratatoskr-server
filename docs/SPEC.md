@@ -47,11 +47,10 @@ Ratatoskr is the brain; clients are thin remotes. Audio never flows through Rata
   the LAN (discovery, set the transport URI, play, pause, seek, and poll transport state)
   via the embedded node-sonos-ts library. There is no separate Sonos controller process.
 - Audiobookshelf -> Sonos speaker: the speaker fetches the audio file directly over the
-  LAN, using an ABS URL (with an access token as a query parameter) that Ratatoskr hands
-  to it. That token belongs to a dedicated low-privilege streamer identity, never to the
-  listening user (see section 14). Because access tokens are short-lived, Ratatoskr embeds
-  a current token and re-sets the transport URI as needed, so long playback does not fail
-  on expiry.
+  LAN, using an ABS URL (with a token as a query parameter) that Ratatoskr hands to it.
+  That token is an ABS **API key** for a dedicated, stream-only streamer identity, never
+  the listening user (see section 14). The key is long-lived, so there is no expiry to
+  manage during playback — nothing to re-set on the transport URI.
 
 Audiobookshelf is the single source of truth for progress. Ratatoskr holds only the
 current session, in memory. If Ratatoskr restarts, the session is lost but no progress
@@ -153,10 +152,10 @@ if something required is missing:
   private-CA Audiobookshelf certificate, as a PEM file path or inline PEM. Verification stays on.
 - `ABS_TLS_INSECURE` (optional) — last resort: disable ABS certificate verification entirely
   (vulnerable to MITM). Mutually exclusive with the `ABS_CA_CERT*` options.
-- `ABS_STREAMER_USER`, `ABS_STREAMER_PASSWORD` (required) — credentials of the dedicated
-  low-privilege ABS account whose short-lived tokens are embedded in the media URLs handed
-  to the speakers (see section 14). Ratatoskr logs this identity in at startup and
-  refreshes it as needed.
+- `ABS_STREAMER_API_KEY` (required) — an ABS API key for a dedicated, stream-only account,
+  embedded in the media URLs handed to the speakers (see section 14). The operator creates the
+  key in ABS (Settings → Users → API Keys) for a low-privilege account; Ratatoskr just embeds it,
+  with no login or token refresh to do.
 - `TLS_CERT_PATH`, `TLS_KEY_PATH` (recommended) — serve the API over HTTPS (see
   section 14). If unset, the server refuses to start unless `ALLOW_PLAIN_HTTP=true` is
   set explicitly.
@@ -194,7 +193,7 @@ to the person who is actually listening.
   the same LAN can already enumerate the Sonos topology directly via SSDP/UPnP (section 14) — so
   it leaks nothing new; real per-request validation for it arrives with playback in phase 4.
 - The listening user's token is used for Audiobookshelf **API** calls only. The media URLs
-  handed to the speakers carry the dedicated streamer identity's token instead, because
+  handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).
 
 Ratatoskr keeps no user database. For the single active playback session it holds that
@@ -431,11 +430,16 @@ Decisions (binding for the implementation):
 
 - **Media URLs never carry a listening user's token.** Since the transport URI (including
   its `?token=` query parameter) is readable by anyone on the LAN, the URLs handed to the
-  speakers use the short-lived access token of a dedicated ABS account
-  (`ABS_STREAMER_USER`) that has read/stream access to the library and nothing else. A
-  leaked media URL is then worth at most read access to the library for about an hour —
-  not the listener's account. The listening user's tokens exist only inside Ratatoskr
-  (and on the user's own client). Setup cost: the admin creates this account in ABS once.
+  speakers use an ABS **API key** (`ABS_STREAMER_API_KEY`) for a dedicated account that has
+  read/stream access to the library and nothing else. A leaked media URL is then worth at
+  most read/stream of the library — never the listener's account, and never a write. The key
+  is long-lived (an ABS API key cannot be exchanged for a short-lived token, and the URL must
+  keep working across a multi-hour book without a mid-track re-fetch failing), so the tradeoff
+  is deliberate: the leak window is not time-bounded, but it is tightly *scope*-bounded to a
+  low-privilege, read-only account. The listening user's tokens exist only inside Ratatoskr
+  (and on the user's own client). Setup cost: the admin creates the stream-only account once
+  and generates one API key for it (Settings → Users → API Keys), then locks the account down
+  (no download/upload/delete, minimal library access).
 - **TLS between clients and Ratatoskr.** Login credentials and the 30-day refresh token
   must not cross the network in cleartext. Ratatoskr serves HTTPS using a self-signed
   certificate or a local CA (`TLS_CERT_PATH` / `TLS_KEY_PATH`); the Android app pins that
@@ -449,7 +453,7 @@ Decisions (binding for the implementation):
   `rotatedTokens` object on a `Session` (section 8). The error mapper strips URLs from
   upstream errors before they reach responses or logs. (Also note: ABS and any proxy in
   between will log media-URL query strings — one more reason those URLs carry only the
-  streamer token.)
+  streamer API key.)
 - **Rate-limit the unauthenticated endpoints.** `/auth/login` and `/auth/refresh` get a
   conservative per-IP rate limit so Ratatoskr is not a free brute-force funnel in front
   of ABS.
@@ -467,8 +471,12 @@ Hardening checklist (small items, still binding):
 
 Known accepted risks / open points:
 
-- The streamer token in the media URL remains readable on the LAN (UPnP, HTTP sniffing,
-  ABS access logs). Accepted: it is short-lived and minimally privileged.
+- The streamer API key in the media URL remains readable on the LAN (UPnP, HTTP sniffing,
+  ABS access logs). Accepted: it is minimally privileged (a stream-only, read-only account),
+  so a leak grants at most read/stream of the library — not the listener's account, and no
+  writes. It is long-lived rather than short-lived (an API key can't be exchanged for a
+  short-lived token, and the URL must survive a multi-hour book), so the leak window is not
+  time-bounded; the mitigation is scope, not expiry.
 - The Ratatoskr → Audiobookshelf transport carries per-user credentials (login) and tokens
   (library, and the phase-4 streamer identity), so it is hardened rather than left to chance:
   `ABS_URL` should be `https://` and defaults to requiring it — plain HTTP needs the explicit

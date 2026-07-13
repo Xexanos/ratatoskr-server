@@ -4,7 +4,6 @@ import { openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
 import { AbsClient } from '../abs/client.js'
-import { StreamerSession } from '../abs/streamerSession.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
@@ -35,9 +34,7 @@ export interface BuildAppOptions {
   absClient?: AbsClient
   // Inject a fake Sonos client in tests. Defaults to a real one built from config.
   sonosClient?: SonosClient
-  // Inject the streamer session (main.ts logs it in at startup). Defaults to one built from config.
-  streamer?: StreamerSession
-  // Inject a fake session manager in tests. Defaults to one built from abs/sonos/streamer/config.
+  // Inject a fake session manager in tests. Defaults to one built from abs/sonos/config.
   sessionManager?: SessionManager
 }
 
@@ -74,8 +71,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
 
   const abs = options.absClient ?? new AbsClient(config.absUrl, buildAbsDispatcher(config))
   const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost)
-  const streamer = options.streamer ?? new StreamerSession(abs, config.absStreamerUser, config.absStreamerPassword)
-  const sessions = options.sessionManager ?? new SessionManager({ abs, sonos, streamer, config })
+  const sessions = options.sessionManager ?? new SessionManager({ abs, sonos, config })
   // On shutdown, stop any active session (writes the final position back to ABS) before releasing
   // the Sonos subscription. Best-effort and optional-chained so injected Partial fakes are fine.
   app.addHook('onClose', async () => {

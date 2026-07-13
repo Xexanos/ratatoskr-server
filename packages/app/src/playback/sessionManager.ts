@@ -1,7 +1,6 @@
 import type { components } from '@ratatoskr/contract'
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
 import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
-import type { StreamerSession } from '../abs/streamerSession.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
 import { NoActiveSessionError } from './errors.js'
@@ -18,7 +17,6 @@ const END_OF_BOOK_TOLERANCE_SECONDS = 5
 export interface SessionManagerDeps {
   abs: AbsClient
   sonos: SonosClient
-  streamer: StreamerSession
   config: Config
 }
 
@@ -82,10 +80,9 @@ export class SessionManager {
         this.deps.abs.getProgress(userToken, itemId),
       ])
 
-      const streamerToken = await this.ensureStreamerToken()
       const plan = planPlayback(
         manifest.tracks.map((track: PlaybackTrack) => ({
-          url: this.mediaUrl(itemId, track.ino, streamerToken),
+          url: this.mediaUrl(itemId, track.ino),
           mimeType: track.mimeType,
           durationSeconds: track.durationSeconds,
         })),
@@ -488,16 +485,6 @@ export class SessionManager {
     return this.session
   }
 
-  // The streamer token for media URLs, logging in lazily if the startup login didn't happen or the
-  // token has expired (a full re-login is fine — dedicated account, short-lived token).
-  private async ensureStreamerToken(): Promise<string> {
-    try {
-      return this.deps.streamer.currentToken()
-    } catch {
-      return this.deps.streamer.refresh()
-    }
-  }
-
   private seekTuning(): SeekTuning {
     return {
       settleMs: this.deps.config.seekSettleMs,
@@ -506,10 +493,11 @@ export class SessionManager {
     }
   }
 
-  // The ABS raw-file stream URL for a track, carrying the streamer token (SPEC section 14).
-  private mediaUrl(itemId: string, ino: string, streamerToken: string): string {
+  // The ABS raw-file stream URL for a track, carrying the streamer API key (SPEC section 14).
+  private mediaUrl(itemId: string, ino: string): string {
     const base = this.deps.config.absUrl.replace(/\/$/, '')
-    return `${base}/api/items/${encodeURIComponent(itemId)}/file/${encodeURIComponent(ino)}?token=${encodeURIComponent(streamerToken)}`
+    const key = this.deps.config.absStreamerApiKey
+    return `${base}/api/items/${encodeURIComponent(itemId)}/file/${encodeURIComponent(ino)}?token=${encodeURIComponent(key)}`
   }
 }
 

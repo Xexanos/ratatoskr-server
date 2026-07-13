@@ -9,7 +9,7 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import { createAbsUser, seedFetch } from './absSeed.js'
+import { createAbsUser, createStreamerApiKey, seedFetch } from './absSeed.js'
 
 // Live-Audiobookshelf integration (SPEC section 15). The abs/ client is otherwise only exercised
 // against fetch stubs, which verify our own parsing but not that our request/response shapes match
@@ -43,7 +43,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     seededItemId = itemId
 
     await createAbsUser(absBase, adminToken, LIVE_USER, LIVE_PASS)
-    await createAbsUser(absBase, adminToken, LIVE_STREAMER, LIVE_STREAMER_PASS)
+    const streamerApiKey = await createStreamerApiKey(absBase, adminToken, LIVE_STREAMER, LIVE_STREAMER_PASS)
 
     // Spawn the compiled server against the live ABS. (Sonos stays unreachable on the test network,
     // so /health is degraded — irrelevant here, the server still boots.)
@@ -53,8 +53,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       cleanEnv({
         ABS_URL: absBase,
         ABS_ALLOW_PLAIN_HTTP: 'true',
-        ABS_STREAMER_USER: LIVE_STREAMER,
-        ABS_STREAMER_PASSWORD: LIVE_STREAMER_PASS,
+        ABS_STREAMER_API_KEY: streamerApiKey,
         ALLOW_PLAIN_HTTP: 'true',
         PORT: String(port),
       }),
