@@ -27,10 +27,10 @@ describe('buildTrackMetadata', () => {
     expect(didl).toContain('<upnp:album>Chapter 1</upnp:album>')
   })
 
-  it('omits the artist/album when ABS gave no author', () => {
+  it('omits only the artist when ABS gave no author — the book title is still the album', () => {
     const didl = buildTrackMetadata({ title: 'T', author: '', durationSeconds: 10, mimeType: 'audio/mp4', url: 'http://x/1' })
     expect(didl).not.toContain('upnp:artist')
-    expect(didl).not.toContain('upnp:album')
+    expect(didl).toContain('<upnp:album>T</upnp:album>') // album is the book title, independent of author
   })
 
   it('escapes special characters in the title', () => {
