@@ -27,6 +27,12 @@ export interface Config {
   // Upper bound on the graceful-shutdown drain (SPEC section 5): a hung final write can't hold the
   // process past this before it exits anyway.
   shutdownTimeoutMs: number
+  // Resume back-step (SPEC section 5): on start, resume this many seconds before the stored position
+  // so the listener re-orients (the podcast/audiobook convention). 0 disables it.
+  resumeRewindSeconds: number
+  // Position write backoff (SPEC section 5): subtract this from the position written to ABS, since
+  // Sonos's reported RelTime runs slightly ahead of the audible output (buffering). 0 disables it.
+  writePositionBackoffSeconds: number
   tls: TlsConfig | undefined
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
   // production; the tests turn it on. See src/api/responseValidation.ts.
@@ -78,6 +84,18 @@ class EnvReader {
     const value = Number(raw)
     if (!Number.isFinite(value) || value <= 0) {
       this.problems.push(`${name} must be a positive number (got "${raw}")`)
+      return fallback
+    }
+    return value
+  }
+
+  // Like positiveNumber but allows 0, so a knob can be set to 0 to disable the behavior it tunes.
+  nonNegativeNumber(name: string, fallback: number): number {
+    const raw = this.env[name]
+    if (raw === undefined || raw.trim() === '') return fallback
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value < 0) {
+      this.problems.push(`${name} must be zero or a positive number (got "${raw}")`)
       return fallback
     }
     return value
@@ -194,6 +212,8 @@ export function loadConfig(env: Env = process.env): Config {
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     listeningTokenRefreshMarginSeconds: reader.positiveNumber('LISTENING_TOKEN_REFRESH_MARGIN_SECONDS', 300),
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
+    resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),
+    writePositionBackoffSeconds: reader.nonNegativeNumber('WRITE_POSITION_BACKOFF_SECONDS', 2),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),
     absCaCert: absTls.caCert,

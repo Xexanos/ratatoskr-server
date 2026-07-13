@@ -76,6 +76,10 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
         // low threshold so even a small position move still crosses it.
         POLL_INTERVAL_SECONDS: '1',
         PROGRESS_WRITE_THRESHOLD_SECONDS: '1',
+        // Disable the resume rewind + write backoff here so this flow asserts exact positions; the
+        // rewind/backoff behavior itself is covered by the session-manager unit tests.
+        RESUME_REWIND_SECONDS: '0',
+        WRITE_POSITION_BACKOFF_SECONDS: '0',
         PORT: String(port),
       }),
     )

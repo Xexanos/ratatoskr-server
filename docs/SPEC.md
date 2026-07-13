@@ -114,9 +114,15 @@ must build on:
 - Only write to ABS when the position has moved by at least a threshold (default a few
   seconds) to avoid flooding ABS with updates.
 - On stop, and when the app pauses, write the current position immediately.
+- The position written to ABS is stepped back by `WRITE_POSITION_BACKOFF_SECONDS` (default 2),
+  because Sonos's reported `RelTime` runs slightly ahead of the audible output (buffering), so
+  writing it verbatim leaves ABS a touch ahead of what was actually heard. A *finished* write
+  stores the exact end, not a backed-off value.
 - When the position reaches the end within a small tolerance, mark the item finished in ABS.
-- On start, read stored progress from ABS and seek the speaker to it before entering the
-  loop.
+- On start, read stored progress from ABS and seek the speaker to `RESUME_REWIND_SECONDS`
+  (default 10) *before* the stored position — the podcast/audiobook convention of stepping back a
+  little so the listener re-orients — clamped at 0, before entering the loop. A finished book still
+  restarts from the beginning. Set either knob to 0 to disable it.
 - On a termination signal (SIGTERM/SIGINT), stop the active session — writing the reached
   position back to ABS — before exiting, bounded by `SHUTDOWN_TIMEOUT_MS` so a hung write cannot
   wedge the process. (Progress still survives an ungraceful kill, since it is written periodically
@@ -173,6 +179,10 @@ if something required is missing:
   its old access token is still valid (section 8).
 - `SHUTDOWN_TIMEOUT_MS` (optional, default 5000) — upper bound on the graceful-shutdown drain
   (section 5); the process exits after this even if the final write is still hung.
+- `RESUME_REWIND_SECONDS` (optional, default 10) — resume this many seconds before the stored
+  position on start (section 5). 0 disables it.
+- `WRITE_POSITION_BACKOFF_SECONDS` (optional, default 2) — step the position written to ABS back
+  by this much, since Sonos's `RelTime` leads the audible output (section 5). 0 disables it.
 
 ## 8. Auth
 
