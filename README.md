@@ -62,7 +62,7 @@ on the LAN can read those URLs, so this account is deliberately not a real user'
 key is scoped to read/stream only):
 
 1. In Audiobookshelf, go to **Settings → Users → Add User**.
-2. Create a **Guest** account, e.g. `ratatoskr-streamer` (a password is fine — Ratatoskr won't
+2. Create a **Guest** account, e.g. `ratatoskr-streamer` (any password is fine — Ratatoskr won't
    use it). Guest has the same read/stream access as a normal user but is even more limited (it
    can't change its own password); a plain **User** works too. Do not use **Admin**.
 3. Restrict it to the audiobook library you want to play, and turn **off** the *download*
