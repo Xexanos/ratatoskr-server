@@ -30,21 +30,14 @@ central E2E stack and **promotes** it to a release channel only after E2E passes
 
 ### Running
 
-Operators deploy with the single [`compose.yaml`](../compose.yaml) (see the README) — no repository
-checkout required. Sonos discovery and UPnP eventing need the host LAN, so it runs with host
-networking; where that is not possible, switch to the bridge block and set `SONOS_SEED_HOST` (SPEC
-section 12, "Container networking"). For a quick manual run without compose:
-
-```sh
-docker run --rm --network host \
-  -e ABS_URL=https://abs.lan:13378 \
-  -e ABS_STREAMER_API_KEY=... \
-  -v "$PWD/tls:/tls" \
-  ghcr.io/xexanos/ratatoskr-server:latest
-```
+Operators deploy with the single [`compose.yaml`](../compose.yaml) — download it, set `ABS_URL`
+and `ABS_STREAMER_API_KEY` in its `environment:` block, and `docker compose up -d` (full walkthrough
+in the [README](../README.md#running-with-docker)). No repository checkout required. Sonos discovery
+and UPnP eventing need the host LAN, so it runs with host networking; where that is not possible,
+switch to the bridge block and set `SONOS_SEED_HOST` (SPEC section 12, "Container networking").
 
 With no TLS variables set, the entrypoint generates a persistent self-signed certificate in the
-mounted `/tls` and serves HTTPS (fingerprint logged for the app's trust-on-first-use).
+`./tls` volume and serves HTTPS (fingerprint logged for the app's trust-on-first-use).
 
 ## Publishing pipeline
 
@@ -52,35 +45,25 @@ Two workflows implement a **build → E2E → promote** flow. The guiding princi
 that gets released is the *exact* image that passed E2E — promotion re-tags the tested bytes,
 it never rebuilds.
 
-```
- push to main / manual dispatch
-            │
-            ▼
- ┌───────────────────────────┐   pushes    ghcr.io/xexanos/ratatoskr-server:testing-<sha>
- │ container.yml (build job)  │───────────► (multi-arch: linux/amd64, linux/arm64)
- └───────────────────────────┘             also tagged sha-<full-sha> (immutable digest handle)
-            │ repository_dispatch (event_type: server-image)
-            │ payload: { image, tag, digest, sha }
-            ▼
- ┌───────────────────────────┐   pulls testing-<sha> + fake-sonos + ABS, runs the full suite
- │ ratatoskr-e2e (other repo) │
- └───────────────────────────┘
-            │ on green: repository_dispatch (event_type: e2e-passed)
-            │ payload: { digest, channels?, version? }
-            ▼
- ┌───────────────────────────┐   re-tags the TESTED digest (no rebuild) to the channel(s),
- │ promote.yml (promote job)  │───────────► e.g. :latest, :stable, :<version>
- └───────────────────────────┘
+```mermaid
+flowchart TD
+    A([push to main / manual dispatch]) --> B["<b>container.yml</b> — build job<br/>build + push multi-arch (amd64, arm64)<br/><code>ghcr.io/xexanos/ratatoskr-server:testing-&lt;sha&gt;</code>"]
+    B -->|"repository_dispatch: server-image<br/>{ image, tag, digest, sha }"| C["<b>ratatoskr-e2e</b> — other repo<br/>pull testing-&lt;sha&gt; + fake-sonos + ABS<br/>run the full E2E suite"]
+    C -->|"on green — repository_dispatch: e2e-passed<br/>{ digest, channels?, version? }"| D["<b>promote.yml</b> — promote job<br/>re-tag the TESTED digest, no rebuild<br/>→ :latest, :stable, :&lt;version&gt;"]
 ```
 
 ### 1. `container.yml` — build & publish the testing image
 
 - **Triggers:** `push` to `main` and `workflow_dispatch` (build + push + trigger E2E);
-  `pull_request` (build both arches as a bitrot guard, **no push**).
-- **Publishes:** `ghcr.io/xexanos/ratatoskr-server:testing-<short-sha>` (the E2E artifact) and
-  `sha-<full-sha>` (an immutable handle for digest-based promotion), multi-arch.
+  `pull_request` (build both arches as a bitrot guard, **no push**; path-filtered so docs-only PRs
+  skip it).
+- **Publishes:** `ghcr.io/xexanos/ratatoskr-server:testing-<short-sha>` (the E2E artifact),
+  multi-arch. That one tag identifies the commit; the full SHA is also recorded in the image's
+  `org.opencontainers.image.revision` label. Promotion addresses the tested image by **digest**, so
+  no second sha tag is needed.
 - **Then:** dispatches `event_type: server-image` to `Xexanos/ratatoskr-e2e` with the image ref
-  and digest, so E2E runs against exactly this build.
+  and digest, so E2E runs against exactly this build. If the `E2E_DISPATCH_TOKEN` secret is missing,
+  the job **fails** (a silently un-run E2E gate would be worse than a red pipeline).
 
 To hand the **current feature branch** to E2E before merging, run the workflow manually:
 
@@ -105,10 +88,11 @@ gh workflow run promote.yml -f source=sha256:<tested-digest> -f channels=latest,
 
 ### 3. `registry-cleanup.yml` — prune throwaway images
 
-Every build publishes two tags onto the same manifest — `testing-<sha>` and `sha-<full-sha>` —
-so without cleanup GHCR fills up. A scheduled job prunes both (they are the disposable identity
-of one commit's build) once older than **14 days**, keeping the **3 most recent** as a safety
-floor and never touching promoted channels (`latest`, `stable`).
+Every build publishes a `testing-<sha>` tag, so without cleanup GHCR fills up. A scheduled job
+prunes those once older than **14 days**, keeping the **3 most recent** as a safety floor and never
+touching promoted tags (`latest`, `stable`, and semver versions like `1.2.3` — a promoted manifest
+still carries its original `testing-<sha>` tag, so those are held in `exclude-tags` as
+defense-in-depth).
 
 - **Triggers:** daily cron, plus `workflow_dispatch` with a `dry-run` input to preview.
 - **How:** [`dataaxiom/ghcr-cleanup-action`](https://github.com/dataaxiom/ghcr-cleanup-action),
@@ -127,9 +111,10 @@ gh workflow run registry-cleanup.yml -f dry-run=true
 
 - **`E2E_DISPATCH_TOKEN` secret** (in this repo): a token that can dispatch to
   `Xexanos/ratatoskr-e2e` — the per-run `GITHUB_TOKEN` is scoped to this repo only, so it cannot
-  reach across. Absent this secret, `container.yml` still builds and pushes `testing-<sha>` and
-  simply logs a notice instead of triggering E2E. A fine-grained PAT (or GitHub App token) with
-  *Contents: read/write* (or *Actions*) on the E2E repo, restricted to that repo, is enough.
+  reach across. This secret is **required** for the pipeline: without it, `container.yml` builds and
+  pushes `testing-<sha>` but the `trigger-e2e` job then **fails** rather than silently skipping the
+  E2E gate. A fine-grained PAT (or GitHub App token) with *Contents: read/write* (or *Actions*) on
+  the E2E repo, restricted to that repo, is enough.
 - **`GHCR_CLEANUP_TOKEN` secret** (optional, for `registry-cleanup.yml`): the injected
   `GITHUB_TOKEN` can delete versions of a package owned by an **organization**, but for a
   **user-owned** package it may lack delete rights. If the cleanup job fails to delete, add a

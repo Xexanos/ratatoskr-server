@@ -82,9 +82,11 @@ services:
       # SEEK_TOLERANCE_SECONDS: "3"                     # acceptable post-seek position error
       # SEEK_RETRIES: "2"                               # seek retry attempts
       # PROGRESS_WRITE_THRESHOLD_SECONDS: "5"           # min movement before writing progress to ABS
+      # RESUME_REWIND_SECONDS: "10"                     # rewind this far when resuming a book (SPEC §5)
+      # WRITE_POSITION_BACKOFF_SECONDS: "2"             # settle window before writing a reached position back (SPEC §5)
       # LISTENING_TOKEN_REFRESH_MARGIN_SECONDS: "300"   # renew the ABS token this long before it expires
       # SHUTDOWN_TIMEOUT_MS: "5000"                     # upper bound on the graceful-shutdown drain
-      # VALIDATE_RESPONSES: "true"                      # validate responses against the contract (dev aid)
+      # VALIDATE_RESPONSES: "true"                      # off by default; dev/staging aid, validates every response against the contract (per-response overhead)
 
     # ./tls persists the auto-generated self-signed certificate across restarts (so the app's pinned
     # fingerprint stays valid), and is also where you drop your OWN cert.pem/key.pem or an ABS CA PEM

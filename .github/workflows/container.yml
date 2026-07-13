@@ -7,7 +7,10 @@ name: Container image
 # image to a release channel is a separate, no-rebuild step (see promote.yml).
 #
 # - pull_request : build both arches as a bitrot guard; never pushes (fork PRs have no
-#                  registry write anyway).
+#                  registry write anyway). Path-filtered so docs-only PRs skip the dual-arch
+#                  QEMU build. NOTE: if this job is ever made a required status check, a
+#                  path-filtered workflow that doesn't run leaves the check pending and blocks
+#                  the PR — pair it with a bridging "always-green" job or GitHub's merge rules.
 # - push to main : build + push `testing-<sha>` and trigger the E2E suite.
 # - workflow_dispatch : same, on demand for any branch (use this to hand the current
 #                  feature branch to E2E before it is merged).
@@ -16,6 +19,16 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Only the inputs that affect the image; a pure-docs PR doesn't need the QEMU build.
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - packages/**
+      - contract/**
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .github/workflows/container.yml
   workflow_dispatch:
     inputs:
       trigger_e2e:
@@ -71,9 +84,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # One tag per build: testing-<short-sha>. It already uniquely identifies the commit, and
+          # metadata-action stamps the full commit into the org.opencontainers.image.revision label,
+          # so a second sha-<full-sha> tag would add clutter (and a second thing to prune) with no
+          # benefit — promotion addresses the tested image by digest, not by a sha tag.
           tags: |
             type=raw,value=${{ steps.image.outputs.tag }}
-            type=sha,format=long
 
       - name: Build and push
         id: build
@@ -93,8 +109,8 @@ jobs:
 
   # Hand the freshly pushed image to the central E2E repo. Cross-repo dispatch needs a token
   # with access to Xexanos/ratatoskr-e2e (the per-run GITHUB_TOKEN is scoped to THIS repo only),
-  # stored as the E2E_DISPATCH_TOKEN secret. When that secret is absent the step no-ops with a
-  # notice, so the image is still published and can be consumed manually.
+  # stored as the E2E_DISPATCH_TOKEN secret. If that secret is missing the job FAILS: the image is
+  # published but its E2E gate silently not running would be worse than a red pipeline.
   trigger-e2e:
     needs: build
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.trigger_e2e)
@@ -109,8 +125,8 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           if [ -z "$E2E_DISPATCH_TOKEN" ]; then
-            echo "::notice title=E2E not triggered::E2E_DISPATCH_TOKEN is not set; published ${IMAGE}:${TAG} but did not dispatch the E2E suite."
-            exit 0
+            echo "::error title=E2E dispatch failed::E2E_DISPATCH_TOKEN is not set — cannot trigger the E2E suite for ${IMAGE}:${TAG}. Add the secret (see docs/deploy.md)." >&2
+            exit 1
           fi
           echo "Dispatching E2E for ${IMAGE}:${TAG} (${DIGEST})"
           GH_TOKEN="$E2E_DISPATCH_TOKEN" gh api \

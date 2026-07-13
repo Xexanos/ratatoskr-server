@@ -34,10 +34,16 @@ if [ -z "$TLS_CERT_PATH" ] && [ -z "$TLS_KEY_PATH" ] && [ "$ALLOW_PLAIN_HTTP" !=
     # -nodes: the key is unencrypted (read unattended at boot). 10-year validity so the pinned
     # fingerprint is long-lived. Subject/SAN are cosmetic here: the app validates by fingerprint,
     # not hostname (trust-on-first-use), so this cert works for any address the app connects to.
-    openssl req -x509 -newkey rsa:2048 -nodes \
+    # Only stdout is discarded — openssl's stderr flows through to the container log, and any
+    # failure is caught explicitly (rather than letting `set -e` kill the container silently).
+    if ! openssl req -x509 -newkey rsa:2048 -nodes \
       -keyout "$KEY" -out "$CERT" -days 3650 \
       -subj "/CN=ratatoskr" \
-      -addext "subjectAltName=DNS:ratatoskr,DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1
+      -addext "subjectAltName=DNS:ratatoskr,DNS:localhost,IP:127.0.0.1" >/dev/null; then
+      echo "ratatoskr: openssl failed to generate the self-signed certificate (see its error above)." >&2
+      echo "ratatoskr: set TLS_CERT_PATH/TLS_KEY_PATH to supply your own, or ALLOW_PLAIN_HTTP=true." >&2
+      exit 1
+    fi
     chmod 600 "$KEY" 2>/dev/null || true
   else
     echo "ratatoskr: reusing the existing self-signed certificate at $CERT"
