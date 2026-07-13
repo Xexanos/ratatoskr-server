@@ -91,11 +91,12 @@ export class SessionManager {
         })),
       )
 
-      // Resume from the ABS-stored position (clamped into the book). A *finished* book restarts from
-      // the beginning rather than seeking to the exact end (where playback would end immediately).
-      const resumeSeconds = progress.isFinished
-        ? 0
-        : Math.min(Math.max(progress.positionSeconds, 0), manifest.totalDurationSeconds)
+      // Resume from the ABS-stored position (clamped into the book), stepped back a few seconds so
+      // the listener re-orients (RESUME_REWIND_SECONDS — the podcast/audiobook convention, SPEC §5).
+      // A *finished* book restarts from the beginning rather than seeking to the exact end (where
+      // playback would end immediately).
+      const stored = Math.min(Math.max(progress.positionSeconds, 0), manifest.totalDurationSeconds)
+      const resumeSeconds = progress.isFinished ? 0 : Math.max(0, stored - this.deps.config.resumeRewindSeconds)
 
       // Now that the new start is viable, replace any active session (writing its final position).
       if (this.session !== undefined) {
@@ -388,11 +389,12 @@ export class SessionManager {
   }
 
   // Write an in-progress position back to ABS (never `isFinished` — the book is not done until the
-  // transport stops), best-effort, tracking it as the last written position.
+  // transport stops), best-effort, tracking it as the last written position. The THRESHOLD is
+  // tracked on the true read position; only the persisted value is backed off (see persistedPosition).
   private async writeBack(session: ActiveSession, absolute: number): Promise<void> {
     try {
       await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
-        currentTimeSeconds: absolute,
+        currentTimeSeconds: this.persistedPosition(absolute),
         durationSeconds: session.totalDurationSeconds,
         isFinished: false,
       })
@@ -402,12 +404,20 @@ export class SessionManager {
     }
   }
 
+  // The position to persist to ABS: the read position minus WRITE_POSITION_BACKOFF_SECONDS, because
+  // Sonos's reported RelTime runs slightly ahead of the audible output (buffering), so writing it
+  // verbatim leaves ABS a touch ahead of what was actually heard (SPEC §5). Clamped at 0.
+  private persistedPosition(absolute: number): number {
+    return Math.max(0, absolute - this.deps.config.writePositionBackoffSeconds)
+  }
+
   // The final progress payload for an absolute position — marks finished when within the end-of-book
   // window (independent of the seek tolerance). Used only on teardown, not for in-progress writes.
+  // Finished writes the exact end; an unfinished one is backed off like every other persisted write.
   private progressAt(session: ActiveSession, absolute: number): ProgressUpdate {
     const isFinished = session.totalDurationSeconds - absolute <= END_OF_BOOK_TOLERANCE_SECONDS
     return {
-      currentTimeSeconds: isFinished ? session.totalDurationSeconds : absolute,
+      currentTimeSeconds: isFinished ? session.totalDurationSeconds : this.persistedPosition(absolute),
       durationSeconds: session.totalDurationSeconds,
       isFinished,
     }

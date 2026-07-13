@@ -61,6 +61,9 @@ describe.skipIf(abs === null || process.platform === 'win32')('graceful shutdown
         // A long poll interval so the sync loop cannot itself write during the test — the only write
         // must be the shutdown one, so the assertion pins the shutdown behavior specifically.
         POLL_INTERVAL_SECONDS: '3600',
+        // Exact-position assertions: no resume rewind / write backoff here (covered in unit tests).
+        RESUME_REWIND_SECONDS: '0',
+        WRITE_POSITION_BACKOFF_SECONDS: '0',
         PORT: String(port),
       }),
     )

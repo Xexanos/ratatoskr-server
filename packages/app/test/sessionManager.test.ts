@@ -37,7 +37,14 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 // report one of ours or the sync loop treats the speaker as taken over.
 const OUR_TRACK_URI = 'http://abs.invalid/api/items/li_1/file/20?token=streamer-key'
 
-function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {}) {
+function build(
+  overrides: {
+    positionSeconds?: number
+    isFinished?: boolean
+    resumeRewindSeconds?: number
+    writePositionBackoffSeconds?: number
+  } = {},
+) {
   const abs = {
     getPlaybackManifest: vi.fn().mockResolvedValue(MANIFEST),
     getProgress: vi
@@ -66,6 +73,10 @@ function build(overrides: { positionSeconds?: number; isFinished?: boolean } = {
     pollIntervalSeconds: 10,
     progressWriteThresholdSeconds: 5,
     listeningTokenRefreshMarginSeconds: 300,
+    // Rewind/backoff off by default here so position assertions read the exact values; the dedicated
+    // "resume rewind / write backoff" block below sets them per-test.
+    resumeRewindSeconds: overrides.resumeRewindSeconds ?? 0,
+    writePositionBackoffSeconds: overrides.writePositionBackoffSeconds ?? 0,
   } as unknown as Config
 
   const manager = new SessionManager({
@@ -533,6 +544,56 @@ describe('SessionManager', () => {
       ctx = build({ positionSeconds: 0 })
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
       expect(await ctx.manager.stop('user-tok')).toBeUndefined()
+    })
+  })
+
+  describe('resume rewind + write backoff (§5)', () => {
+    it('resumes RESUME_REWIND_SECONDS before the stored position', async () => {
+      ctx = build({ positionSeconds: 150, resumeRewindSeconds: 10 })
+      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      expect(session.positionSeconds).toBe(140)
+      // 140 into [100,200] -> track index 1, offset 40.
+      const [, seekPlan] = ctx.sonos.seek.mock.calls[0] as [string, { trackIndex: number; offsetSeconds: number }]
+      expect(seekPlan).toMatchObject({ trackIndex: 1, offsetSeconds: 40 })
+    })
+
+    it('clamps the resume rewind at 0 (and then does not seek)', async () => {
+      ctx = build({ positionSeconds: 5, resumeRewindSeconds: 10 })
+      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      expect(session.positionSeconds).toBe(0)
+      expect(ctx.sonos.seek).not.toHaveBeenCalled()
+    })
+
+    it('does not rewind a finished book (still restarts at 0)', async () => {
+      ctx = build({ positionSeconds: 300, isFinished: true, resumeRewindSeconds: 10 })
+      expect((await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')).positionSeconds).toBe(0)
+    })
+
+    it('persists the position minus WRITE_POSITION_BACKOFF_SECONDS, but reports the live position', async () => {
+      ctx = build({ positionSeconds: 0, writePositionBackoffSeconds: 3 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      // default getPosition -> track 1, rel 50 -> absolute 150.
+      const session = await ctx.manager.pause('user-tok')
+      expect(session.positionSeconds).toBe(150) // display = true live position
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith(
+        'user-tok',
+        'li_1',
+        expect.objectContaining({ currentTimeSeconds: 147 }), // written = 150 - 3
+      )
+    })
+
+    it('does not back off a finished write (stores the exact end)', async () => {
+      ctx = build({ positionSeconds: 0, writePositionBackoffSeconds: 3 })
+      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      ctx.abs.writeProgress.mockClear()
+      ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 199, trackUri: OUR_TRACK_URI }) // abs 299
+      await ctx.manager.stop('user-tok')
+      expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
+        currentTimeSeconds: 300,
+        durationSeconds: 300,
+        isFinished: true,
+      })
     })
   })
 })

@@ -35,6 +35,8 @@ describe('loadConfig', () => {
     expect(config.seekToleranceSeconds).toBe(3)
     expect(config.seekRetries).toBe(2)
     expect(config.progressWriteThresholdSeconds).toBe(5)
+    expect(config.resumeRewindSeconds).toBe(10)
+    expect(config.writePositionBackoffSeconds).toBe(2)
     expect(config.tls).toBeUndefined()
     expect(config.sonosSeedHost).toBeUndefined()
     expect(config.validateResponses).toBe(false)
@@ -57,6 +59,13 @@ describe('loadConfig', () => {
 
   it('rejects a malformed ABS_URL rather than misdiagnosing it later as ABS downtime', () => {
     expectConfigError({ ...REQUIRED, ABS_URL: '192.168.1.50:13378' }, 'ABS_URL must be')
+  })
+
+  it('accepts 0 for the rewind/backoff knobs (disables them) but rejects a negative value', () => {
+    const config = loadConfig({ ...REQUIRED, RESUME_REWIND_SECONDS: '0', WRITE_POSITION_BACKOFF_SECONDS: '4' })
+    expect(config.resumeRewindSeconds).toBe(0)
+    expect(config.writePositionBackoffSeconds).toBe(4)
+    expectConfigError({ ...REQUIRED, RESUME_REWIND_SECONDS: '-1' }, 'RESUME_REWIND_SECONDS must be zero or a positive number')
   })
 
   it('rejects a non-numeric PORT', () => {
