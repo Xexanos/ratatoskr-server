@@ -49,7 +49,8 @@ it never rebuilds.
 pushes the multi-arch testing-<sha> image; a repository_dispatch (server-image) runs the full E2E
 suite in ratatoskr-e2e against the server plus fake-sonos and Audiobookshelf; on a green run a
 repository_dispatch (e2e-passed) runs promote.yml, which re-tags the tested digest to :latest /
-:stable / :<version> without rebuilding.](pipeline.svg)
+:stable / :<version> without rebuilding. A legend maps the colors: green = trigger, blue =
+ratatoskr-server workflow, purple = ratatoskr-e2e repo, gray pill = cross-repo repository_dispatch.](pipeline.svg)
 
 ### 1. `container.yml` — build & publish the testing image
 
