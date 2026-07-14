@@ -1,0 +1,88 @@
+name: Fake Sonos image
+
+# Publishes the fake Sonos test double (packages/fake-sonos) to GHCR for the central E2E stack
+# (Xexanos/ratatoskr-e2e — see its test-concept.md §4/§6).
+#
+# The fake is a SLOWLY-CHANGING test dependency — it only changes when the simulated Sonos
+# behaviour does (SPEC §4), not on every server commit. So, deliberately, this is NOT tied to the
+# server's build cadence (container.yml): it runs only when the fake itself changes.
+#   - pull_request (matching paths): build both arches as a bitrot guard; never pushes.
+#   - push to main (matching paths): build + push ghcr.io/<owner>/ratatoskr-fake-sonos as
+#     `latest` (what the E2E stack tracks) + `sha-<short-sha>` (an immutable handle), multi-arch.
+#   - workflow_dispatch: manual publish.
+#
+# The E2E repo pins the fake by digest (bumping it when the fake changes), so it never needs a
+# fake tag per server commit. The fake is test-only and is NEVER promoted to a release channel.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/fake-sonos/**
+      - tsconfig.base.json
+      - .github/workflows/fake-sonos.yml
+  pull_request:
+    # Same paths: a change to the fake (or the base tsconfig its Dockerfile copies) gets a
+    # build check; unrelated PRs skip the QEMU build. NOTE: as with container.yml, if this job
+    # is ever made a required status check, a path-filtered run that doesn't fire leaves the
+    # check pending — pair it with a bridging job or GitHub's merge rules.
+    paths:
+      - packages/fake-sonos/**
+      - tsconfig.base.json
+      - .github/workflows/fake-sonos.yml
+  workflow_dispatch:
+
+concurrency:
+  group: fake-sonos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-fake-sonos
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # No registry write on pull_request (esp. fork PRs) — that leg only validates the build.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `latest` moves to the newest fake (E2E tracks it); `sha-<short-sha>` is an immutable
+          # handle for a specific fake version. Both are low-volume (published only when the fake
+          # changes), so registry-cleanup deliberately leaves this package alone.
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # The Dockerfile copies tsconfig.base.json, so the build context is the repo root.
+          context: .
+          file: packages/fake-sonos/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=fake-sonos
+          cache-to: type=gha,mode=max,scope=fake-sonos
+          provenance: false
+          sbom: false
