@@ -74,7 +74,7 @@ jobs:
           echo "ref=${image}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # No registry write on pull_request (esp. fork PRs) — that leg only validates the build.
       - name: Log in to GHCR
