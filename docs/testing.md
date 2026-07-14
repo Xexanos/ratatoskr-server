@@ -64,8 +64,9 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
   this repo** as its own workspace package (`packages/fake-sonos`,
   `@ratatoskr/fake-sonos`). It runs in **two modes**: imported **in-process** by
   the component and integration tests, and built as a **container image** (the
-  package carries the Dockerfile and standalone entrypoint; publishing to GHCR
-  lands with the E2E work) that the central E2E repo pulls, pinned by digest. One
+  package carries the Dockerfile and standalone entrypoint; published to GHCR by
+  [`fake-sonos.yml`](../.github/workflows/fake-sonos.yml)) that the central E2E repo pulls,
+  pinned by digest. One
   behavioral definition, so the server's component tests and the E2E stack can
   never drift apart. It reproduces the real quirks recorded in
   [`SPEC.md §4`](./SPEC.md): DIDL-Lite metadata is required, `TrackDuration` is
@@ -131,5 +132,8 @@ The strategy above is the target. Current state:
   `ghcr.io/xexanos/ratatoskr-server:testing-<sha>` for the central E2E repo to consume; a
   separate `promote.yml` re-tags a *tested* digest (no rebuild) to a release channel after E2E
   passes. The full flow is documented in [`docs/deploy.md`](./deploy.md).
-- **Set up when E2E is built:** publishing the fake Sonos as a GHCR image for the
-  central E2E repo to consume.
+- **Fake Sonos container image — present:** the fake is published to GHCR as
+  `ghcr.io/xexanos/ratatoskr-fake-sonos` by its own [`fake-sonos.yml`](../.github/workflows/fake-sonos.yml)
+  workflow, **path-filtered** to `packages/fake-sonos/**` so it publishes only when the fake
+  changes (not on every server commit) — `latest` + `sha-<sha>`, multi-arch. The central E2E repo
+  pins it by digest. Test-only; never promoted. See [`docs/deploy.md`](./deploy.md).

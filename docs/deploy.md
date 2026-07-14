@@ -107,6 +107,32 @@ Preview what a run would remove, without deleting:
 gh workflow run registry-cleanup.yml -f dry-run=true
 ```
 
+## The fake Sonos image (test-only)
+
+The E2E stack also needs the fake Sonos double (`packages/fake-sonos`) as a GHCR image
+(ratatoskr-e2e test-concept.md §4/§6). It is published by its own workflow,
+[`fake-sonos.yml`](../.github/workflows/fake-sonos.yml) — **not** by `container.yml`.
+
+The key decision: the fake is a **slowly-changing test dependency**, so it is decoupled from the
+server's per-commit build cadence. Rebuilding an identical fake on every server commit would just
+burn CI and churn the registry. Instead:
+
+- `fake-sonos.yml` is **path-filtered** to `packages/fake-sonos/**` (and `tsconfig.base.json`,
+  which its Dockerfile copies). It runs only when the fake itself changes: a bitrot build on
+  matching PRs, and on push to `main` it pushes `ghcr.io/xexanos/ratatoskr-fake-sonos` as
+  `latest` (what E2E tracks) plus `sha-<short-sha>` (an immutable handle), multi-arch.
+- The **E2E repo pins the fake by digest** and bumps that pin deliberately when the fake changes,
+  so it never needs a fake tag per server commit. Note the flip side: the server and fake are **not
+  automatically co-tested**. `container.yml`'s `trigger-e2e` fires as soon as the server image is
+  pushed, and that E2E run uses whatever fake digest the E2E repo currently pins — so a commit that
+  changes *both* server and fake requires bumping the E2E pin to the newly published fake for the
+  two to be tested together (otherwise the new server is validated against the old fake). Closing
+  that gap mechanically — e.g. this workflow sending a `repository_dispatch` with the new digest to
+  the E2E repo, mirroring `trigger-e2e` — is a possible future enhancement, deliberately left out
+  here to keep the fake decoupled from the server's cadence.
+- The fake is **test-only and never promoted** to a release channel (only the server image is).
+  Its tags are low-volume, so `registry-cleanup.yml` deliberately does not prune this package.
+
 ## One-time setup
 
 - **`E2E_DISPATCH_TOKEN` secret** (in this repo): a token that can dispatch to
@@ -120,10 +146,11 @@ gh workflow run registry-cleanup.yml -f dry-run=true
   **user-owned** package it may lack delete rights. If the cleanup job fails to delete, add a
   classic PAT with `read:packages` + `delete:packages` as this secret; the job uses it in
   preference to `GITHUB_TOKEN`. Verify safely first with `gh workflow run registry-cleanup.yml -f dry-run=true`.
-- **Package visibility:** the first push creates the GHCR package private. For
-  `Xexanos/ratatoskr-e2e` to pull it, either make the package **public** (Package settings →
+- **Package visibility:** the first push creates each GHCR package private. For
+  `Xexanos/ratatoskr-e2e` to pull them, either make the packages **public** (Package settings →
   Change visibility) or grant that repo read access (Package settings → Manage Actions access →
-  add the E2E repo). Pulls in the E2E workflow authenticate with its own `GITHUB_TOKEN`.
+  add the E2E repo). This applies to **both** packages — `ratatoskr-server` and
+  `ratatoskr-fake-sonos`. Pulls in the E2E workflow authenticate with its own `GITHUB_TOKEN`.
 - **E2E-side callback:** on a successful run, the E2E workflow promotes the image it just tested:
   ```yaml
   # in Xexanos/ratatoskr-e2e, after the E2E job succeeds

@@ -20,9 +20,8 @@ jobs:
       - run: pnpm -r run build
       - run: pnpm -r run test:coverage
       - run: pnpm run lint
-      # Bitrot guard for the fake-Sonos image the central E2E repo consumes (no push here;
-      # publishing to GHCR lands with the E2E work).
-      - run: docker build -f packages/fake-sonos/Dockerfile .
+      # The fake-Sonos image build is validated (and published) by fake-sonos.yml, which is
+      # path-filtered to packages/fake-sonos/** so it only runs when the fake actually changes.
 
   # Live-ABS integration matrix: the pinned minimum supported version, plus the moving
   # :latest tag as a deliberate drift canary so a new ABS release that breaks us turns CI
