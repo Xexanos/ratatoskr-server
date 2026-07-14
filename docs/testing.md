@@ -64,8 +64,9 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
   this repo** as its own workspace package (`packages/fake-sonos`,
   `@ratatoskr/fake-sonos`). It runs in **two modes**: imported **in-process** by
   the component and integration tests, and built as a **container image** (the
-  package carries the Dockerfile and standalone entrypoint; publishing to GHCR
-  lands with the E2E work) that the central E2E repo pulls, pinned by digest. One
+  package carries the Dockerfile and standalone entrypoint; published to GHCR by
+  [`fake-sonos.yml`](../.github/workflows/fake-sonos.yml)) that the central E2E repo pulls,
+  pinned by digest. One
   behavioral definition, so the server's component tests and the E2E stack can
   never drift apart. It reproduces the real quirks recorded in
   [`SPEC.md §4`](./SPEC.md): DIDL-Lite metadata is required, `TrackDuration` is

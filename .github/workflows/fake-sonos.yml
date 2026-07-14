@@ -9,10 +9,14 @@ name: Fake Sonos image
 #   - pull_request (matching paths): build both arches as a bitrot guard; never pushes.
 #   - push to main (matching paths): build + push ghcr.io/<owner>/ratatoskr-fake-sonos as
 #     `latest` (what the E2E stack tracks) + `sha-<short-sha>` (an immutable handle), multi-arch.
-#   - workflow_dispatch: manual publish.
+#   - schedule (weekly): build-only drift canary. The Dockerfile pulls floating inputs
+#     (node:22-alpine, `npm install typescript@6 @types/node@26`); since path-filtering means
+#     nothing builds between fake changes, a breaking upstream release would otherwise first
+#     surface on an urgent fake change or the next publish. This backstops that (and path rot).
+#   - workflow_dispatch: manual publish — publishes only from the default branch (see PUSH below).
 #
-# The E2E repo pins the fake by digest (bumping it when the fake changes), so it never needs a
-# fake tag per server commit. The fake is test-only and is NEVER promoted to a release channel.
+# The E2E repo pins the fake by digest (bumping it deliberately when the fake changes), so it never
+# needs a fake tag per server commit. The fake is test-only and is NEVER promoted.
 
 on:
   push:
@@ -20,21 +24,27 @@ on:
     paths:
       - packages/fake-sonos/**
       - tsconfig.base.json
+      - .dockerignore
       - .github/workflows/fake-sonos.yml
   pull_request:
-    # Same paths: a change to the fake (or the base tsconfig its Dockerfile copies) gets a
-    # build check; unrelated PRs skip the QEMU build. NOTE: as with container.yml, if this job
-    # is ever made a required status check, a path-filtered run that doesn't fire leaves the
-    # check pending — pair it with a bridging job or GitHub's merge rules.
+    # Same paths: a change to the fake (or the base tsconfig / .dockerignore its build reads) gets
+    # a build check; unrelated PRs skip the QEMU build. NOTE: as with container.yml, if this job
+    # is ever made a required status check, a path-filtered run that doesn't fire leaves the check
+    # pending — pair it with a bridging job or GitHub's merge rules.
     paths:
       - packages/fake-sonos/**
       - tsconfig.base.json
+      - .dockerignore
       - .github/workflows/fake-sonos.yml
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC — build-only drift canary
   workflow_dispatch:
 
 concurrency:
   group: fake-sonos-${{ github.ref }}
-  cancel-in-progress: true
+  # Only supersede in-progress PR builds. For a publishing run (push to main), let it finish: a
+  # cancelled publish wouldn't re-fire until the fake next changes, leaving `latest` stale.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
@@ -46,14 +56,19 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # Publish only from a real push to main or a dispatch on the default branch. This keeps a
+      # scheduled run build-only (the drift canary), a PR build-only, and — crucially — stops a
+      # dispatch from a feature branch from pushing an orphan sha-<sha> from unreviewed code while
+      # `latest` (what E2E tracks) never moves.
+      PUSH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      # No registry write on pull_request (esp. fork PRs) — that leg only validates the build.
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: env.PUSH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -79,7 +94,7 @@ jobs:
           context: .
           file: packages/fake-sonos/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=fake-sonos

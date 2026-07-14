@@ -20,11 +20,17 @@ on:
     branches: [main]
   pull_request:
     # Only the inputs that affect the image; a pure-docs PR doesn't need the QEMU build.
+    # fake-sonos sources never enter the server image (the Dockerfile copies only its
+    # package.json, for the pnpm-install layer) and have their own build in fake-sonos.yml — so
+    # exclude them here to avoid a redundant server build on fake-only PRs, but re-include the
+    # package.json the server build does consume.
     paths:
       - Dockerfile
       - docker-entrypoint.sh
       - .dockerignore
       - packages/**
+      - '!packages/fake-sonos/**'
+      - packages/fake-sonos/package.json
       - contract/**
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
