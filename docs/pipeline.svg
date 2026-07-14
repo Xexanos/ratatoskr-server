@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 504" width="720" height="504" font-family="Arial, Helvetica, sans-serif" role="img" aria-label="Publishing pipeline: push to main triggers container.yml, which builds and pushes the testing-sha image; a repository_dispatch runs the full E2E suite in ratatoskr-e2e; on a green run, promote.yml re-tags the tested digest to a release channel without rebuilding.">
+  <title>Publishing pipeline (build to E2E to promote)</title>
+
+  <!-- Connectors (drawn first so the boxes/labels sit on top). Neutral gray reads on light and dark. -->
+  <g stroke="#8b949e" stroke-width="2" fill="#8b949e">
+    <line x1="360" y1="68"  x2="360" y2="110"/>
+    <polygon points="352,108 368,108 360,118" stroke="none"/>
+    <line x1="360" y1="186" x2="360" y2="262"/>
+    <polygon points="352,260 368,260 360,270" stroke="none"/>
+    <line x1="360" y1="338" x2="360" y2="414"/>
+    <polygon points="352,412 368,412 360,422" stroke="none"/>
+  </g>
+
+  <!-- 1. Trigger -->
+  <rect x="188" y="24" width="344" height="44" rx="22" fill="#1f883d"/>
+  <text x="360" y="51" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">push to main  ·  manual dispatch</text>
+
+  <!-- 2. container.yml (ratatoskr-server) -->
+  <rect x="110" y="118" width="500" height="68" rx="10" fill="#0969da"/>
+  <text x="360" y="148" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="600">container.yml — build + push  testing-&lt;sha&gt;</text>
+  <text x="360" y="169" text-anchor="middle" fill="#cfe0ff" font-size="11">ratatoskr-server  ·  multi-arch (amd64, arm64)</text>
+
+  <!-- edge label 2 to 3 -->
+  <rect x="212" y="212" width="296" height="24" rx="12" fill="#d0d7de" stroke="#8b949e" stroke-width="1"/>
+  <text x="360" y="228" text-anchor="middle" fill="#1f2328" font-size="12">repository_dispatch: server-image</text>
+
+  <!-- 3. ratatoskr-e2e (other repo) -->
+  <rect x="110" y="270" width="500" height="68" rx="10" fill="#8250df"/>
+  <text x="360" y="300" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="600">ratatoskr-e2e — run the full E2E suite</text>
+  <text x="360" y="321" text-anchor="middle" fill="#e8ddff" font-size="11">server + fake-sonos + Audiobookshelf</text>
+
+  <!-- edge label 3 to 4 -->
+  <rect x="168" y="364" width="384" height="24" rx="12" fill="#d0d7de" stroke="#8b949e" stroke-width="1"/>
+  <text x="360" y="380" text-anchor="middle" fill="#1f2328" font-size="12">on green  →  repository_dispatch: e2e-passed</text>
+
+  <!-- 4. promote.yml (ratatoskr-server) -->
+  <rect x="110" y="422" width="500" height="68" rx="10" fill="#0969da"/>
+  <text x="360" y="452" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="600">promote.yml — re-tag the tested digest</text>
+  <text x="360" y="473" text-anchor="middle" fill="#cfe0ff" font-size="11">→  :latest · :stable · :&lt;version&gt;   (no rebuild)</text>
+</svg>

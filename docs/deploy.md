@@ -45,12 +45,11 @@ Two workflows implement a **build → E2E → promote** flow. The guiding princi
 that gets released is the *exact* image that passed E2E — promotion re-tags the tested bytes,
 it never rebuilds.
 
-```mermaid
-flowchart TD
-    A([push to main / manual dispatch]) --> B["<b>container.yml</b> — build job<br/>build + push multi-arch (amd64, arm64)<br/><code>ghcr.io/xexanos/ratatoskr-server:testing-&lt;sha&gt;</code>"]
-    B -->|"repository_dispatch: server-image<br/>{ image, tag, digest, sha }"| C["<b>ratatoskr-e2e</b> — other repo<br/>pull testing-&lt;sha&gt; + fake-sonos + ABS<br/>run the full E2E suite"]
-    C -->|"on green — repository_dispatch: e2e-passed<br/>{ digest, channels?, version? }"| D["<b>promote.yml</b> — promote job<br/>re-tag the TESTED digest, no rebuild<br/>→ :latest, :stable, :&lt;version&gt;"]
-```
+![Publishing pipeline: a push to main (or manual dispatch) runs container.yml, which builds and
+pushes the multi-arch testing-<sha> image; a repository_dispatch (server-image) runs the full E2E
+suite in ratatoskr-e2e against the server plus fake-sonos and Audiobookshelf; on a green run a
+repository_dispatch (e2e-passed) runs promote.yml, which re-tags the tested digest to :latest /
+:stable / :<version> without rebuilding.](pipeline.svg)
 
 ### 1. `container.yml` — build & publish the testing image
 
