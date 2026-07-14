@@ -1,0 +1,20 @@
+# Keep the build context small and hermetic: the Dockerfile installs deps from the lockfile
+# and generates the contract artifacts itself, so none of the following must leak in.
+**/node_modules
+**/dist
+**/build
+**/coverage
+packages/contract/src/generated
+
+.git
+.github
+.idea
+.vscode
+
+# Secrets / local env — never bake into an image layer.
+.env
+.env.*
+!.env.example
+
+# Test-only assets and docs are not needed to build the runtime image.
+**/*.log

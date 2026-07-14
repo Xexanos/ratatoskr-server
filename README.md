@@ -89,6 +89,32 @@ requires TLS (`TLS_CERT_PATH` / `TLS_KEY_PATH`) unless you set `ALLOW_PLAIN_HTTP
 so credentials aren't sent in cleartext. On startup, any missing or invalid variable is
 reported — all problems at once — and the server refuses to run.
 
+## Running with Docker
+
+The server ships as a single multi-arch container image published at
+`ghcr.io/xexanos/ratatoskr-server` (build details and the publishing pipeline are in
+[`docs/deploy.md`](docs/deploy.md)). To deploy it, download the single
+[`compose.yaml`](compose.yaml), set `ABS_URL` and `ABS_STREAMER_API_KEY` in its `environment:`
+block, and start it — you don't need the rest of the repository:
+
+```sh
+curl -O https://raw.githubusercontent.com/Xexanos/ratatoskr-server/main/compose.yaml
+# edit ABS_URL + ABS_STREAMER_API_KEY in compose.yaml, then:
+docker compose up -d
+```
+
+`compose.yaml` documents every environment variable inline and runs the container with host
+networking so it can reach the Sonos speakers (SPEC section 12); where host networking is not
+available, switch to the bridge block and set `SONOS_SEED_HOST`. To build the image locally
+instead of pulling it, run `docker build -t ratatoskr-server .` from a repository checkout.
+
+**TLS out of the box.** If you configure no TLS certificate and do not opt into plain HTTP, the
+container generates a persistent self-signed certificate (stored in `./tls`) and serves HTTPS, so
+credentials never cross the network in cleartext. On first connect the app shows the certificate's
+SHA-256 fingerprint — compare it with the one printed in `docker compose logs` to trust the server
+(trust-on-first-use). You can instead bring your own certificate (`TLS_CERT_PATH`/`TLS_KEY_PATH`)
+or serve plain HTTP (`ALLOW_PLAIN_HTTP=true`, e.g. behind a TLS-terminating reverse proxy).
+
 ## Development
 
 This is a pnpm workspace of three packages: `position` (pure position-mapping logic),
