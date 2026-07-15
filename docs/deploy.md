@@ -124,15 +124,16 @@ burn CI and churn the registry. Instead:
   which its Dockerfile copies). It runs only when the fake itself changes: a bitrot build on
   matching PRs, and on push to `main` it pushes `ghcr.io/xexanos/ratatoskr-fake-sonos` as
   `latest` (what E2E tracks) plus `sha-<short-sha>` (an immutable handle), multi-arch.
-- The **E2E repo pins the fake by digest** and bumps that pin deliberately when the fake changes,
-  so it never needs a fake tag per server commit. Note the flip side: the server and fake are **not
-  automatically co-tested**. `container.yml`'s `trigger-e2e` fires as soon as the server image is
-  pushed, and that E2E run uses whatever fake digest the E2E repo currently pins — so a commit that
-  changes *both* server and fake requires bumping the E2E pin to the newly published fake for the
-  two to be tested together (otherwise the new server is validated against the old fake). Closing
-  that gap mechanically — e.g. this workflow sending a `repository_dispatch` with the new digest to
-  the E2E repo, mirroring `trigger-e2e` — is a possible future enhancement, deliberately left out
-  here to keep the fake decoupled from the server's cadence.
+- The **E2E repo tracks the fake's `:latest`** by default (a digest can be pinned for a fully
+  reproducible run and bumped deliberately), so it never needs a fake tag per server commit. Note
+  the flip side: the server and fake are **not automatically co-tested**. `container.yml`'s
+  `trigger-e2e` fires as soon as the server image is pushed, and that E2E run uses whatever fake
+  `:latest` currently resolves to — so a commit that changes *both* server and fake must let
+  `fake-sonos.yml` publish the new `:latest` first for the two to be tested together (otherwise the
+  new server is validated against the previous fake). Closing that gap mechanically — e.g. this
+  workflow sending a `repository_dispatch` with the new digest to the E2E repo, mirroring
+  `trigger-e2e` — is a possible future enhancement, deliberately left out here to keep the fake
+  decoupled from the server's cadence.
 - The fake is **test-only and never promoted** to a release channel (only the server image is).
   Its tags are low-volume, so `registry-cleanup.yml` deliberately does not prune this package.
 
@@ -165,9 +166,13 @@ burn CI and churn the registry. Instead:
     if: success()
     env:
       GH_TOKEN: ${{ secrets.SERVER_PROMOTE_TOKEN }}   # can dispatch to ratatoskr-server
+      PAYLOAD_DIGEST: ${{ github.event.client_payload.digest }}
     run: |
+      # Reference the payload as a shell variable, never interpolate ${{ }} into the script:
+      # a ${{ }} expands before the shell parses the line, so a crafted digest could inject
+      # commands (with SERVER_PROMOTE_TOKEN in scope). Map it into env: and use "$PAYLOAD_DIGEST".
       gh api repos/Xexanos/ratatoskr-server/dispatches \
         -f event_type=e2e-passed \
-        -F client_payload[digest]="${{ github.event.client_payload.digest }}" \
+        -F "client_payload[digest]=$PAYLOAD_DIGEST" \
         -F client_payload[channels]=latest
   ```
