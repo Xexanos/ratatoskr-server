@@ -166,9 +166,13 @@ burn CI and churn the registry. Instead:
     if: success()
     env:
       GH_TOKEN: ${{ secrets.SERVER_PROMOTE_TOKEN }}   # can dispatch to ratatoskr-server
+      PAYLOAD_DIGEST: ${{ github.event.client_payload.digest }}
     run: |
+      # Reference the payload as a shell variable, never interpolate ${{ }} into the script:
+      # a ${{ }} expands before the shell parses the line, so a crafted digest could inject
+      # commands (with SERVER_PROMOTE_TOKEN in scope). Map it into env: and use "$PAYLOAD_DIGEST".
       gh api repos/Xexanos/ratatoskr-server/dispatches \
         -f event_type=e2e-passed \
-        -F client_payload[digest]="${{ github.event.client_payload.digest }}" \
+        -F "client_payload[digest]=$PAYLOAD_DIGEST" \
         -F client_payload[channels]=latest
   ```
