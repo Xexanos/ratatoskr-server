@@ -63,6 +63,13 @@ export interface FakeSonosOptions {
    * containerized fake binds 0.0.0.0 but must advertise its externally reachable name.
    */
   advertiseHost?: string
+  /**
+   * When true, GetPositionInfo advances RelTime with the wall clock while PLAYING (frozen on
+   * pause/stop, re-anchored on seek). Off by default so in-process tests keep the position they
+   * set manually; the E2E container enables it (FAKE_ADVANCE=1) so real playback progresses and
+   * the server's sync loop has a moving position to write back to ABS.
+   */
+  advanceWhilePlaying?: boolean
 }
 
 export class FakeSonos {
@@ -72,6 +79,10 @@ export class FakeSonos {
   private readonly advertiseHost: string
   private readonly uuid: string
   private readonly roomName: string
+  private readonly advanceWhilePlaying: boolean
+  // Wall-clock anchor for auto-advance: set to Date.now() while PLAYING iff advanceWhilePlaying,
+  // undefined otherwise (so with the flag off, currentRelSeconds() is exactly relTimeSeconds).
+  private playStartedAt: number | undefined
 
   // Observable state, for assertions and to answer polls.
   queue: EnqueuedTrack[] = []
@@ -93,6 +104,19 @@ export class FakeSonos {
     this.host = options.host ?? '127.0.0.1'
     this.port = options.port ?? 0
     this.advertiseHost = options.advertiseHost ?? this.host
+    this.advanceWhilePlaying = options.advanceWhilePlaying ?? false
+  }
+
+  /**
+   * Reported elapsed position. With advanceWhilePlaying off this is just relTimeSeconds (no
+   * behaviour change). With it on, while PLAYING it adds the whole seconds elapsed since the
+   * play/seek anchor, so a real E2E session's position moves without a test poking it.
+   */
+  private currentRelSeconds(): number {
+    if (this.advanceWhilePlaying && this.transportState === 'PLAYING' && this.playStartedAt !== undefined) {
+      return this.relTimeSeconds + Math.floor((Date.now() - this.playStartedAt) / 1000)
+    }
+    return this.relTimeSeconds
   }
 
   get speakerId(): string {
@@ -126,6 +150,7 @@ export class FakeSonos {
     this.actions.length = 0
     this.seekFaultsRemaining = 0
     this.positionReport = undefined
+    this.playStartedAt = undefined
   }
 
   private handle(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): void {
@@ -165,12 +190,17 @@ export class FakeSonos {
         this.transportUri = param(body, 'CurrentURI') ?? ''
         return soap(`<u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
       case 'Play':
+        if (this.advanceWhilePlaying) this.playStartedAt = Date.now()
         this.transportState = 'PLAYING'
         return soap(`<u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
       case 'Pause':
+        this.relTimeSeconds = this.currentRelSeconds() // fold elapsed before freezing (no-op if flag off)
+        this.playStartedAt = undefined
         this.transportState = 'PAUSED_PLAYBACK'
         return soap(`<u:PauseResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
       case 'Stop':
+        this.relTimeSeconds = this.currentRelSeconds()
+        this.playStartedAt = undefined
         this.transportState = 'STOPPED'
         return soap(`<u:StopResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
       case 'Seek':
@@ -216,13 +246,17 @@ export class FakeSonos {
     const unit = param(body, 'Unit')
     const target = param(body, 'Target') ?? ''
     if (unit === 'TRACK_NR') this.currentTrack = Number(target) || 1
-    else if (unit === 'REL_TIME') this.relTimeSeconds = hmsToSeconds(target)
+    else if (unit === 'REL_TIME') {
+      this.relTimeSeconds = hmsToSeconds(target)
+      // re-anchor so auto-advance resumes from the seeked position (no-op if flag off)
+      if (this.advanceWhilePlaying && this.transportState === 'PLAYING') this.playStartedAt = Date.now()
+    }
     return soap(`<u:SeekResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
   }
 
   private getPositionInfo(): string {
     const track = this.positionReport ? this.positionReport.track : this.currentTrack
-    const relSeconds = this.positionReport ? this.positionReport.relSeconds : this.relTimeSeconds
+    const relSeconds = this.positionReport ? this.positionReport.relSeconds : this.currentRelSeconds()
     return soap(
       `<u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">` +
         `<Track>${track}</Track>` +

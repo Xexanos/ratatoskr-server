@@ -9,6 +9,8 @@ import { FakeSonos } from './fakeSonos.js'
 //   ADVERTISE_HOST host advertised in the zone-group Location URL (default: BIND_HOST)
 //   SPEAKER_UUID   speaker id, RINCON_…                 (default from FakeSonos)
 //   ROOM_NAME      zone name                            (default from FakeSonos)
+//   FAKE_ADVANCE   "1" advances RelTime while PLAYING   (default off; the E2E stack sets it so
+//                  real playback progresses and the server syncs a moving position back to ABS)
 
 const port = Number(process.env.PORT ?? 1400)
 if (!Number.isInteger(port) || port <= 0 || port > 65535) {
@@ -22,6 +24,7 @@ const fake = new FakeSonos({
   ...(process.env.ADVERTISE_HOST ? { advertiseHost: process.env.ADVERTISE_HOST } : {}),
   ...(process.env.SPEAKER_UUID ? { uuid: process.env.SPEAKER_UUID } : {}),
   ...(process.env.ROOM_NAME ? { roomName: process.env.ROOM_NAME } : {}),
+  advanceWhilePlaying: process.env.FAKE_ADVANCE === '1',
 })
 
 const { seedHost } = await fake.start()
