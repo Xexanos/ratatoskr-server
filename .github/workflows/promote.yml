@@ -123,12 +123,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Emit the step outputs in one place; create_tag=true means "this run must push a NEW
-          # v<version> git tag + GitHub release" (version may be set with create_tag=false when a
-          # commit was already released and is merely re-promoted to another channel).
-          finish() { # $1=version $2=create_tag
-            echo "version=$1"    >> "$GITHUB_OUTPUT"
-            echo "create_tag=$2" >> "$GITHUB_OUTPUT"
+          # Emit the step outputs in one place; release=true means "an auto-derived version
+          # applies to this promotion" — the final step then ensures git tag and GitHub release
+          # exist (idempotently: a re-promotion of the same commit also repairs a run that
+          # earlier died between tag push and release creation).
+          finish() { # $1=version $2=release
+            echo "version=$1" >> "$GITHUB_OUTPUT"
+            echo "release=$2" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
@@ -160,11 +161,14 @@ jobs:
             finish "" false
           fi
 
-          # Re-promotion of an already-released commit (e.g. latest -> stable): reuse its version.
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+          # Re-promotion of an already-released commit (e.g. latest -> stable): reuse its
+          # version. release=true so the final step can repair a missing GitHub release.
           existing="$(git tag --list 'v[0-9]*' --points-at "$sha" | sort -V | tail -n1)"
           if [ -n "$existing" ]; then
             echo "Commit ${sha} is already released as ${existing} — reusing that version."
-            finish "${existing#v}" false
+            finish "${existing#v}" true
           fi
           # Out-of-order E2E completions: a newer commit that CONTAINS this one was already
           # released, so these changes shipped in that version — cutting another one would number
@@ -175,18 +179,34 @@ jobs:
             finish "" false
           fi
 
-          # Conventional-commit bump over the range since the last v* tag reachable from the
-          # promoted commit. Subjects decide the type; bodies can carry BREAKING CHANGE footers.
-          # Anything that matches no rule (docs:, chore:, ci:, refactor:, merge commits, ...)
-          # does not release.
-          last="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$sha" 2>/dev/null || true)"
+          # Conventional-commit bump over the range since the last released version. The base
+          # is the HIGHEST v* tag reachable from the promoted commit (sort -V) — the same
+          # selection the reuse check above uses; `git describe` (nearest by topology) could
+          # pick a lower base on branched history and mint a colliding version. Anything that
+          # matches no rule (docs:, chore:, ci:, refactor:, merge commits, ...) does not release.
+          last="$(git tag --list 'v[0-9]*' --merged "$sha" | sort -V | tail -n1)"
           range="${last:+${last}..}${sha}"
           subjects="$(git log --format='%s' "$range")"
-          bodies="$(git log --format='%b' "$range")"
+
+          # Breaking changes: the `!` subject marker, or a BREAKING[ -]CHANGE: footer. Only a
+          # commit's LAST body paragraph counts as the footer block — a "BREAKING CHANGE:"
+          # line quoted elsewhere in a body (e.g. a deps: commit pasting an upstream
+          # changelog) must not force a major bump.
+          breaking=false
+          if grep -qE '^[a-z]+(\([^)]*\))?!:' <<< "$subjects"; then
+            breaking=true
+          else
+            while read -r commit; do
+              footer="$(git log -1 --format='%b' "$commit" | awk -v RS= 'END { print }')"
+              if grep -qE '^BREAKING[ -]CHANGE:' <<< "$footer"; then
+                breaking=true
+                break
+              fi
+            done < <(git rev-list "$range")
+          fi
 
           bump="none"
-          if grep -qE '^[a-z]+(\([^)]*\))?!:' <<< "$subjects" \
-             || grep -qE '^BREAKING[ -]CHANGE:' <<< "$bodies"; then
+          if [ "$breaking" = true ]; then
             bump="major"
           elif grep -qE '^feat(\([^)]*\))?:' <<< "$subjects"; then
             bump="minor"
@@ -209,7 +229,6 @@ jobs:
           version="${major}.${minor}.${patch}"
 
           echo "Next version: ${version} (${bump} bump from ${last:-nothing}, commit ${sha})"
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
           finish "$version" true
 
       - name: Re-tag the tested manifest onto the release channels
@@ -236,18 +255,28 @@ jobs:
           echo "Published: ${targets}"
 
       # Runs AFTER the image publish so a failed promotion never leaves a version tag with no
-      # image behind it. Tags pushed with GITHUB_TOKEN do not trigger other workflows — no loops.
-      - name: Push the version tag and GitHub release
-        if: steps.version.outputs.create_tag == 'true'
+      # image behind it. Each part is idempotent (create tag if missing, push is a no-op when
+      # the remote has it, create release if missing), so a re-promotion of the same commit
+      # repairs a run that earlier died between tag push and release creation. Tags pushed
+      # with GITHUB_TOKEN do not trigger other workflows — no loops.
+      - name: Ensure the version tag and GitHub release exist
+        if: steps.version.outputs.release == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SHA: ${{ steps.version.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${VERSION}" -m "Release v${VERSION}" "${SHA}"
+          if ! git rev-parse -q --verify "refs/tags/v${VERSION}" > /dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v${VERSION}" -m "Release v${VERSION}" "${SHA}"
+          fi
+          # No-op if the remote already has the tag; fails loudly if it points elsewhere.
           git push origin "v${VERSION}"
-          # Release notes are generated from the commits since the previous release.
-          gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes --verify-tag
+          if gh release view "v${VERSION}" > /dev/null 2>&1; then
+            echo "Release v${VERSION} already exists."
+          else
+            # Release notes are generated from the commits since the previous release.
+            gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes --verify-tag
+          fi

@@ -35,5 +35,7 @@ export default {
     // subject cosmetics are not what the release pipeline reads.
     'subject-case': [0],
     'body-max-line-length': [0],
+    // Dependabot subjects (scoped package + path) routinely exceed the 100-char default.
+    'header-max-length': [0],
   },
 }

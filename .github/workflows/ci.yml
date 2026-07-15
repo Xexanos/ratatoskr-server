@@ -63,7 +63,9 @@ jobs:
   # merge-committed, so the individual commits (not the PR title) are what the versioning
   # later reads. Rules live in commitlint.config.mjs at the repo root; commitlint runs via
   # npx with pinned versions rather than as a devDependency so the workspace install stays
-  # lean and this job needs no pnpm setup.
+  # lean and this job needs no pnpm setup. The config's `extends` resolves from the shared
+  # npx prefix where both -p packages land (verified: the job lints on a fresh runner with
+  # no repo node_modules).
   commitlint:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
