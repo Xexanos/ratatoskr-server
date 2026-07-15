@@ -188,16 +188,28 @@ jobs:
           range="${last:+${last}..}${sha}"
           subjects="$(git log --format='%s' "$range")"
 
-          # Breaking changes: the `!` subject marker, or a BREAKING[ -]CHANGE: footer. Only a
-          # commit's LAST body paragraph counts as the footer block — a "BREAKING CHANGE:"
-          # line quoted elsewhere in a body (e.g. a deps: commit pasting an upstream
-          # changelog) must not force a major bump.
+          # Breaking changes: the `!` subject marker, or a BREAKING[ -]CHANGE: footer. The footer
+          # is a commit's last body paragraph — but git/GitHub/dependabot append Co-authored-by:
+          # and Signed-off-by: trailers (this repo's convention adds a Co-Authored-By: line after
+          # a blank line, see CLAUDE.md), which would otherwise become the last paragraph and hide
+          # a real footer. So drop that trailing trailer/blank-line tail first, then take the last
+          # paragraph. A "BREAKING CHANGE:" quoted mid-body (e.g. a deps: commit pasting an
+          # upstream changelog) still does not count.
           breaking=false
           if grep -qE '^[a-z]+(\([^)]*\))?!:' <<< "$subjects"; then
             breaking=true
           else
             while read -r commit; do
-              footer="$(git log -1 --format='%b' "$commit" | awk -v RS= 'END { print }')"
+              footer="$(git log -1 --format='%b' "$commit" | awk '
+                { line[NR] = $0 }
+                END {
+                  n = NR
+                  while (n > 0 && (line[n] ~ /^[[:space:]]*$/ ||
+                        tolower(line[n]) ~ /^(co-authored-by|signed-off-by):/)) n--
+                  start = n
+                  while (start > 1 && line[start-1] !~ /^[[:space:]]*$/) start--
+                  for (i = start; i <= n; i++) print line[i]
+                }')"
               if grep -qE '^BREAKING[ -]CHANGE:' <<< "$footer"; then
                 breaking=true
                 break
