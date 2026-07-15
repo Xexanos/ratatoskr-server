@@ -11,7 +11,13 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage: install workspace deps, generate the contract artifacts, compile TS ----
-FROM node:22-alpine AS build
+# Pinned to $BUILDPLATFORM so a multi-arch build compiles ONCE on the builder's native arch instead
+# of re-running pnpm/tsc under QEMU emulation for each target (minutes-to-hangs slow in CI). Safe
+# because the output shipped to runtime — the compiled JS in dist plus the `pnpm deploy --prod`
+# node_modules — is architecture-independent: every runtime dependency (@svrooij/sonos,
+# fast-xml-parser, fastify, fastify-openapi-glue, undici, and the built workspace packages) is pure
+# JavaScript with no native/arch-specific binaries. Only the runtime stage below is per-arch.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # Pin pnpm to the version the repo declares (package.json "packageManager").
