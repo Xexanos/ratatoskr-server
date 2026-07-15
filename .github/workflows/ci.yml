@@ -58,6 +58,31 @@ jobs:
         env:
           ABS_IT_IMAGE: ${{ matrix.image }}
 
+  # Commit types are load-bearing: promote.yml derives the release version from them at
+  # promotion (see CLAUDE.md / docs/deploy.md). Lint every commit on the PR — PRs are
+  # merge-committed, so the individual commits (not the PR title) are what the versioning
+  # later reads. Rules live in commitlint.config.mjs at the repo root; commitlint runs via
+  # npx with pinned versions rather than as a devDependency so the workspace install stays
+  # lean and this job needs no pnpm setup. The config's `extends` resolves from the shared
+  # npx prefix where both -p packages land (verified: the job lints on a fresh runner with
+  # no repo node_modules).
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The PR's commits must be present locally to lint the base..head range.
+          fetch-depth: 0
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 22
+      - name: Lint the PR's commit messages
+        run: |
+          npx --yes -p @commitlint/cli@21.2.1 -p @commitlint/config-conventional@21.2.0 \
+            commitlint --from ${{ github.event.pull_request.base.sha }} \
+                       --to ${{ github.event.pull_request.head.sha }} --verbose
+
   # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
   # change in a breaking way within /v1 without a major version bump.
   oasdiff:

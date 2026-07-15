@@ -81,12 +81,26 @@ gh workflow run container.yml --ref <your-branch>
   the tested **digest** — **from the private `ratatoskr-server-testing` package into the public
   `ratatoskr-server` package** — under the requested channel tag(s). A pure server-side copy of the
   tested bytes (no rebuild), so what ships is provably what E2E validated. Default channel is
-  `latest`; an optional `version` input adds an immutable `:<version>` tag.
+  `latest`.
+- **Automatic semver versioning:** the workflow reads the promoted commit from the image's
+  `org.opencontainers.image.revision` label and derives the next version from the
+  **Conventional Commits** since the last `v*` tag: `feat!:` / `BREAKING CHANGE:` → major,
+  `feat:` → minor, `fix:` / `perf:` → patch. Anything else (`docs:`, `chore:`, `ci:`,
+  `refactor:`, …) cuts **no** version — the promotion then only moves the channel tags. When a
+  version is cut, the image additionally gets an immutable `:<x.y.z>` tag and the commit gets a
+  `v<x.y.z>` git tag plus a GitHub release with generated notes. Versioning happens **at
+  promotion** (not on push to `main`) so a version tag can only ever point at a commit whose
+  image passed E2E. Re-promoting an already-released commit (e.g. to `stable`) reuses its
+  existing version; a commit already contained in a newer release gets no new version
+  (out-of-order E2E completions). Note the promoted *image* carries no version label inside —
+  promotion never rebuilds, so the version exists only as registry tag / git tag; the
+  `revision` label is the stable link back to the commit.
+- The `version` input overrides the automatism (publishes that image tag verbatim; no git tag).
 
-Manual promotion example:
+Manual promotion example (auto-versioned; add `-f version=1.2.3` to override):
 
 ```sh
-gh workflow run promote.yml -f source=sha256:<tested-digest> -f channels=latest,stable -f version=1.2.3
+gh workflow run promote.yml -f source=sha256:<tested-digest> -f channels=latest,stable
 ```
 
 ### 3. `registry-cleanup.yml` — prune throwaway images
