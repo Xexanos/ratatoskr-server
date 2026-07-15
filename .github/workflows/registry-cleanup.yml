@@ -1,10 +1,11 @@
 name: Registry cleanup
 
-# Prunes throwaway per-commit server images from GHCR so the registry does not fill up with
-# every build. container.yml publishes one tag per build: testing-<sha> (the E2E artifact) — the
-# disposable identity of a commit's build. This deletes those past the retention window. Promoted
-# release tags (latest, stable, and semver versions from promote.yml) are protected via
-# exclude-tags, since a promoted manifest still carries its original testing-<sha> tag.
+# Prunes throwaway per-commit server images from GHCR so the registry does not fill up with every
+# build. It targets the PRIVATE testing package (ratatoskr-server-testing), where container.yml
+# publishes one tag per build: testing-<sha> (the E2E artifact) — the disposable identity of a
+# commit's build. Promoted images live in a SEPARATE public package (ratatoskr-server) that this
+# job never touches, so it only ever deletes testing-<sha> here. (exclude-tags for release
+# channels is kept as defense-in-depth, though the testing package never carries them.)
 #
 # Inspired by ratatoskr-app's release-validation.yml scheduled prune (14-day window,
 # keep-most-recent floor, daily cron + workflow_dispatch). That prunes GitHub *releases* with
@@ -45,7 +46,7 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           owner: ${{ github.repository_owner }}
-          package: ratatoskr-server
+          package: ratatoskr-server-testing
           token: ${{ secrets.GHCR_CLEANUP_TOKEN || github.token }}
           # The disposable per-commit tag. Only images tagged like this are considered.
           delete-tags: testing-*

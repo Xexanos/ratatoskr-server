@@ -1,8 +1,9 @@
 name: Promote image
 
 # Publishes a *tested* server image to a release channel — the second half of the flow that
-# starts in container.yml. The key property: it does NOT rebuild. It re-tags the exact
-# multi-arch manifest that E2E validated (identical bytes, addressed by digest), so what
+# starts in container.yml. The key property: it does NOT rebuild. It copies the exact multi-arch
+# manifest that E2E validated (identical bytes, addressed by digest) from the private testing
+# package (ratatoskr-server-testing) into the public release package (ratatoskr-server), so what
 # ships is provably what passed. Rebuilding here would risk publishing something E2E never saw.
 #
 # Triggers:
@@ -32,7 +33,10 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server
+  # Copy FROM the private testing package (where the tested digest lives) INTO the public release
+  # package (which only ever receives promoted images).
+  TESTING_IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server-testing
+  RELEASE_IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server
 
 jobs:
   promote:
@@ -60,7 +64,8 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          image="${REGISTRY}/${IMAGE_NAME,,}"
+          testing="${REGISTRY}/${TESTING_IMAGE_NAME,,}"
+          release="${REGISTRY}/${RELEASE_IMAGE_NAME,,}"
 
           if [ "$EVENT" = "repository_dispatch" ]; then
             source="${DISPATCH_SOURCE:-$DISPATCH_TAG}"
@@ -77,17 +82,18 @@ jobs:
             exit 1
           fi
 
-          # A digest addresses the exact tested bytes; a bare tag is resolved by the registry.
+          # The tested bytes live in the TESTING package; a digest addresses them exactly, a bare
+          # tag (e.g. testing-abc1234) is resolved there too.
           case "$source" in
-            sha256:*) srcref="${image}@${source}" ;;
-            *)        srcref="${image}:${source}" ;;
+            sha256:*) srcref="${testing}@${source}" ;;
+            *)        srcref="${testing}:${source}" ;;
           esac
 
           # version, if given, becomes an extra immutable channel.
           [ -n "$version" ] && channels="${channels},${version}"
 
-          echo "image=${image}"   >> "$GITHUB_OUTPUT"
-          echo "srcref=${srcref}" >> "$GITHUB_OUTPUT"
+          echo "image=${release}" >> "$GITHUB_OUTPUT"   # promote INTO the public release package
+          echo "srcref=${srcref}" >> "$GITHUB_OUTPUT"    # FROM the private testing package
           echo "channels=${channels}" >> "$GITHUB_OUTPUT"
 
       - name: Re-tag the tested manifest onto the release channels
