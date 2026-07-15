@@ -1,10 +1,12 @@
 name: Container image
 
-# Builds the multi-arch server image (SPEC section 12) and publishes it to GHCR as
-# `testing-<short-sha>` — the artifact the central E2E stack (Xexanos/ratatoskr-e2e)
-# pulls to run the full app + server + ABS + fake-Sonos suite. After pushing, it hands
-# the exact image ref to the E2E repo via repository_dispatch. Promotion of a *tested*
-# image to a release channel is a separate, no-rebuild step (see promote.yml).
+# Builds the multi-arch server image (SPEC section 12) and publishes it to the private
+# `ratatoskr-server-testing` package as `testing-<short-sha>` — the artifact the central E2E
+# stack (Xexanos/ratatoskr-e2e) pulls to run the full app + server + ABS + fake-Sonos suite.
+# After pushing, it hands the exact image ref to the E2E repo via repository_dispatch.
+# Promotion of a *tested* image is a separate, no-rebuild step that copies the tested digest
+# into the PUBLIC release package `ratatoskr-server` (see promote.yml) — so throwaway per-commit
+# images stay in the private testing package and never surface publicly.
 #
 # - pull_request : build both arches as a bitrot guard; never pushes (fork PRs have no
 #                  registry write anyway). Path-filtered so docs-only PRs skip the dual-arch
@@ -48,9 +50,12 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  # Testing builds go to a SEPARATE, private package (ratatoskr-server-testing). promote.yml
+  # copies the tested digest into the public release package (ratatoskr-server), so throwaway
+  # per-commit images never appear in the public release package.
   # GHCR requires a lowercase path; the owner (Xexanos) is mixed-case, so metadata-action
   # lowercases it for the tags below, and the dispatch job lowercases it explicitly.
-  IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server
+  IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server-testing
 
 jobs:
   build:

@@ -57,8 +57,10 @@ ratatoskr-server workflow, purple = ratatoskr-e2e repo, gray pill = cross-repo r
 - **Triggers:** `push` to `main` and `workflow_dispatch` (build + push + trigger E2E);
   `pull_request` (build both arches as a bitrot guard, **no push**; path-filtered so docs-only PRs
   skip it).
-- **Publishes:** `ghcr.io/xexanos/ratatoskr-server:testing-<short-sha>` (the E2E artifact),
-  multi-arch. That one tag identifies the commit; the full SHA is also recorded in the image's
+- **Publishes:** `ghcr.io/xexanos/ratatoskr-server-testing:testing-<short-sha>` (the E2E artifact),
+  multi-arch, in a **private** package. Throwaway per-commit images stay here; the public release
+  package (`ratatoskr-server`) only ever receives promoted images (see `promote.yml`). That one tag
+  identifies the commit; the full SHA is also recorded in the image's
   `org.opencontainers.image.revision` label. Promotion addresses the tested image by **digest**, so
   no second sha tag is needed.
 - **Then:** dispatches `event_type: server-image` to `Xexanos/ratatoskr-e2e` with the image ref
@@ -76,9 +78,10 @@ gh workflow run container.yml --ref <your-branch>
 - **Triggers:** `repository_dispatch` (`event_type: e2e-passed`, fired by the E2E repo on a
   green run) and `workflow_dispatch` (manual promotion of a known-good tag/digest).
 - **What it does:** `docker buildx imagetools create` copies the multi-arch manifest addressed by
-  the tested **digest** under the requested channel tag(s) — a pure server-side re-tag, so what
-  ships is provably what E2E validated. Default channel is `latest`; an optional `version` input
-  adds an immutable `:<version>` tag.
+  the tested **digest** — **from the private `ratatoskr-server-testing` package into the public
+  `ratatoskr-server` package** — under the requested channel tag(s). A pure server-side copy of the
+  tested bytes (no rebuild), so what ships is provably what E2E validated. Default channel is
+  `latest`; an optional `version` input adds an immutable `:<version>` tag.
 
 Manual promotion example:
 
@@ -88,11 +91,11 @@ gh workflow run promote.yml -f source=sha256:<tested-digest> -f channels=latest,
 
 ### 3. `registry-cleanup.yml` — prune throwaway images
 
-Every build publishes a `testing-<sha>` tag, so without cleanup GHCR fills up. A scheduled job
-prunes those once older than **14 days**, keeping the **3 most recent** as a safety floor and never
-touching promoted tags (`latest`, `stable`, and semver versions like `1.2.3` — a promoted manifest
-still carries its original `testing-<sha>` tag, so those are held in `exclude-tags` as
-defense-in-depth).
+Every build publishes a `testing-<sha>` tag to the private `ratatoskr-server-testing` package, so
+without cleanup GHCR fills up. A scheduled job prunes those once older than **14 days**, keeping the
+**3 most recent** as a safety floor. It targets **only** the testing package; the public release
+package (`ratatoskr-server`) holds solely promoted tags and is never touched (release channels stay
+in `exclude-tags` as defense-in-depth, though the testing package never carries them).
 
 - **Triggers:** daily cron, plus `workflow_dispatch` with a `dry-run` input to preview.
 - **How:** [`dataaxiom/ghcr-cleanup-action`](https://github.com/dataaxiom/ghcr-cleanup-action),
@@ -146,11 +149,15 @@ burn CI and churn the registry. Instead:
   **user-owned** package it may lack delete rights. If the cleanup job fails to delete, add a
   classic PAT with `read:packages` + `delete:packages` as this secret; the job uses it in
   preference to `GITHUB_TOKEN`. Verify safely first with `gh workflow run registry-cleanup.yml -f dry-run=true`.
-- **Package visibility:** the first push creates each GHCR package private. For
-  `Xexanos/ratatoskr-e2e` to pull them, either make the packages **public** (Package settings →
-  Change visibility) or grant that repo read access (Package settings → Manage Actions access →
-  add the E2E repo). This applies to **both** packages — `ratatoskr-server` and
-  `ratatoskr-fake-sonos`. Pulls in the E2E workflow authenticate with its own `GITHUB_TOKEN`.
+- **Package visibility:** the first push creates each GHCR package private. Set them up once
+  (GHCR is per-package, not per-tag):
+  - **`ratatoskr-server`** (release, end-user facing): make it **public** (Package settings →
+    Change visibility). It only ever holds promoted `:latest` / `:vX` images.
+  - **`ratatoskr-server-testing`** and **`ratatoskr-fake-sonos`** (consumed by E2E): the E2E repo
+    must be able to pull them — either keep them private and grant `Xexanos/ratatoskr-e2e` read
+    access (Package settings → Manage Actions access → add the repo), or make them public if you
+    don't mind throwaway/test images being visible. Pulls in the E2E workflow authenticate with
+    its own `GITHUB_TOKEN` (or a `read:packages` PAT).
 - **E2E-side callback:** on a successful run, the E2E workflow promotes the image it just tested:
   ```yaml
   # in Xexanos/ratatoskr-e2e, after the E2E job succeeds
