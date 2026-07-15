@@ -118,12 +118,71 @@ jobs:
           provenance: false
           sbom: false
 
+  # Native arm64 boot check. The build cross-compiles on an amd64 builder (Dockerfile's
+  # `--platform=$BUILDPLATFORM` build stage), so a wrong-arch artifact would only surface at runtime
+  # on real hardware. Run on a native arm64 runner (free for public repos) and prove the arm64 image
+  # actually boots and serves /v1/health before it can be promoted. The Dockerfile's *.node guard is
+  # the deterministic tripwire that fails the moment a native dep is introduced; this is the
+  # behavioural backstop that also covers musl/alpine and runtime-arch surprises the guard can't see.
+  # On push/dispatch it tests the EXACT multi-arch image just pushed (pull by digest → native arm64
+  # picks the arm64 variant); on a PR nothing was pushed, so it builds the arm64 image locally.
+  smoke-arm64:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve the arm64 image to test
+        id: img
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            docker build -t ratatoskr-server:arm64-smoke .   # native arm64 build; nothing was pushed
+            echo "ref=ratatoskr-server:arm64-smoke" >> "$GITHUB_OUTPUT"
+          else
+            docker pull "${IMAGE}@${DIGEST}"                 # the exact pushed artifact, arm64 variant
+            echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Boot the arm64 image and assert /v1/health responds
+        env:
+          REF: ${{ steps.img.outputs.ref }}
+        run: |
+          # Plain HTTP (no cert to manage) + an unreachable ABS (connection refused is a network
+          # error, which the server tolerates at startup — it degrades and /health reports it). If a
+          # dependency is broken on arm64, Node fails to load it and the listener never comes up.
+          docker run -d --name smoke \
+            -e ALLOW_PLAIN_HTTP=true \
+            -e ABS_URL=http://127.0.0.1:1 -e ABS_ALLOW_PLAIN_HTTP=true \
+            -e ABS_STREAMER_API_KEY=smoke-dummy \
+            -e PORT=8080 -p 8080:8080 "$REF"
+          ok=
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          echo "--- container logs ---"; docker logs smoke || true
+          docker rm -f smoke >/dev/null 2>&1 || true
+          [ -n "$ok" ] || { echo "::error title=arm64 smoke failed::the arm64 image did not serve /v1/health"; exit 1; }
+
   # Hand the freshly pushed image to the central E2E repo. Cross-repo dispatch needs a token
   # with access to Xexanos/ratatoskr-e2e (the per-run GITHUB_TOKEN is scoped to THIS repo only),
   # stored as the E2E_DISPATCH_TOKEN secret. If that secret is missing the job FAILS: the image is
   # published but its E2E gate silently not running would be worse than a red pipeline.
+  # Gated on smoke-arm64 too: a pushed image that can't boot on arm64 must not reach the E2E → promote
+  # path, so a broken arm64 build is never promoted to a release channel.
   trigger-e2e:
-    needs: build
+    needs: [build, smoke-arm64]
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.trigger_e2e)
     runs-on: ubuntu-latest
     steps:

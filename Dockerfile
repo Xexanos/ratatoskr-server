@@ -51,6 +51,19 @@ RUN pnpm run generate \
 # deploy path; the legacy deploy resolves workspace:* links from the built packages instead.
 RUN pnpm --filter @ratatoskr/app deploy --prod --legacy /prod
 
+# Guard the $BUILDPLATFORM cross-compile above: it is only safe while every shipped runtime dep is
+# architecture-independent. A native addon (*.node) in the production deploy means an amd64 binary
+# would be baked into the arm64 image and crash only at runtime — so fail the build the moment such
+# a dep is introduced, instead of shipping a broken image. If this fires: replace the dependency
+# with a pure-JS one, or drop the `--platform=$BUILDPLATFORM` pin on the build stage above (which
+# reverts to a correct but slow, per-arch QEMU-emulated build). The arm64 smoke job in
+# container.yml is the behavioural backstop for anything this static check can't see.
+RUN if find /prod -name '*.node' -type f | grep -q .; then \
+      echo "ERROR: native binary (*.node) found in the production deploy — the multi-arch build cross-compiles on amd64, so this would ship a wrong-arch binary in the arm64 image. See the note above this RUN in the Dockerfile." >&2; \
+      find /prod -name '*.node' -type f >&2; \
+      exit 1; \
+    fi
+
 # ---- Runtime stage: slim, non-root, app + production deps only ----
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
