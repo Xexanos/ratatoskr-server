@@ -72,6 +72,8 @@ services:
       # A speaker's IP. Only needed where SSDP multicast is unreliable (or under bridge networking);
       # discovery is automatic otherwise.
       # SONOS_SEED_HOST: "192.168.1.60"
+      # SONOS_REQUEST_TIMEOUT_MS: "4000"                # per-call cap on Sonos SOAP/discovery I/O so a
+      #                                                 # vanished speaker fails fast (502) instead of hanging
 
       # ─────────── Listener port ───────────
       # PORT: "8080"

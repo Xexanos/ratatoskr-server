@@ -40,7 +40,33 @@ export class SonosClient {
   constructor(
     private readonly seedHost: string | undefined,
     private readonly createManager: SonosManagerFactory = () => new SonosManager(),
+    // Per-request cap on node-sonos-ts SOAP/discovery I/O. The library sets no timeout, so a
+    // speaker that vanishes mid-session (powered off / off the network) would otherwise hang
+    // GetZoneGroupState and the transport reads forever — wedging GET /v1/sessions/current, which
+    // deliberately propagates a dead-speaker read (SPEC §4). Racing each call against this turns a
+    // dead speaker into a prompt SonosUpstreamError (→ 502 "Sonos is unavailable").
+    private readonly requestTimeoutMs = 4000,
   ) {}
+
+  // Race a node-sonos-ts SOAP/discovery call against the request-timeout budget. On timeout, reject
+  // with SonosUpstreamError so the caller's catch maps it to 502 (and readTopology drops the
+  // manager, forcing re-discovery next call). The underlying promise may stay pending — its socket
+  // errors out and is GC'd later — but the request no longer waits on it.
+  private async withTimeout<T>(op: Promise<T>, what: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new SonosUpstreamError(`Sonos did not respond (${what} timed out after ${this.requestTimeoutMs}ms)`)),
+        this.requestTimeoutMs,
+      )
+      timer.unref?.()
+    })
+    try {
+      return await Promise.race([op, timeout])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
 
   async listSpeakers(): Promise<Speaker[]> {
     return toSpeakers(await this.readTopology())
@@ -67,23 +93,29 @@ export class SonosClient {
     const coordinator = await this.coordinatorFor(speakerId)
     const av = coordinator.AVTransportService
     try {
-      await av.RemoveAllTracksFromQueue({ InstanceID: 0 })
+      await this.withTimeout(av.RemoveAllTracksFromQueue({ InstanceID: 0 }), 'RemoveAllTracksFromQueue')
       for (const [index, track] of plan.tracks.entries()) {
-        await av.AddURIToQueue({
-          InstanceID: 0,
-          EnqueuedURI: track.url,
-          // The library inserts string metadata into the SOAP body verbatim, so escape it here.
-          EnqueuedURIMetaData: escapeXml(buildTrackMetadata(track)),
-          DesiredFirstTrackNumberEnqueued: index + 1,
-          EnqueueAsNext: false,
-        })
+        await this.withTimeout(
+          av.AddURIToQueue({
+            InstanceID: 0,
+            EnqueuedURI: track.url,
+            // The library inserts string metadata into the SOAP body verbatim, so escape it here.
+            EnqueuedURIMetaData: escapeXml(buildTrackMetadata(track)),
+            DesiredFirstTrackNumberEnqueued: index + 1,
+            EnqueueAsNext: false,
+          }),
+          'AddURIToQueue',
+        )
       }
-      await av.SetAVTransportURI({
-        InstanceID: 0,
-        CurrentURI: `x-rincon-queue:${coordinator.Uuid}#0`,
-        CurrentURIMetaData: '',
-      })
-      await av.Play({ InstanceID: 0, Speed: '1' })
+      await this.withTimeout(
+        av.SetAVTransportURI({
+          InstanceID: 0,
+          CurrentURI: `x-rincon-queue:${coordinator.Uuid}#0`,
+          CurrentURIMetaData: '',
+        }),
+        'SetAVTransportURI',
+      )
+      await this.withTimeout(av.Play({ InstanceID: 0, Speed: '1' }), 'Play')
     } catch (err) {
       throw asUpstream(err)
     }
@@ -92,7 +124,7 @@ export class SonosClient {
   async stop(speakerId: string): Promise<void> {
     const coordinator = await this.coordinatorFor(speakerId)
     try {
-      await coordinator.AVTransportService.Stop({ InstanceID: 0 })
+      await this.withTimeout(coordinator.AVTransportService.Stop({ InstanceID: 0 }), 'Stop')
     } catch (err) {
       throw asUpstream(err)
     }
@@ -101,7 +133,7 @@ export class SonosClient {
   async pause(speakerId: string): Promise<void> {
     const coordinator = await this.coordinatorFor(speakerId)
     try {
-      await coordinator.AVTransportService.Pause({ InstanceID: 0 })
+      await this.withTimeout(coordinator.AVTransportService.Pause({ InstanceID: 0 }), 'Pause')
     } catch (err) {
       throw asUpstream(err)
     }
@@ -111,7 +143,7 @@ export class SonosClient {
   async play(speakerId: string): Promise<void> {
     const coordinator = await this.coordinatorFor(speakerId)
     try {
-      await coordinator.AVTransportService.Play({ InstanceID: 0, Speed: '1' })
+      await this.withTimeout(coordinator.AVTransportService.Play({ InstanceID: 0, Speed: '1' }), 'Play')
     } catch (err) {
       throw asUpstream(err)
     }
@@ -137,10 +169,13 @@ export class SonosClient {
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        await av.Seek({ InstanceID: 0, Unit: 'TRACK_NR', Target: String(targetTrack) })
-        await av.Seek({ InstanceID: 0, Unit: 'REL_TIME', Target: secondsToHms(plan.offsetSeconds) })
+        await this.withTimeout(av.Seek({ InstanceID: 0, Unit: 'TRACK_NR', Target: String(targetTrack) }), 'Seek TRACK_NR')
+        await this.withTimeout(
+          av.Seek({ InstanceID: 0, Unit: 'REL_TIME', Target: secondsToHms(plan.offsetSeconds) }),
+          'Seek REL_TIME',
+        )
         if (settleMs > 0) await delay(settleMs)
-        const info = await av.GetPositionInfo({ InstanceID: 0 })
+        const info = await this.withTimeout(av.GetPositionInfo({ InstanceID: 0 }), 'GetPositionInfo')
         reachedTrack = (typeof info.Track === 'number' ? info.Track : -1) === targetTrack
         if (reachedTrack && Math.abs(hmsToSeconds(info.RelTime) - plan.offsetSeconds) <= toleranceSeconds) {
           return
@@ -161,7 +196,10 @@ export class SonosClient {
   async getPosition(speakerId: string): Promise<SonosPosition> {
     const coordinator = await this.coordinatorFor(speakerId)
     try {
-      const info = await coordinator.AVTransportService.GetPositionInfo({ InstanceID: 0 })
+      const info = await this.withTimeout(
+        coordinator.AVTransportService.GetPositionInfo({ InstanceID: 0 }),
+        'GetPositionInfo',
+      )
       const track = typeof info.Track === 'number' ? info.Track : 1
       return {
         trackIndex: Math.max(0, track - 1),
@@ -178,7 +216,10 @@ export class SonosClient {
   async getTransportState(speakerId: string): Promise<string> {
     const coordinator = await this.coordinatorFor(speakerId)
     try {
-      const info = await coordinator.AVTransportService.GetTransportInfo({ InstanceID: 0 })
+      const info = await this.withTimeout(
+        coordinator.AVTransportService.GetTransportInfo({ InstanceID: 0 }),
+        'GetTransportInfo',
+      )
       return info.CurrentTransportState
     } catch (err) {
       throw asUpstream(err)
@@ -209,7 +250,7 @@ export class SonosClient {
       const manager = await this.ensureManager()
       const [entry] = manager.Devices
       if (entry === undefined) throw new SonosUpstreamError('No Sonos devices found on the network')
-      const groups = await entry.GetZoneGroupState()
+      const groups = await this.withTimeout(entry.GetZoneGroupState(), 'GetZoneGroupState')
       this.reachable = true
       return groups
     } catch (err) {
@@ -263,7 +304,9 @@ export class SonosClient {
     try {
       if (this.seedHost !== undefined) {
         const { host, port } = parseSeedHost(this.seedHost)
-        ok = await manager.InitializeFromDevice(host, port)
+        // InitializeFromDevice reads the seed's zone topology over SOAP; a dead seed would hang it
+        // (InitializeWithDiscovery already self-bounds via DISCOVERY_TIMEOUT_SECONDS).
+        ok = await this.withTimeout(manager.InitializeFromDevice(host, port), 'InitializeFromDevice')
       } else {
         ok = await manager.InitializeWithDiscovery(DISCOVERY_TIMEOUT_SECONDS)
       }

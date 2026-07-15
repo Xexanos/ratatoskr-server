@@ -168,6 +168,11 @@ if something required is missing:
 - Sonos speaker discovery is automatic over SSDP on the LAN — no URL to configure.
   `SONOS_SEED_HOST` (optional) — IP or hostname of one speaker, used as a discovery seed
   on networks where multicast/SSDP is unreliable.
+- `SONOS_REQUEST_TIMEOUT_MS` (optional, default 4000) — per-request cap on Sonos SOAP/discovery
+  I/O. A speaker that vanishes mid-session (powered off / off the network) drops packets rather
+  than refusing the connection, so an unbounded read would hang the live topology/transport reads
+  — and with them `GET /v1/sessions/current` — indefinitely. This bounds each call so a dead
+  speaker surfaces promptly as a 502 (section 4) instead of a hung request.
 - `PORT` (optional, default 8080).
 - `POLL_INTERVAL_SECONDS` (optional, default 15).
 - `SEEK_SETTLE_MS` (optional, default 1000), `SEEK_TOLERANCE_SECONDS` (optional, default 3),

@@ -17,6 +17,9 @@ interface FakeOpts {
   initResult?: boolean
   initThrows?: boolean
   readThrows?: boolean
+  // The live read never settles — stands in for a speaker that vanished mid-session (the LAN drops
+  // its packets rather than refusing the connection), which node-sonos-ts would wait on forever.
+  readHangs?: boolean
 }
 
 interface FakeManager {
@@ -35,9 +38,10 @@ function fakeManager(groups: FakeGroup[] = [], opts: FakeOpts = {}): FakeManager
     return opts.initResult ?? true
   })
   const entry = {
-    GetZoneGroupState: vi.fn(async () => {
-      if (opts.readThrows) throw new Error('read boom')
-      return groups
+    GetZoneGroupState: vi.fn(() => {
+      if (opts.readHangs) return new Promise<never>(() => {}) // never settles
+      if (opts.readThrows) return Promise.reject(new Error('read boom'))
+      return Promise.resolve(groups)
     }),
   }
   return {
@@ -164,6 +168,20 @@ describe('SonosClient', () => {
 
       await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
       // the failed read dropped the manager, so the next call re-initializes
+      expect(await client.listSpeakers()).toHaveLength(1)
+      expect(factory).toHaveBeenCalledTimes(2)
+    })
+
+    it('times out a hung read (vanished speaker) instead of hanging, and re-discovers next time', async () => {
+      const stuck = fakeManager(SOLO, { readHangs: true })
+      const good = fakeManager(SOLO)
+      let call = 0
+      const factory = vi.fn(() => (call++ === 0 ? stuck : good) as unknown as SonosManager)
+      // 20ms request timeout so the test doesn't wait on the real 4s default.
+      const client = new SonosClient(undefined, factory, 20)
+
+      await expect(client.listSpeakers()).rejects.toBeInstanceOf(SonosUpstreamError)
+      // the timed-out read dropped the manager, so the next call re-initializes and succeeds
       expect(await client.listSpeakers()).toHaveLength(1)
       expect(factory).toHaveBeenCalledTimes(2)
     })

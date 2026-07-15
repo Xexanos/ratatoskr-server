@@ -70,7 +70,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   })
 
   const abs = options.absClient ?? new AbsClient(config.absUrl, buildAbsDispatcher(config))
-  const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost)
+  const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost, undefined, config.sonosRequestTimeoutMs)
   const sessions = options.sessionManager ?? new SessionManager({ abs, sonos, config })
   // On shutdown, stop any active session (writes the final position back to ABS) before releasing
   // the Sonos subscription. Best-effort and optional-chained so injected Partial fakes are fine.
