@@ -11,7 +11,11 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage: install workspace deps, generate the contract artifacts, compile TS ----
-FROM node:22-alpine AS build
+# Base image pinned to an exact Node version (no digest): Dependabot raises a PR for each patch/
+# minor/LTS-major bump (docker ecosystem in .github/dependabot.yml), and a plain rebuild still
+# pulls the latest same-version Alpine rebuild automatically. CVE detection is Trivy's job
+# (.github/workflows/image-scan.yml), not Dependabot's.
+FROM node:22.23.1-alpine AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # Pin pnpm to the version the repo declares (package.json "packageManager").
@@ -46,7 +50,7 @@ RUN pnpm run generate \
 RUN pnpm --filter @ratatoskr/app deploy --prod --legacy /prod
 
 # ---- Runtime stage: slim, non-root, app + production deps only ----
-FROM node:22-alpine AS runtime
+FROM node:22.23.1-alpine AS runtime
 ENV NODE_ENV=production
 # The server binds 0.0.0.0:PORT (default 8080). Override PORT at runtime if needed.
 ENV PORT=8080
