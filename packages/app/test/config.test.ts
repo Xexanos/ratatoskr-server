@@ -38,6 +38,7 @@ describe('loadConfig', () => {
     expect(config.resumeRewindSeconds).toBe(10)
     expect(config.writePositionBackoffSeconds).toBe(2)
     expect(config.sonosRequestTimeoutMs).toBe(4000)
+    expect(config.absRequestTimeoutMs).toBe(10000)
     expect(config.tls).toBeUndefined()
     expect(config.sonosSeedHost).toBeUndefined()
     expect(config.validateResponses).toBe(false)
@@ -76,6 +77,11 @@ describe('loadConfig', () => {
   it('overrides the Sonos request timeout and rejects a non-positive value', () => {
     expect(loadConfig({ ...REQUIRED, SONOS_REQUEST_TIMEOUT_MS: '1500' }).sonosRequestTimeoutMs).toBe(1500)
     expectConfigError({ ...REQUIRED, SONOS_REQUEST_TIMEOUT_MS: '0' }, 'SONOS_REQUEST_TIMEOUT_MS must be a positive number')
+  })
+
+  it('overrides the ABS request timeout and rejects a non-positive value', () => {
+    expect(loadConfig({ ...REQUIRED, ABS_REQUEST_TIMEOUT_MS: '2000' }).absRequestTimeoutMs).toBe(2000)
+    expectConfigError({ ...REQUIRED, ABS_REQUEST_TIMEOUT_MS: '0' }, 'ABS_REQUEST_TIMEOUT_MS must be a positive number')
   })
 
   it('rejects a PORT outside the valid range', () => {

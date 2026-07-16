@@ -13,6 +13,11 @@ export interface Config {
   // most read/stream of the library, never account takeover. Long-lived (no expiry to manage), which
   // is why the media path uses this rather than the listening user's or a short-lived token.
   absStreamerApiKey: string
+  // Per-request cap (ms) on Audiobookshelf HTTP calls. ABS is a network dependency that can hang
+  // (down / slow / packet-dropping host), so bound each request: a dead ABS then surfaces as a
+  // prompt 502 upstream error rather than a stalled request. Kept comfortably under a typical
+  // client read timeout so the client sees the server's mapped error, not its own timeout.
+  absRequestTimeoutMs: number
   sonosSeedHost: string | undefined
   // Per-request cap (ms) on Sonos SOAP/discovery I/O. node-sonos-ts sets no timeout, so a speaker
   // that vanishes mid-session (powered off / off the network) would otherwise hang the live reads
@@ -208,6 +213,7 @@ export function loadConfig(env: Env = process.env): Config {
   return reader.finalize({
     absUrl: reader.absUrl(),
     absStreamerApiKey: reader.requireString('ABS_STREAMER_API_KEY'),
+    absRequestTimeoutMs: reader.positiveNumber('ABS_REQUEST_TIMEOUT_MS', 10000),
     sonosSeedHost: env.SONOS_SEED_HOST,
     sonosRequestTimeoutMs: reader.positiveNumber('SONOS_REQUEST_TIMEOUT_MS', 4000),
     port: reader.port(),
