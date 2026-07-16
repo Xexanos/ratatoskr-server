@@ -104,7 +104,7 @@ jobs:
       # Build the native image and load it into the local daemon so the next step can run it. This
       # build populates the gha cache; the push-by-digest build below is then a cache hit.
       - name: Build the ${{ matrix.platform }} image (native) and load it
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -168,7 +168,7 @@ jobs:
       - name: Push the ${{ matrix.platform }} image by digest
         id: push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
