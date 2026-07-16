@@ -11,13 +11,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage: install workspace deps, generate the contract artifacts, compile TS ----
-# Pinned to $BUILDPLATFORM so a multi-arch build compiles ONCE on the builder's native arch instead
-# of re-running pnpm/tsc under QEMU emulation for each target (minutes-to-hangs slow in CI). Safe
-# because the output shipped to runtime — the compiled JS in dist plus the `pnpm deploy --prod`
-# node_modules — is architecture-independent: every runtime dependency (@svrooij/sonos,
-# fast-xml-parser, fastify, fastify-openapi-glue, undici, and the built workspace packages) is pure
-# JavaScript with no native/arch-specific binaries. Only the runtime stage below is per-arch.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM node:22-alpine AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # Pin pnpm to the version the repo declares (package.json "packageManager").
@@ -50,19 +44,6 @@ RUN pnpm run generate \
 # --legacy: our workspace deps aren't "injected", which pnpm v10+ requires for the default
 # deploy path; the legacy deploy resolves workspace:* links from the built packages instead.
 RUN pnpm --filter @ratatoskr/app deploy --prod --legacy /prod
-
-# Guard the $BUILDPLATFORM cross-compile above: it is only safe while every shipped runtime dep is
-# architecture-independent. A native addon (*.node) in the production deploy means an amd64 binary
-# would be baked into the arm64 image and crash only at runtime — so fail the build the moment such
-# a dep is introduced, instead of shipping a broken image. If this fires: replace the dependency
-# with a pure-JS one, or drop the `--platform=$BUILDPLATFORM` pin on the build stage above (which
-# reverts to a correct but slow, per-arch QEMU-emulated build). The arm64 smoke job in
-# container.yml is the behavioural backstop for anything this static check can't see.
-RUN if find /prod -name '*.node' -type f | grep -q .; then \
-      echo "ERROR: native binary (*.node) found in the production deploy — the multi-arch build cross-compiles on amd64, so this would ship a wrong-arch binary in the arm64 image. See the note above this RUN in the Dockerfile." >&2; \
-      find /prod -name '*.node' -type f >&2; \
-      exit 1; \
-    fi
 
 # ---- Runtime stage: slim, non-root, app + production deps only ----
 FROM node:22-alpine AS runtime

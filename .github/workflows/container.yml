@@ -8,20 +8,27 @@ name: Container image
 # into the PUBLIC release package `ratatoskr-server` (see promote.yml) — so throwaway per-commit
 # images stay in the private testing package and never surface publicly.
 #
-# - pull_request : build both arches as a bitrot guard; never pushes (fork PRs have no
-#                  registry write anyway). Path-filtered so docs-only PRs skip the dual-arch
-#                  QEMU build. NOTE: if this job is ever made a required status check, a
-#                  path-filtered workflow that doesn't run leaves the check pending and blocks
-#                  the PR — pair it with a bridging "always-green" job or GitHub's merge rules.
-# - push to main : build + push `testing-<sha>` and trigger the E2E suite.
-# - workflow_dispatch : same, on demand for any branch (use this to hand the current
-#                  feature branch to E2E before it is merged).
+# Multi-arch WITHOUT QEMU: each architecture is built on its OWN native runner (amd64 on
+# ubuntu-latest, arm64 on ubuntu-24.04-arm — free for public repos) as a matrix, then a merge job
+# stitches the per-arch images into one manifest list. This avoids emulating the toolchain (pnpm
+# install + tsc under QEMU is minutes-slow and has hung the runner outright), and — because each
+# arch is built natively — a native/arch-specific dependency is compiled correctly for its target
+# instead of being cross-shipped wrong, so there is no arch-independence assumption to guard.
+#
+# - pull_request : build EACH arch natively (matrix) as a bitrot guard and boot-smoke each image;
+#                  never pushes (fork PRs have no registry write anyway). Path-filtered so a
+#                  docs-only PR skips the build. NOTE: if this job is ever made a required status
+#                  check, a path-filtered workflow that doesn't run leaves the check pending and
+#                  blocks the PR — pair it with a bridging "always-green" job or GitHub's merge rules.
+# - push to main : build + push each arch by digest, merge into `testing-<sha>`, trigger the E2E suite.
+# - workflow_dispatch : same, on demand for any branch (use this to hand the current feature branch
+#                  to E2E before it is merged; set trigger_e2e=false to only build + publish).
 
 on:
   push:
     branches: [main]
   pull_request:
-    # Only the inputs that affect the image; a pure-docs PR doesn't need the QEMU build.
+    # Only the inputs that affect the image; a pure-docs PR doesn't need the build.
     # fake-sonos sources never enter the server image (the Dockerfile copies only its
     # package.json, for the pnpm-install layer) and have their own build in fake-sonos.yml — so
     # exclude them here to avoid a redundant server build on fake-only PRs, but re-include the
@@ -53,119 +60,72 @@ env:
   # Testing builds go to a SEPARATE, private package (ratatoskr-server-testing). promote.yml
   # copies the tested digest into the public release package (ratatoskr-server), so throwaway
   # per-commit images never appear in the public release package.
-  # GHCR requires a lowercase path; the owner (Xexanos) is mixed-case, so metadata-action
-  # lowercases it for the tags below, and the dispatch job lowercases it explicitly.
+  # GHCR requires a lowercase path; the owner (Xexanos) is mixed-case, so the jobs below lowercase
+  # it explicitly (${IMAGE_NAME,,}) wherever a pull/push ref is formed.
   IMAGE_NAME: ${{ github.repository_owner }}/ratatoskr-server-testing
 
 jobs:
+  # One native build per architecture. Each pushes its single-arch image BY DIGEST (no per-arch
+  # tag — the tag is applied once, to the manifest list, in `merge`), and boot-smokes the image it
+  # just built on its own native runner. On a PR nothing is pushed: the matrix is a per-arch bitrot
+  # guard + boot check only.
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    outputs:
-      image: ${{ steps.image.outputs.ref }}
-      tag: ${{ steps.image.outputs.tag }}
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Compute the testing tag
-        id: image
+      - name: Prepare
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          short_sha="$(git rev-parse --short HEAD)"
-          image="${REGISTRY}/${IMAGE_NAME,,}"
-          echo "tag=testing-${short_sha}" >> "$GITHUB_OUTPUT"
-          echo "ref=${image}" >> "$GITHUB_OUTPUT"
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"   # linux/amd64 -> linux-amd64 (artifact-safe)
+          echo "IMAGE_REF=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
 
-      - uses: docker/setup-qemu-action@v4
+      # No setup-qemu-action: each arch builds on its own native runner, so there is nothing to emulate.
       - uses: docker/setup-buildx-action@v4
 
-      # No registry write on pull_request (esp. fork PRs) — that leg only validates the build.
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Image metadata
+      - name: Image metadata (labels)
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # One tag per build: testing-<short-sha>. It already uniquely identifies the commit, and
-          # metadata-action stamps the full commit into the org.opencontainers.image.revision label,
-          # so a second sha-<full-sha> tag would add clutter (and a second thing to prune) with no
-          # benefit — promotion addresses the tested image by digest, not by a sha tag.
-          tags: |
-            type=raw,value=${{ steps.image.outputs.tag }}
+          images: ${{ env.IMAGE_REF }}
 
-      - name: Build and push
-        id: build
+      # Build the native image and load it into the local daemon so the next step can run it. This
+      # build populates the gha cache; the push-by-digest build below is then a cache hit.
+      - name: Build the ${{ matrix.platform }} image (native) and load it
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: ratatoskr-server:smoke
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Keep the manifest list clean (no extra attestation entries) so the E2E stack can
-          # pull it by tag or digest without surprises.
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
           provenance: false
           sbom: false
 
-  # Native arm64 boot check. The build cross-compiles on an amd64 builder (Dockerfile's
-  # `--platform=$BUILDPLATFORM` build stage), so a wrong-arch artifact would only surface at runtime
-  # on real hardware. Run on a native arm64 runner (free for public repos) and prove the arm64 image
-  # actually boots and serves /v1/health before it can be promoted. The Dockerfile's *.node guard is
-  # the deterministic tripwire that fails the moment a native dep is introduced; this is the
-  # behavioural backstop that also covers musl/alpine and runtime-arch surprises the guard can't see.
-  # On push/dispatch it tests the EXACT multi-arch image just pushed (pull by digest → native arm64
-  # picks the arm64 variant); on a PR nothing was pushed, so it builds the arm64 image locally.
-  smoke-arm64:
-    needs: build
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: read
-      packages: read
-    steps:
-      - uses: actions/checkout@v7
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve the arm64 image to test
-        id: img
-        env:
-          IMAGE: ${{ needs.build.outputs.image }}
-          DIGEST: ${{ needs.build.outputs.digest }}
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            docker build -t ratatoskr-server:arm64-smoke .   # native arm64 build; nothing was pushed
-            echo "ref=ratatoskr-server:arm64-smoke" >> "$GITHUB_OUTPUT"
-          else
-            docker pull "${IMAGE}@${DIGEST}"                 # the exact pushed artifact, arm64 variant
-            echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Boot the arm64 image and assert /v1/health responds
-        env:
-          REF: ${{ steps.img.outputs.ref }}
+      - name: Boot the image and assert /v1/health responds
         run: |
           # Plain HTTP (no cert to manage) + an unreachable ABS (connection refused is a network
           # error, which the server tolerates at startup — it degrades and /health reports it). If a
-          # dependency is broken on arm64, Node fails to load it and the listener never comes up.
+          # dependency is broken on this arch, Node fails to load it and the listener never comes up.
           docker run -d --name smoke \
             -e ALLOW_PLAIN_HTTP=true \
             -e ABS_URL=http://127.0.0.1:1 -e ABS_ALLOW_PLAIN_HTTP=true \
             -e ABS_STREAMER_API_KEY=smoke-dummy \
-            -e PORT=8080 -p 8080:8080 "$REF"
+            -e PORT=8080 -p 8080:8080 ratatoskr-server:smoke
           ok=
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then ok=1; break; fi
@@ -173,25 +133,119 @@ jobs:
           done
           echo "--- container logs ---"; docker logs smoke || true
           docker rm -f smoke >/dev/null 2>&1 || true
-          [ -n "$ok" ] || { echo "::error title=arm64 smoke failed::the arm64 image did not serve /v1/health"; exit 1; }
+          [ -n "$ok" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not serve /v1/health"; exit 1; }
 
-  # Hand the freshly pushed image to the central E2E repo. Cross-repo dispatch needs a token
-  # with access to Xexanos/ratatoskr-e2e (the per-run GITHUB_TOKEN is scoped to THIS repo only),
-  # stored as the E2E_DISPATCH_TOKEN secret. If that secret is missing the job FAILS: the image is
-  # published but its E2E gate silently not running would be worse than a red pipeline.
-  # Gated on smoke-arm64 too: a pushed image that can't boot on arm64 must not reach the E2E → promote
-  # path, so a broken arm64 build is never promoted to a release channel.
+      # No registry write on pull_request (esp. fork PRs) — that leg only validates build + boot.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push the single-arch image by digest only (no tag). `merge` collects the per-arch digests
+      # into the manifest list. Cache hit off the load build above, so this re-exports, not rebuilds.
+      - name: Push the ${{ matrix.platform }} image by digest
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE_REF }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+          provenance: false
+          sbom: false
+
+      - name: Export the digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the per-arch digests into a single multi-arch manifest list under `testing-<sha>`, so the
+  # E2E stack and promote.yml address one image. No rebuild — a pure registry-side manifest create.
+  merge:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+      tag: ${{ steps.image.outputs.tag }}
+      digest: ${{ steps.merge.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compute the testing tag
+        id: image
+        run: |
+          short_sha="$(git rev-parse --short HEAD)"
+          echo "tag=testing-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the per-arch digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push the manifest list, then capture its digest
+        id: merge
+        working-directory: /tmp/digests
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          docker buildx imagetools create -t "${REF}:${TAG}" \
+            $(printf "${REF}@sha256:%s " *)
+          # The manifest-list digest is what promote.yml pins and what E2E is handed — resolve it
+          # from the tag we just pushed.
+          digest="$(docker buildx imagetools inspect "${REF}:${TAG}" --format '{{.Manifest.Digest}}')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Published ${REF}:${TAG} (${digest})"
+
+  # Hand the freshly pushed manifest-list image to the central E2E repo. Cross-repo dispatch needs a
+  # token with access to Xexanos/ratatoskr-e2e (the per-run GITHUB_TOKEN is scoped to THIS repo
+  # only), stored as the E2E_DISPATCH_TOKEN secret. If that secret is missing the job FAILS: the
+  # image is published but its E2E gate silently not running would be worse than a red pipeline.
   trigger-e2e:
-    needs: [build, smoke-arm64]
+    needs: merge
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.trigger_e2e)
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch the E2E suite
         env:
           E2E_DISPATCH_TOKEN: ${{ secrets.E2E_DISPATCH_TOKEN }}
-          IMAGE: ${{ needs.build.outputs.image }}
-          TAG: ${{ needs.build.outputs.tag }}
-          DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE: ${{ needs.merge.outputs.image }}
+          TAG: ${{ needs.merge.outputs.tag }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
           SHA: ${{ github.sha }}
         run: |
           if [ -z "$E2E_DISPATCH_TOKEN" ]; then
