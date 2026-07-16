@@ -40,8 +40,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # SHA-pinned, not tag-pinned — see the note in container.yml (March 2026 trivy-action
+      # tag-hijack compromise, GHSA-69fq-xp46-6x23).
       - name: Scan the released image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.ref.outputs.image }}
           format: sarif

@@ -141,8 +141,12 @@ jobs:
       # catching regressions before merge. Unfixed findings do NOT gate here — there is nothing to
       # rebuild toward yet; the scheduled image-scan.yml surfaces those in the Security tab. CVE
       # detection lives here, not in Dependabot (which only tracks base-image currency).
+      # Pinned to a full commit SHA (not a tag): the March 2026 trivy-action supply-chain
+      # compromise (GHSA-69fq-xp46-6x23) worked by force-pushing existing version tags to
+      # malicious commits — a SHA pin is immune to that. Bump by resolving the new release
+      # tag to its commit.
       - name: Scan the image for fixable HIGH/CRITICAL vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ratatoskr-server:smoke
           format: table
