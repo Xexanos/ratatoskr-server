@@ -39,6 +39,54 @@ switch to the bridge block and set `SONOS_SEED_HOST` (SPEC section 12, "Containe
 With no TLS variables set, the entrypoint generates a persistent self-signed certificate in the
 `./tls` volume and serves HTTPS (fingerprint logged for the app's trust-on-first-use).
 
+### Running on TrueNAS SCALE
+
+Since TrueNAS SCALE 24.10 ("Electric Eel") apps run on Docker, so the server deploys as a
+**custom app** — no catalog entry needed. Two equivalent routes, both ending up as the same kind
+of app with the same update behavior:
+
+- **Install via YAML** (*Apps → Discover Apps → ⋮ → Install via YAML*): paste
+  [`compose.yaml`](../compose.yaml) with two adjustments — set the required variables, and replace
+  the `./tls` bind mount with a named volume (add `ratatoskr-tls: {}` under a top-level `volumes:`
+  and mount it as `ratatoskr-tls:/tls`) or an absolute dataset path.
+- **Install Custom App** (form): image repository `ghcr.io/xexanos/ratatoskr-server`, tag
+  `latest`, restart policy *Unless Stopped*, environment variables `ABS_URL` and
+  `ABS_STREAMER_API_KEY`, and a storage mount for `/tls`.
+
+Notes that apply either way:
+
+- **Enable Host Network** — SSDP multicast discovery and UPnP eventing need the host LAN (SPEC
+  section 12). Port mapping is disabled under host networking; the server listens on port 8080 of
+  the NAS directly (set `PORT` if that clashes).
+- **Persist `/tls`, and make it writable.** Without it the auto-generated certificate — and with
+  it the fingerprint the app pinned on first use — changes on every container recreation. The
+  startup error `cannot write to /tls` means the mount's owner and the container's user disagree;
+  the image runs under any uid (its `USER 1000:1000` is just the default), so align them either
+  way:
+  - **Named volume** (YAML route): inherits writable ownership from the image — works as-is.
+  - **ixVolume** (form): created **root-owned**, so no container user can write to it out of the
+    box. In the volume's config, check *Enable ACL* and add an ACL entry for the uid the
+    container runs as (ID Type *User*, ID `1000` — or `568` if you set *Custom User* — with
+    *Modify* access). Equivalent alternative: a one-time
+    `chown -R <uid>:<gid> /mnt/.ix-apps/app_mounts/<app>/<volume>` from the NAS shell, though the
+    ACL lives in the app config and is re-applied on redeploy. (Images released before the
+    entrypoint's write-probe fix refuse ACL-only grants — their writability check read plain mode
+    bits — so on an older image use `chown`.)
+  - **Host path** on a dataset: `chown` it to whatever uid the container runs as (`1000:1000` by
+    default).
+- **Updates:** TrueNAS watches the `latest` digest and shows *Update available* in the Apps
+  screen; applying it is one click but not automatic. For unattended updates, schedule a tool such
+  as [truenas-auto-update](https://github.com/marvinvr/truenas-auto-update).
+- The custom-app form exposes no stop grace period; Docker's default 10 s stop timeout still
+  exceeds the graceful drain (`SHUTDOWN_TIMEOUT_MS`, default 5000), so the reached position is
+  written back to ABS on stop as usual.
+- The certificate's SHA-256 fingerprint for the app's trust-on-first-use is in the app's log
+  (*Apps → ratatoskr → View Logs*).
+- **Pre-install security screen:** both checks it can raise are addressed — the image declares a
+  numeric non-root user (`USER 1000:1000`), and [`compose.yaml`](../compose.yaml) sets
+  `no-new-privileges` (picked up by the YAML route; the custom-app *form* has no field for
+  `security_opt`, so that finding stays informational there and is safe to accept).
+
 ## Publishing pipeline
 
 Two workflows implement a **build → E2E → promote** flow. The guiding principle: the image
