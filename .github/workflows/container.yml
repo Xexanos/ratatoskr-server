@@ -255,7 +255,7 @@ jobs:
           echo "Dispatching E2E for ${IMAGE}:${TAG} (${DIGEST})"
           GH_TOKEN="$E2E_DISPATCH_TOKEN" gh api \
             repos/${{ github.repository_owner }}/ratatoskr-e2e/dispatches \
-            -f event_type=server-image \
+            -f event_type=server-candidate \
             -F client_payload[image]="$IMAGE" \
             -F client_payload[tag]="$TAG" \
             -F client_payload[digest]="$DIGEST" \
