@@ -24,6 +24,7 @@ export default {
         'test',
         // repo-specific:
         'deps', // dependency bumps (dependabot's configured prefix); use fix(deps): when a runtime bump should ship a release
+        'docker', // Dockerfile base-image bumps (dependabot's docker-ecosystem prefix)
         'review', // addressing PR review feedback
         'contract', // contract/openapi.yaml changes (versioned per SPEC section 6)
         'spec', // docs/SPEC.md changes
