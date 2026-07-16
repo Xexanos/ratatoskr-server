@@ -131,4 +131,19 @@ describe('AbsClient', () => {
       expect(init.dispatcher).toBeUndefined()
     })
   })
+
+  describe('request timeout', () => {
+    it('aborts a hung request via the injected timeout and maps it to AbsUpstreamError', async () => {
+      // fetch hangs until its AbortSignal fires; a short injected timeout must trip it so a dead
+      // ABS becomes a prompt upstream error instead of a stalled request.
+      stubFetch(
+        (_url, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            const signal = init.signal as AbortSignal | undefined
+            signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')))
+          }),
+      )
+      await expect(new AbsClient(BASE, undefined, 20).login('lars', 'secret')).rejects.toBeInstanceOf(AbsUpstreamError)
+    })
+  })
 })

@@ -8,8 +8,11 @@ type LibraryItem = components['schemas']['LibraryItem']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
 type Progress = components['schemas']['Progress']
 
-const REQUEST_TIMEOUT_MS = 10_000
+// Startup-probe timeout (GET /ping). Separate from the per-request timeout: the probe is a one-off
+// reachability fingerprint at boot, kept short so a wrong/dead ABS_URL fails startup fast.
 const PROBE_TIMEOUT_MS = 2000
+// Default per-request timeout when the caller injects none (matches the historical hardcoded value).
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 
 // Outcome of probing ABS_URL: a genuine ABS server, a host that answered but isn't ABS
 // (misconfiguration), or no answer at all (down / wrong host / TLS failure).
@@ -56,6 +59,10 @@ export class AbsClient {
   constructor(
     private readonly baseUrl: string,
     private readonly dispatcher?: RequestInit['dispatcher'],
+    // Per-request timeout for the authenticated library/auth/progress calls. Bounds a hung ABS so
+    // it becomes a prompt AbsUpstreamError (-> 502) instead of a stalled request; set it under the
+    // client's own read timeout so callers see the mapped 502, not their own timeout.
+    private readonly requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ) {}
 
   // Only include the dispatcher option when one is configured — with exactOptionalPropertyTypes
@@ -273,7 +280,7 @@ export class AbsClient {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
         ...this.dispatcherOption(),
       })
     } catch {
@@ -287,7 +294,7 @@ export class AbsClient {
     try {
       res = await fetch(`${this.baseUrl}${path}`, {
         headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
         ...this.dispatcherOption(),
       })
     } catch {
@@ -305,7 +312,7 @@ export class AbsClient {
         method: 'PATCH',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
         ...this.dispatcherOption(),
       })
     } catch {

@@ -67,6 +67,8 @@ services:
       # ABS_CA_CERT_PATH: "/tls/abs-ca.pem"
       # Disable ABS cert verification entirely (MITM-vulnerable; last resort, excludes ABS_CA_CERT*):
       # ABS_TLS_INSECURE: "true"
+      # ABS_REQUEST_TIMEOUT_MS: "10000"                 # per-request cap on ABS HTTP calls so a hung
+      #                                                 # ABS fails fast (502) instead of stalling
 
       # ─────────── Sonos ───────────
       # A speaker's IP. Only needed where SSDP multicast is unreliable (or under bridge networking);

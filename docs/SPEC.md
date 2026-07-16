@@ -162,6 +162,11 @@ if something required is missing:
   embedded in the media URLs handed to the speakers (see section 14). The operator creates the
   key in ABS (Settings → Users → API Keys) for a low-privilege account; Ratatoskr just embeds it,
   with no login or token refresh to do.
+- `ABS_REQUEST_TIMEOUT_MS` (optional, default 10000) — per-request cap on Audiobookshelf HTTP
+  calls, so a hung ABS (down / slow / packet-dropping) surfaces as a prompt 502 upstream error
+  rather than a stalled request. Set it below a client's own read timeout so the client sees the
+  server's mapped error, not its own timeout. (The startup `GET /ping` probe has its own short,
+  fixed timeout and is unaffected.)
 - `TLS_CERT_PATH`, `TLS_KEY_PATH` (recommended) — serve the API over HTTPS (see
   section 14). If unset, the server refuses to start unless `ALLOW_PLAIN_HTTP=true` is
   set explicitly.

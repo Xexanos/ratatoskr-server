@@ -69,7 +69,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     return reply.code(404).send({ code: 'not_found', message: 'Not found' })
   })
 
-  const abs = options.absClient ?? new AbsClient(config.absUrl, buildAbsDispatcher(config))
+  const abs = options.absClient ?? new AbsClient(config.absUrl, buildAbsDispatcher(config), config.absRequestTimeoutMs)
   const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost, undefined, config.sonosRequestTimeoutMs)
   const sessions = options.sessionManager ?? new SessionManager({ abs, sonos, config })
   // On shutdown, stop any active session (writes the final position back to ABS) before releasing
