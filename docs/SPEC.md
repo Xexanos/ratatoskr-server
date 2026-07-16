@@ -594,3 +594,14 @@ navigation**, and **podcasts**. The following are the additional features on the
   on what Sonos exposes for streamed HTTP content (it may require server-side transcoding, which the
   architecture deliberately avoids — audio never flows through Ratatoskr, section 3). Listed as
   *wanted, feasibility-gated* rather than a clear next step.
+
+- **Server auto-discovery on the LAN (mDNS/Zeroconf).** Today a user connecting the app must type
+  the server's URL by hand (app SPEC section 6). Advertising the server via mDNS/Bonjour (e.g. a
+  `_ratatoskr._tcp` service type), analogous to how Sonos speakers already advertise themselves over
+  SSDP (section 12), would let the app find candidate servers on the LAN and offer them for
+  selection instead of manual entry. This only discovers the *address* — the existing
+  trust-on-first-use certificate-fingerprint confirmation (section 14) still applies, so discovery
+  does not weaken the TLS trust model. Feasibility note: mDNS relies on UDP multicast like SSDP, so
+  it inherits the same container-networking requirement already documented in section 12 (host
+  networking, or an equivalent multicast-capable setup) — no new networking mode needed beyond what
+  Sonos discovery already requires.
