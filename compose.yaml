@@ -19,6 +19,12 @@ services:
     container_name: ratatoskr-server
     restart: unless-stopped
 
+    # Processes in the container can never gain privileges via setuid/setgid binaries. The server
+    # runs non-root and needs no escalation (the entrypoint is openssl + node only), so this is
+    # free hardening — and it satisfies the corresponding TrueNAS security-screen check.
+    security_opt:
+      - no-new-privileges:true
+
     # Sonos discovery (SSDP multicast) and UPnP event callbacks need the host LAN stack, so host
     # networking is the robust default for a LAN appliance (SPEC section 12). The server then
     # listens on PORT (default 8080) directly on the host; under host networking `ports:` is
