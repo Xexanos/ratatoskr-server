@@ -18,8 +18,10 @@
 FROM node:22.23.1-alpine AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-# Pin pnpm to the version the repo declares (package.json "packageManager").
-RUN corepack enable
+# Pin pnpm to the version the repo declares (package.json "packageManager"). corepack is
+# installed explicitly (--force: overwrite the bundled copy's bin links where one still
+# exists) because Node >= 25 no longer ships it with the distribution.
+RUN npm install -g --force corepack && corepack enable
 WORKDIR /repo
 
 # Manifests first, so `pnpm install` is cached until a package.json or the lockfile changes.
