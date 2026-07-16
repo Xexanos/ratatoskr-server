@@ -69,9 +69,12 @@ Notes that apply either way:
     container runs as (ID Type *User*, ID `1000` — or `568` if you set *Custom User* — with
     *Modify* access). Equivalent alternative: a one-time
     `chown -R <uid>:<gid> /mnt/.ix-apps/app_mounts/<app>/<volume>` from the NAS shell, though the
-    ACL lives in the app config and is re-applied on redeploy. (Images released before the
-    entrypoint's write-probe fix refuse ACL-only grants — their writability check read plain mode
-    bits — so on an older image use `chown`.)
+    ACL lives in the app config and is re-applied on redeploy. Once the volume contains data
+    (i.e. after the first successful start), also check the ACL's **Force Flag** — TrueNAS
+    otherwise rejects every later app edit with `path contains existing data and 'force' was not
+    specified`; the flag only permits applying the ACL to a non-empty directory, the contents are
+    untouched. (Images released before the entrypoint's write-probe fix refuse ACL-only grants —
+    their writability check read plain mode bits — so on an older image use `chown`.)
   - **Host path** on a dataset: `chown` it to whatever uid the container runs as (`1000:1000` by
     default).
 - **Updates:** TrueNAS watches the `latest` digest and shows *Update available* in the Apps
