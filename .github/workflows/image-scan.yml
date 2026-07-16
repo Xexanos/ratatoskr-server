@@ -48,6 +48,11 @@ jobs:
           image-ref: ${{ steps.ref.outputs.image }}
           format: sarif
           output: trivy-results.sarif
+          # NOTE: with SARIF output the action ignores this severity filter by design (see the
+          # action's limit-severities-for-sarif input) — the uploaded report contains ALL
+          # severities. Deliberate: the Security tab gets Harbor-style full visibility (incl.
+          # medium findings like the known fxp/@svrooij/sonos ones); gating on HIGH/CRITICAL
+          # is the build-time scan's job in container.yml, where this filter does apply.
           severity: HIGH,CRITICAL
           # Only fixable CVEs are actionable ("rebuild to pick up the fix"). Flip to false if you
           # also want visibility into vulnerabilities with no fix available yet.
