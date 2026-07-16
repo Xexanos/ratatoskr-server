@@ -58,6 +58,12 @@ ENV PORT=8080
 # (see docker-entrypoint.sh / SPEC section 14). /tls is its default output dir; pre-create it
 # owned by the runtime user so a fresh named volume inherits writable ownership.
 RUN apk add --no-cache openssl && mkdir -p /tls && chown node:node /tls
+# Strip the package managers the base image bundles (npm + its node_modules, corepack, yarn):
+# nothing installs packages at runtime (the entrypoint is openssl + node only), and npm's bundled
+# deps are a recurring CVE source that trips the Trivy gate (e.g. picomatch/sigstore) for code the
+# container can never execute. Doing this right after apk keeps it in the same cheap layer region.
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 WORKDIR /app
 COPY --from=build --chown=node:node /prod ./
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

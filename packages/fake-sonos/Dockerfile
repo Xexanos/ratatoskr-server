@@ -15,6 +15,10 @@ RUN npm install --no-package-lock --no-save typescript@6 @types/node@26 \
   && npx tsc -p tsconfig.json
 
 FROM node:22.23.1-alpine
+# Strip the bundled package managers — nothing installs packages at runtime, and npm's bundled
+# deps are a recurring CVE source (see the note in the server Dockerfile).
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 ENV NODE_ENV=production
 USER node
 WORKDIR /app
