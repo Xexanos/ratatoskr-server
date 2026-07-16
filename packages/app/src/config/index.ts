@@ -14,6 +14,11 @@ export interface Config {
   // is why the media path uses this rather than the listening user's or a short-lived token.
   absStreamerApiKey: string
   sonosSeedHost: string | undefined
+  // Per-request cap (ms) on Sonos SOAP/discovery I/O. node-sonos-ts sets no timeout, so a speaker
+  // that vanishes mid-session (powered off / off the network) would otherwise hang the live reads
+  // — and with them GET /v1/sessions/current — indefinitely (SPEC §4). This bounds each call so a
+  // dead speaker surfaces as a prompt SonosUpstreamError → 502 instead of a hung request.
+  sonosRequestTimeoutMs: number
   port: number
   pollIntervalSeconds: number
   seekSettleMs: number
@@ -204,6 +209,7 @@ export function loadConfig(env: Env = process.env): Config {
     absUrl: reader.absUrl(),
     absStreamerApiKey: reader.requireString('ABS_STREAMER_API_KEY'),
     sonosSeedHost: env.SONOS_SEED_HOST,
+    sonosRequestTimeoutMs: reader.positiveNumber('SONOS_REQUEST_TIMEOUT_MS', 4000),
     port: reader.port(),
     pollIntervalSeconds: reader.positiveNumber('POLL_INTERVAL_SECONDS', 15),
     seekSettleMs: reader.positiveNumber('SEEK_SETTLE_MS', 1000),
