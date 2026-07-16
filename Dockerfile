@@ -11,7 +11,11 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage: install workspace deps, generate the contract artifacts, compile TS ----
-FROM node:22-alpine AS build
+# Base image pinned to an exact Node version (no digest): Dependabot raises a PR for each patch/
+# minor/LTS-major bump (docker ecosystem in .github/dependabot.yml), and a plain rebuild still
+# pulls the latest same-version Alpine rebuild automatically. CVE detection is Trivy's job
+# (.github/workflows/image-scan.yml), not Dependabot's.
+FROM node:22.23.1-alpine AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # Pin pnpm to the version the repo declares (package.json "packageManager").
@@ -46,7 +50,7 @@ RUN pnpm run generate \
 RUN pnpm --filter @ratatoskr/app deploy --prod --legacy /prod
 
 # ---- Runtime stage: slim, non-root, app + production deps only ----
-FROM node:22-alpine AS runtime
+FROM node:22.23.1-alpine AS runtime
 ENV NODE_ENV=production
 # The server binds 0.0.0.0:PORT (default 8080). Override PORT at runtime if needed.
 ENV PORT=8080
@@ -54,6 +58,12 @@ ENV PORT=8080
 # (see docker-entrypoint.sh / SPEC section 14). /tls is its default output dir; pre-create it
 # owned by the runtime user so a fresh named volume inherits writable ownership.
 RUN apk add --no-cache openssl && mkdir -p /tls && chown node:node /tls
+# Strip the package managers the base image bundles (npm + its node_modules, corepack, yarn):
+# nothing installs packages at runtime (the entrypoint is openssl + node only), and npm's bundled
+# deps are a recurring CVE source that trips the Trivy gate (e.g. picomatch/sigstore) for code the
+# container can never execute. Doing this right after apk keeps it in the same cheap layer region.
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 WORKDIR /app
 COPY --from=build --chown=node:node /prod ./
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

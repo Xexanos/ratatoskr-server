@@ -4,7 +4,7 @@
 # The compile stage is pinned to $BUILDPLATFORM: the output is plain JavaScript (tsc, no native
 # modules), so for a multi-arch build it compiles once on the builder's native arch instead of
 # re-running npm+tsc under QEMU for each target. Only the tiny runtime stage differs per arch.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:22.23.1-alpine AS build
 WORKDIR /repo
 COPY tsconfig.base.json ./
 WORKDIR /repo/packages/fake-sonos
@@ -14,7 +14,11 @@ COPY packages/fake-sonos/src ./src
 RUN npm install --no-package-lock --no-save typescript@6 @types/node@26 \
   && npx tsc -p tsconfig.json
 
-FROM node:22-alpine
+FROM node:22.23.1-alpine
+# Strip the bundled package managers — nothing installs packages at runtime, and npm's bundled
+# deps are a recurring CVE source (see the note in the server Dockerfile).
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 ENV NODE_ENV=production
 USER node
 WORKDIR /app

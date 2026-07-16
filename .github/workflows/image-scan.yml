@@ -1,0 +1,62 @@
+name: Image vulnerability scan
+
+# Continuous CVE watch on the PUBLISHED release image — the "do I need to rebuild?" signal.
+# Division of labour (see .github/dependabot.yml):
+#   - Dependabot: tells us when a NEWER base image exists (currency). Not CVE-aware.
+#   - This workflow: tells us when the image we ALREADY shipped has a newly disclosed, fixable CVE.
+# It catches vulnerabilities that appear after build time — the case Dependabot and the build-time
+# gate in container.yml cannot see. Findings are uploaded as SARIF and show up under
+# Security > Code scanning. Runs daily and on demand.
+
+on:
+  schedule:
+    # 06:00 UTC daily. Cron on GitHub Actions runs against the default branch only.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+  security-events: write # upload SARIF to code scanning
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release image ref
+        id: ref
+        run: |
+          # GHCR requires a lowercase path; the owner may be mixed-case.
+          owner="${{ github.repository_owner }}"
+          echo "image=${REGISTRY}/${owner,,}/ratatoskr-server:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SHA-pinned, not tag-pinned — see the note in container.yml (March 2026 trivy-action
+      # tag-hijack compromise, GHSA-69fq-xp46-6x23).
+      - name: Scan the released image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          # Only fixable CVEs are actionable ("rebuild to pick up the fix"). Flip to false if you
+          # also want visibility into vulnerabilities with no fix available yet.
+          ignore-unfixed: true
+        # A scheduled watch must not fail the run on findings — the SARIF upload IS the signal.
+
+      - name: Upload results to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-release-image

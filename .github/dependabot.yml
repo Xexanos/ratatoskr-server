@@ -30,3 +30,28 @@ updates:
       default-days: 7
     commit-message:
       prefix: "ci"
+
+  # Base images in the two Dockerfiles (root runtime image + fake-sonos test double).
+  # Both track an exact node:<version>-alpine tag (no digest), so Dependabot proposes readable
+  # patch/minor/major version bumps. Same-version Alpine rebuilds are picked up by a plain image
+  # rebuild; CVE detection is handled by Trivy (.github/workflows/image-scan.yml), not here.
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/packages/fake-sonos"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      docker:
+        patterns:
+          - "*"
+    # Node LTS is even-numbered majors; odd majors are non-LTS "Current" lines. Dependabot has
+    # no LTS awareness, so we skip the odd majors explicitly to stay on LTS only (22 -> 24 -> 26).
+    # Extend this list when a new odd major appears on the horizon.
+    ignore:
+      - dependency-name: "node"
+        versions: ["23.x", "25.x", "27.x", "29.x", "31.x"]
+    commit-message:
+      prefix: "docker"
