@@ -15,7 +15,7 @@
 # minor/LTS-major bump (docker ecosystem in .github/dependabot.yml), and a plain rebuild still
 # pulls the latest same-version Alpine rebuild automatically. CVE detection is Trivy's job
 # (.github/workflows/image-scan.yml), not Dependabot's.
-FROM node:22.23.1-alpine AS build
+FROM node:26.5.0-alpine AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # Pin pnpm to the version the repo declares (package.json "packageManager"). corepack is
@@ -52,7 +52,7 @@ RUN pnpm run generate \
 RUN pnpm --filter @ratatoskr/app deploy --prod --legacy /prod
 
 # ---- Runtime stage: slim, non-root, app + production deps only ----
-FROM node:22.23.1-alpine AS runtime
+FROM node:26.5.0-alpine AS runtime
 ENV NODE_ENV=production
 # The server binds 0.0.0.0:PORT (default 8080). Override PORT at runtime if needed.
 ENV PORT=8080
