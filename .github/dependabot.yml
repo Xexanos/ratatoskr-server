@@ -19,6 +19,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # TypeScript 7.0 (the native Go compiler) has no stable programmatic API, so
+    # openapi-typescript's generate step crashes on it (see PR #61). Deliberately scoped to
+    # 7.0.x only: the ignore expires by itself when 7.1 (which brings the stable API) is
+    # released — the fresh Dependabot PR then IS the compatibility test. Tracked in #70.
+    ignore:
+      - dependency-name: "typescript"
+        versions: ["7.0.x"]
     commit-message:
       prefix: "deps"
 
