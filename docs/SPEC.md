@@ -178,6 +178,14 @@ if something required is missing:
   than refusing the connection, so an unbounded read would hang the live topology/transport reads
   — and with them `GET /v1/sessions/current` — indefinitely. This bounds each call so a dead
   speaker surfaces promptly as a 502 (section 4) instead of a hung request.
+- `SONOS_LISTENER_HOST`, `SONOS_LISTENER_INTERFACE`, `SONOS_LISTENER_PORT` (optional,
+  pass-through) — read directly by the embedded Sonos library, not validated by Ratatoskr's
+  startup config. They pin the UPnP event-callback listener the speakers call back to: by
+  default the library binds port 6329 and advertises the first non-internal IPv4 found across
+  all interfaces, which on a multi-homed host (VPNs, virtualization bridges, a NAS with one
+  Docker bridge per app) can be an address the speakers cannot reach — eventing then breaks
+  silently while discovery and control still work. Set `SONOS_LISTENER_HOST` to the host's LAN
+  IP on such machines (or pin the interface by name with `SONOS_LISTENER_INTERFACE`).
 - `PORT` (optional, default 8080).
 - `POLL_INTERVAL_SECONDS` (optional, default 15).
 - `SEEK_SETTLE_MS` (optional, default 1000), `SEEK_TOLERANCE_SECONDS` (optional, default 3),

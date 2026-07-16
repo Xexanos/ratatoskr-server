@@ -58,6 +58,11 @@ Notes that apply either way:
 - **Enable Host Network** — SSDP multicast discovery and UPnP eventing need the host LAN (SPEC
   section 12). Port mapping is disabled under host networking; the server listens on port 8080 of
   the NAS directly (set `PORT` if that clashes).
+- **Set `SONOS_LISTENER_HOST` to the NAS's LAN IP.** A TrueNAS box is heavily multi-homed —
+  every app adds a Docker bridge — and the Sonos library picks its UPnP event-callback address
+  as the first non-internal IPv4 across all interfaces, which can land on a bridge IP the
+  speakers cannot reach. Eventing then breaks silently even though discovery works, so set it
+  alongside `SONOS_SEED_HOST` (see the Sonos block in [`compose.yaml`](../compose.yaml)).
 - **Persist `/tls`, and make it writable.** Without it the auto-generated certificate — and with
   it the fingerprint the app pinned on first use — changes on every container recreation. The
   startup error `cannot write to /tls` means the mount's owner and the container's user disagree;
