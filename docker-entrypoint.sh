@@ -24,12 +24,16 @@ if [ -z "$TLS_CERT_PATH" ] && [ -z "$TLS_KEY_PATH" ] && [ "$ALLOW_PLAIN_HTTP" !=
   if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
     # Fail with an actionable message rather than a raw openssl/permission error. A bind-mounted
     # host directory is often not writable by this non-root user (uid $(id -u)) on first run.
-    if ! mkdir -p "$TLS_DIR" 2>/dev/null || [ ! -w "$TLS_DIR" ]; then
+    # Probe writability by actually creating a file — busybox's `test -w` evaluates plain mode
+    # bits only, so it wrongly rejects directories whose write access comes from a POSIX ACL
+    # (e.g. TrueNAS ixVolumes with an ACL entry for the container user).
+    if ! mkdir -p "$TLS_DIR" 2>/dev/null || ! touch "$TLS_DIR/.write-probe" 2>/dev/null; then
       echo "ratatoskr: cannot write to $TLS_DIR to generate a self-signed certificate." >&2
-      echo "ratatoskr: make it writable by uid $(id -u) (e.g. 'chown 1000:1000 ./tls'), or set" >&2
-      echo "ratatoskr: TLS_CERT_PATH/TLS_KEY_PATH, or ALLOW_PLAIN_HTTP=true." >&2
+      echo "ratatoskr: make it writable by uid $(id -u) (e.g. 'chown $(id -u):$(id -g) ./tls')," >&2
+      echo "ratatoskr: or set TLS_CERT_PATH/TLS_KEY_PATH, or ALLOW_PLAIN_HTTP=true." >&2
       exit 1
     fi
+    rm -f "$TLS_DIR/.write-probe"
     echo "ratatoskr: no TLS configured and ALLOW_PLAIN_HTTP is not set — generating a self-signed certificate at $CERT"
     # -nodes: the key is unencrypted (read unattended at boot). 10-year validity so the pinned
     # fingerprint is long-lived. Subject/SAN are cosmetic here: the app validates by fingerprint,

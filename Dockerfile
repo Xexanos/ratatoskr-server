@@ -70,9 +70,11 @@ WORKDIR /app
 COPY --from=build --chown=node:node /prod ./
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Run unprivileged (SPEC section 14: the container runs as a non-root user). `node` is a
-# built-in uid 1000 in the official images.
-USER node
+# Run unprivileged (SPEC section 14: the container runs as a non-root user). Numeric uid:gid —
+# this is the official images' built-in `node` user (1000:1000), but stated numerically so
+# platforms that verify non-root from image metadata alone (TrueNAS security screen, Kubernetes
+# runAsNonRoot, scanners) can confirm it; a named USER shows up there as "unknown".
+USER 1000:1000
 EXPOSE 8080
 
 # Liveness: is the listener accepting connections? A raw TCP connect works regardless of
