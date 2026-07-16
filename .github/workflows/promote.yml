@@ -15,14 +15,14 @@ name: Promote image
 # a commit whose image passed E2E — a red E2E run cuts no release.
 #
 # Triggers:
-#   - repository_dispatch (type: e2e-passed) — the E2E repo fires this on a green run, passing
+#   - repository_dispatch (type: server-e2e-passed) — the E2E repo fires this on a green run, passing
 #     the digest (and optional channels/version) it just tested. This is the automatic path:
 #     container.yml -> E2E -> (on pass) promote.yml.
 #   - workflow_dispatch — manual promotion of a known-good tag/digest.
 
 on:
   repository_dispatch:
-    types: [e2e-passed]
+    types: [server-e2e-passed]
   workflow_dispatch:
     inputs:
       source:
