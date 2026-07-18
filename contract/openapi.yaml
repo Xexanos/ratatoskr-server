@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -170,6 +170,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LibraryItem"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /library/items/{itemId}/cover:
+    get:
+      operationId: getLibraryItemCover
+      summary: Cover image for an item, proxied from Audiobookshelf
+      description: |
+        Returns the item's cover image. Ratatoskr fetches it from Audiobookshelf
+        server-side with its own credentials and serves it under this API's auth, so
+        clients never need Audiobookshelf credentials or direct network access to it.
+        This is what `LibraryItemSummary.coverUrl` points at.
+
+        Optionally scaled: pass `h` to get a variant no taller than that many pixels.
+        Clients set `h` from the target row height times the device pixel density, so
+        low-density screens request fewer pixels. Covers are portrait, so scaling is by
+        height (the fixed list-row dimension); width follows the aspect ratio. Omitting
+        `h` returns the full-size cover (used on the now-playing screen). The server MAY
+        clamp `h` to a small set of sizes and cache the result, and MAY delegate the
+        scaling upstream to Audiobookshelf's own cover resizing.
+      tags: [library]
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+        - name: h
+          in: query
+          required: false
+          description: Target maximum height in pixels for a scaled variant. Omit for full size.
+          schema: { type: integer, minimum: 1, maximum: 2048 }
+      responses:
+        "200":
+          description: The cover image bytes.
+          content:
+            image/*:
+              schema: { type: string, format: binary }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { $ref: "#/components/responses/UpstreamError" }
