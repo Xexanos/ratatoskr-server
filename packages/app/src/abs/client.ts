@@ -6,6 +6,7 @@ import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError 
 type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 type LibraryItem = components['schemas']['LibraryItem']
+type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
 type Progress = components['schemas']['Progress']
 
@@ -14,6 +15,11 @@ type Progress = components['schemas']['Progress']
 const PROBE_TIMEOUT_MS = 2000
 // Default per-request timeout when the caller injects none (matches the historical hardcoded value).
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000
+// Buffer size for the in-progress shelf's upstream fetch. ABS applies its `limit` before we filter to
+// books, so we over-fetch this many items (well above any realistic simultaneously-in-progress count)
+// and then cap at the caller's limit, so interleaved podcasts don't shrink the shelf. See
+// listInProgressItems.
+const IN_PROGRESS_UPSTREAM_LIMIT = 100
 
 // Outcome of probing ABS_URL: a genuine ABS server, a host that answered but isn't ABS
 // (misconfiguration), or no answer at all (down / wrong host / TLS failure).
@@ -182,6 +188,30 @@ export class AbsClient {
       if (value !== null) cacheHeaders[name] = value
     }
     return { contentType, body, cacheHeaders }
+  }
+
+  // The continue-listening shelf (SPEC section 2): books the user has started but not finished,
+  // most-recently-listened first. ABS's GET /api/me/items-in-progress already returns exactly that,
+  // recency-ordered and excluding finished books, so no client-side sorting is needed. Bounded by
+  // `limit` and not paginated (the shelf is a complete, capped set). Filtered to books to match the
+  // browse list's book-only scope; podcasts are out of scope for v1. Per-item progress is omitted,
+  // consistent with the browse projection (the field is optional; the app derives the marker itself).
+  //
+  // ABS applies its own `limit` to the mixed-media in-progress list *before* we filter to books, so
+  // asking upstream for exactly `limit` could return fewer than `limit` books when podcasts are
+  // interleaved. The endpoint is not paginated and has no media-type filter, so over-fetch a generous
+  // buffer (the in-progress list is per-user and inherently small) and then cap at `limit`.
+  async listInProgressItems(token: string, limit: number): Promise<LibraryItemList> {
+    const upstreamLimit = Math.max(limit, IN_PROGRESS_UPSTREAM_LIMIT)
+    const data = (await this.getJson(`/api/me/items-in-progress?limit=${upstreamLimit}`, token)) as {
+      libraryItems?: unknown[]
+    }
+    const rawItems = Array.isArray(data.libraryItems) ? data.libraryItems : []
+    const items = rawItems
+      .filter((raw) => (raw as { mediaType?: unknown })?.mediaType === 'book')
+      .slice(0, limit)
+      .map(toSummary)
+    return { items }
   }
 
   async getProgress(token: string, itemId: string): Promise<Progress> {

@@ -165,3 +165,54 @@ describe('GET /v1/library/items/:itemId/cover', () => {
     await app.close()
   })
 })
+
+describe('GET /v1/library/in-progress', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('returns the shelf and forwards the token with the default limit', async () => {
+    const listInProgressItems = vi.fn().mockResolvedValue({ items: [SUMMARY] })
+    const app = await appWith({ listInProgressItems })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ items: [SUMMARY] })
+    expect(listInProgressItems).toHaveBeenCalledWith('user-token', 25)
+    await app.close()
+  })
+
+  it('forwards an explicit limit', async () => {
+    const listInProgressItems = vi.fn().mockResolvedValue({ items: [] })
+    const app = await appWith({ listInProgressItems })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress?limit=10', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(listInProgressItems).toHaveBeenCalledWith('user-token', 10)
+    await app.close()
+  })
+
+  it('rejects an out-of-range limit with 400', async () => {
+    const listInProgressItems = vi.fn()
+    const app = await appWith({ listInProgressItems })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress?limit=99', headers: AUTH })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('bad_request')
+    expect(listInProgressItems).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('rejects a request with no bearer token as 401', async () => {
+    const listInProgressItems = vi.fn()
+    const app = await appWith({ listInProgressItems })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress' })
+    expect(res.statusCode).toBe(401)
+    expect(listInProgressItems).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('maps an upstream failure to 502', async () => {
+    const app = await appWith({ listInProgressItems: vi.fn().mockRejectedValue(new AbsUpstreamError()) })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress', headers: AUTH })
+    expect(res.statusCode).toBe(502)
+    await app.close()
+  })
+})
