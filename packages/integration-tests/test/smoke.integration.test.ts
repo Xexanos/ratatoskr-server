@@ -18,6 +18,20 @@ import {
 // version of the manual "boot it and curl /v1/health" verification, and it pins down
 // the one file no unit test executes: main.ts. The shared harness lives in helpers.ts.
 
+// Poll /v1/health until Sonos is no longer reported as probing (its `detail` moves on from
+// "probing, retry shortly"), so the test can assert the eventual, settled state rather than
+// only the immediate post-boot one.
+async function pollUntilSettled(port: number, deadlineMs = 15_000): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    const body = (await res.json()) as { sonos?: { detail?: string } }
+    if (body.sonos?.detail !== 'probing, retry shortly') return body as Record<string, unknown>
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  throw new Error(`Sonos health check did not settle within ${deadlineMs}ms`)
+}
+
 describe('server process smoke test', () => {
   let running: SpawnedServer | undefined
   let fakeAbs: Server | undefined
@@ -61,12 +75,13 @@ describe('server process smoke test', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 
-    // No real Sonos on the CI/test network, so discovery finds nothing: sonos is unreachable
-    // and the overall status is therefore degraded (abs itself is reachable via the fake).
-    expect(body.status).toBe('degraded')
+    // The startup probe (main.ts) is kicked off before the listener opens, but SSDP discovery's
+    // timeout (a few seconds) dwarfs the time it takes waitUntilReady to succeed, so this first
+    // call lands while Sonos is still probing. That must not read as an outage: a still-probing
+    // Sonos does not drag the overall status to degraded (SPEC section 14), only abs does here.
+    expect(body.status).toBe('ok')
     expect(body.abs).toEqual({ reachable: true })
-    // sonos also carries a `detail` string when unreachable, so match only the flag we assert.
-    expect(body.sonos).toMatchObject({ reachable: false })
+    expect(body.sonos).toEqual({ reachable: false, detail: 'probing, retry shortly' })
     // SPEC section 14: /health must not leak the server version to unauthenticated callers.
     expect(body.version).toBeUndefined()
 
@@ -75,6 +90,12 @@ describe('server process smoke test', () => {
     const valid = validate(body)
     expect(validate.errors).toBeNull()
     expect(valid).toBe(true)
+
+    // Once the first probe actually settles - no real Sonos on the CI/test network, so discovery
+    // finds nothing - the now-confirmed-unreachable Sonos does drag the overall status down.
+    const settled = await pollUntilSettled(port)
+    expect(settled.status).toBe('degraded')
+    expect(settled.sonos).toMatchObject({ reachable: false, detail: 'Sonos did not respond' })
   })
 
   it('refuses to start when the streamer API key is rejected by a reachable Audiobookshelf', async () => {

@@ -50,15 +50,31 @@ describe('GET /v1/health', () => {
     await app.close()
   })
 
-  it('reports degraded with a probing detail before the first Sonos check settles', async () => {
+  it('reports ok overall with a probing detail before the first Sonos check settles', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
-    // isReachable() resolves undefined until the first background probe has settled.
+    // isReachable() resolves undefined until the first background probe has settled. That must
+    // not read as a Sonos outage, so it is excluded from the overall status too (only abs.reachable
+    // decides while Sonos is still probing) - otherwise every boot would briefly report degraded.
+    const app = await appWith({ isReachable: vi.fn().mockResolvedValue(undefined) })
+    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.status).toBe('ok')
+    expect(body.sonos).toEqual({ reachable: false, detail: 'probing, retry shortly' })
+
+    await app.close()
+  })
+
+  it('reports degraded when Audiobookshelf is unreachable even while Sonos is still probing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(undefined) })
     const res = await app.inject({ method: 'GET', url: '/v1/health' })
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.status).toBe('degraded')
+    expect(body.abs.reachable).toBe(false)
     expect(body.sonos).toEqual({ reachable: false, detail: 'probing, retry shortly' })
 
     await app.close()
