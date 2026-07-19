@@ -494,7 +494,10 @@ Hardening checklist (small items, still binding):
 - `/health` stays unauthenticated but reports only coarse reachability — no versions,
   no URLs. The Sonos state is the last background probe's outcome (the endpoint never waits
   on SSDP); before the first probe settles it reports `detail: "probing, retry shortly"`, so
-  a single post-startup check is distinguishable from an actual Sonos outage.
+  a single post-startup check is distinguishable from an actual Sonos outage. The first probe is
+  also kicked off in the background at startup (`api/app.ts`), not only on the first `/health`
+  call, so a readiness check landing shortly after boot has a head start on that window rather
+  than starting it from zero.
 - No CORS headers (the API is not for browsers); bearer-token auth means no cookie-based
   CSRF surface.
 - Commit the lockfile; run `npm audit` in CI.
