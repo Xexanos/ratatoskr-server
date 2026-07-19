@@ -1,4 +1,5 @@
 import type { components } from '@ratatoskr/contract'
+import { API_PREFIX } from '../apiPrefix.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from './errors.js'
 
@@ -404,11 +405,12 @@ interface AbsItem {
 }
 
 // The cover image is served by Ratatoskr's own cover-proxy route (getItemCover), so coverUrl points
-// there rather than at ABS. A path relative to the server origin (it already includes the /v1 mount
-// prefix): the client resolves it against the same base it is already talking to, and it needs no
-// request context, so it can be built here in the pure projection.
+// there rather than at ABS. A path relative to the server origin (it includes the same version mount
+// prefix as the routes, from the shared API_PREFIX constant): the client resolves it against the
+// base it is already talking to, and it needs no request context, so it can be built here in the
+// pure projection.
 function coverPathFor(id: string): string {
-  return `/v1/library/items/${encodeURIComponent(id)}/cover`
+  return `${API_PREFIX}/library/items/${encodeURIComponent(id)}/cover`
 }
 
 function toSummary(raw: unknown): LibraryItemSummary {
