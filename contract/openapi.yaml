@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 1.2.0
+  version: 1.3.0
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -208,6 +208,33 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /library/in-progress:
+    get:
+      operationId: listInProgressItems
+      summary: Books currently in progress, most-recently-listened first
+      description: |
+        A shelf of the books the user has started but not finished (progress present,
+        position > 0, not finished), ordered most-recently-listened first. Bounded by `limit`
+        and NOT paginated: books beyond the limit are not lost — they remain in the main
+        `GET /library/items` list, where their `progress` marks them as in progress. Returns a
+        LibraryItemList (no cursor) because the shelf is a complete, bounded set, not a page.
+      tags: [library]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of items on the shelf.
+          schema: { type: integer, minimum: 1, maximum: 50, default: 25 }
+      responses:
+        "200":
+          description: The in-progress shelf.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryItemList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "502": { $ref: "#/components/responses/UpstreamError" }
 
   /sessions/current:
@@ -444,17 +471,26 @@ components:
             description: { type: string }
             narrator: { type: string }
 
-    LibraryItemPage:
+    LibraryItemList:
+      # Base shape for any "set of library items" response (browse list, shelves). Holds only
+      # the always-present part; paginated responses add a cursor on top (LibraryItemPage).
       type: object
       required: [items]
       properties:
         items:
           type: array
           items: { $ref: "#/components/schemas/LibraryItemSummary" }
-        nextCursor:
-          type: string
-          nullable: true
-          description: Present when more items are available.
+
+    LibraryItemPage:
+      # A paginated LibraryItemList: the base plus a forward cursor.
+      allOf:
+        - $ref: "#/components/schemas/LibraryItemList"
+        - type: object
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+              description: Present when more items are available.
 
     PlaybackState:
       type: string
