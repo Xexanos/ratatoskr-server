@@ -80,6 +80,16 @@ services:
       # A speaker's IP. Only needed where SSDP multicast is unreliable (or under bridge networking);
       # discovery is automatic otherwise.
       # SONOS_SEED_HOST: "192.168.1.60"
+      # The IP the speakers use to reach the server for UPnP event callbacks. By default the Sonos
+      # library picks the first non-internal IPv4 across ALL interfaces — on a multi-homed host
+      # (VPN, virtualization, a NAS with one Docker bridge per app) that can be an address the
+      # speakers cannot reach, silently breaking eventing even though discovery and control work.
+      # Set it to the host's real LAN IP on such machines.
+      # SONOS_LISTENER_HOST: "192.168.1.10"
+      # Related: pin the interface by name instead of by IP, or move the event-callback listener
+      # off its default port 6329.
+      # SONOS_LISTENER_INTERFACE: "eth0"
+      # SONOS_LISTENER_PORT: "6329"
       # SONOS_REQUEST_TIMEOUT_MS: "4000"                # per-call cap on Sonos SOAP/discovery I/O so a
       #                                                 # vanished speaker fails fast (502) instead of hanging
 
