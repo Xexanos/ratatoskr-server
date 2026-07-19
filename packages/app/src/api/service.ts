@@ -8,6 +8,7 @@ type Health = components['schemas']['Health']
 type DependencyStatus = components['schemas']['DependencyStatus']
 type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
+type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItem = components['schemas']['LibraryItem']
 type Speaker = components['schemas']['Speaker']
 type LoginRequest = components['schemas']['LoginRequest']
@@ -107,6 +108,13 @@ export class ApiService {
     const { h } = request.query as { h?: number }
     const cover = await this.abs.getItemCover(request.absToken as string, itemId, h)
     await reply.headers(cover.cacheHeaders).type(cover.contentType).send(cover.body)
+  }
+
+  // In-progress shelf (SPEC section 2): a bounded, non-paginated LibraryItemList. Forwards the
+  // caller's token (which ABS validates), and Fastify applies the querystring `default` for `limit`.
+  async listInProgressItems(request: FastifyRequest): Promise<LibraryItemList> {
+    const { limit } = request.query as { limit: number }
+    return this.abs.listInProgressItems(request.absToken as string, limit)
   }
 
   async listSpeakers(): Promise<Speaker[]> {

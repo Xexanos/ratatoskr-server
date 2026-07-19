@@ -178,6 +178,55 @@ describe('AbsClient library projection', () => {
     })
   })
 
+  describe('listInProgressItems', () => {
+    it('projects the in-progress books via the summary shape, filtering non-books and honoring the limit', async () => {
+      stubRoutes([
+        {
+          match: '/api/me/items-in-progress',
+          body: {
+            libraryItems: [
+              absBook('li_1', 'Alpha', 'Author A', 3600),
+              { id: 'pod_1', mediaType: 'podcast', media: { duration: 10, metadata: { title: 'Cast' } } }, // filtered
+              absBook('li_2', 'Beta', 'Author B', 60),
+            ],
+          },
+        },
+      ])
+      const list = await new AbsClient(BASE).listInProgressItems('tok', 25)
+
+      expect(list).toEqual({
+        items: [
+          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
+          { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v1/library/items/li_2/cover' },
+        ],
+      })
+    })
+
+    it('caps the shelf at the limit', async () => {
+      stubRoutes([
+        {
+          match: '/api/me/items-in-progress',
+          body: { libraryItems: [absBook('li_1', 'A', 'x', 1), absBook('li_2', 'B', 'y', 2), absBook('li_3', 'C', 'z', 3)] },
+        },
+      ])
+      const list = await new AbsClient(BASE).listInProgressItems('tok', 2)
+      expect(list.items.map((item) => item.id)).toEqual(['li_1', 'li_2'])
+    })
+
+    it('returns an empty shelf when ABS reports nothing in progress', async () => {
+      stubRoutes([{ match: '/api/me/items-in-progress', body: {} }])
+      expect(await new AbsClient(BASE).listInProgressItems('tok', 25)).toEqual({ items: [] })
+    })
+
+    it('over-fetches a buffer upstream so book-filtering does not truncate below the caller limit', async () => {
+      // ABS applies its limit before we filter to books, so the upstream request must ask for more
+      // than the caller's small limit (here 100, the buffer) rather than 5.
+      stubRoutes([{ match: '/api/me/items-in-progress', body: { libraryItems: [] } }])
+      await new AbsClient(BASE).listInProgressItems('tok', 5)
+      expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${BASE}/api/me/items-in-progress?limit=100`)
+    })
+  })
+
   describe('getItemCover', () => {
     // The cover response is binary, not JSON, so it needs its own fetch stub (stubRoutes serves JSON).
     function stubCover(response: Response) {
