@@ -98,5 +98,9 @@ jobs:
         with:
           base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
           revision: "HEAD:contract/openapi.yaml"
+          # Resolve allOf before diffing so composition (e.g. LibraryItemPage = allOf[LibraryItemList,
+          # {nextCursor}]) is compared by its effective schema, not its unresolved wrapper. Without
+          # this, refactoring a flat schema into an equivalent allOf reads as a false-positive break.
+          flatten-allof: true
           fail-on: WARN
           github-token: ${{ github.token }}
