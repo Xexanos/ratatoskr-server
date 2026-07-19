@@ -22,7 +22,7 @@ function testConfig(): Config {
 }
 
 const AUTH = { authorization: 'Bearer user-token' }
-const SUMMARY = { id: 'li_1', title: 'Alpha', durationSeconds: 3600, coverUrl: null }
+const SUMMARY = { id: 'li_1', title: 'Alpha', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' }
 const ITEM = { ...SUMMARY, progress: { positionSeconds: 0, isFinished: false } }
 
 function appWith(abs: Partial<AbsClient>) {
@@ -102,6 +102,66 @@ describe('GET /v1/library/items/:itemId', () => {
     const app = await appWith({ getItem: vi.fn() })
     const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1' })
     expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+})
+
+describe('GET /v1/library/items/:itemId/cover', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+
+  it('serves the proxied bytes with the upstream content type and cache headers', async () => {
+    const getItemCover = vi.fn().mockResolvedValue({
+      contentType: 'image/png',
+      body: PNG,
+      cacheHeaders: { 'cache-control': 'private, max-age=3600' },
+    })
+    const app = await appWith({ getItemCover })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1/cover?h=240', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('image/png')
+    expect(res.headers['cache-control']).toBe('private, max-age=3600')
+    expect(res.rawPayload).toEqual(PNG)
+    expect(getItemCover).toHaveBeenCalledWith('user-token', 'li_1', 240)
+    await app.close()
+  })
+
+  it('forwards no height when h is omitted', async () => {
+    const getItemCover = vi.fn().mockResolvedValue({ contentType: 'image/jpeg', body: PNG, cacheHeaders: {} })
+    const app = await appWith({ getItemCover })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1/cover', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(getItemCover).toHaveBeenCalledWith('user-token', 'li_1', undefined)
+    await app.close()
+  })
+
+  it('rejects an out-of-range h with 400', async () => {
+    const getItemCover = vi.fn()
+    const app = await appWith({ getItemCover })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1/cover?h=9000', headers: AUTH })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('bad_request')
+    expect(getItemCover).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('maps a missing cover to 404', async () => {
+    const app = await appWith({ getItemCover: vi.fn().mockRejectedValue(new AbsNotFoundError()) })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items/ghost/cover', headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json().code).toBe('not_found')
+    await app.close()
+  })
+
+  it('rejects a request with no bearer token as 401', async () => {
+    const getItemCover = vi.fn()
+    const app = await appWith({ getItemCover })
+    const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1/cover' })
+    expect(res.statusCode).toBe(401)
+    expect(getItemCover).not.toHaveBeenCalled()
     await app.close()
   })
 })

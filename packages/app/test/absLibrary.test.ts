@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AbsClient } from '../src/abs/client.js'
-import { AbsNotFoundError } from '../src/abs/errors.js'
+import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from '../src/abs/errors.js'
 import { decodeCursor } from '../src/abs/cursor.js'
 
 const BASE = 'http://abs.invalid'
@@ -56,8 +56,8 @@ describe('AbsClient library projection', () => {
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
 
       expect(page.items).toEqual([
-        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: null },
-        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: null },
+        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
+        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v1/library/items/li_2/cover' },
       ])
       // 2 of 5 shown → more in this library.
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 0, page: 1 })
@@ -137,7 +137,7 @@ describe('AbsClient library projection', () => {
         title: 'Alpha',
         author: 'Author A',
         durationSeconds: 3600,
-        coverUrl: null,
+        coverUrl: '/v1/library/items/li_1/cover',
         description: 'Desc',
         narrator: 'Nar',
         progress: { positionSeconds: 123.5, isFinished: false },
@@ -154,7 +154,7 @@ describe('AbsClient library projection', () => {
         id: 'li_min',
         title: '(unknown title)',
         durationSeconds: 0,
-        coverUrl: null,
+        coverUrl: '/v1/library/items/li_min/cover',
         progress: { positionSeconds: 0, isFinished: false },
       })
       expect(item).not.toHaveProperty('author')
@@ -175,6 +175,69 @@ describe('AbsClient library projection', () => {
     it('defaults to zero / not finished when ABS has no progress (404)', async () => {
       stubRoutes([{ match: '/api/me/progress/li_new', status: 404 }])
       expect(await new AbsClient(BASE).getProgress('tok', 'li_new')).toEqual({ positionSeconds: 0, isFinished: false })
+    })
+  })
+
+  describe('getItemCover', () => {
+    // The cover response is binary, not JSON, so it needs its own fetch stub (stubRoutes serves JSON).
+    function stubCover(response: Response) {
+      const fetchMock = vi.fn(() => Promise.resolve(response))
+      vi.stubGlobal('fetch', fetchMock)
+      return fetchMock
+    }
+
+    it('returns the bytes, content type and pass-through cache headers, forwarding the token and height', async () => {
+      const bytes = Uint8Array.from([1, 2, 3, 4])
+      const fetchMock = stubCover(
+        new Response(bytes, {
+          status: 200,
+          headers: {
+            'content-type': 'image/png',
+            'cache-control': 'private, max-age=3600',
+            etag: '"abc"',
+            'last-modified': 'Wed, 21 Oct 2026 07:28:00 GMT',
+            'x-ignored': 'nope',
+          },
+        }),
+      )
+      const cover = await new AbsClient(BASE).getItemCover('tok', 'li_1', 240)
+
+      expect(cover.contentType).toBe('image/png')
+      expect(cover.body).toBeInstanceOf(Buffer)
+      expect(Uint8Array.from(cover.body)).toEqual(bytes)
+      expect(cover.cacheHeaders).toEqual({
+        'cache-control': 'private, max-age=3600',
+        etag: '"abc"',
+        'last-modified': 'Wed, 21 Oct 2026 07:28:00 GMT',
+      })
+      const url = fetchMock.mock.calls[0][0] as string
+      expect(url).toBe(`${BASE}/api/items/li_1/cover?height=240`)
+      const init = fetchMock.mock.calls[0][1] as RequestInit
+      expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok')
+    })
+
+    it('omits the height query when none is given and falls back to image/jpeg', async () => {
+      const fetchMock = stubCover(new Response(Uint8Array.from([9]), { status: 200 }))
+      const cover = await new AbsClient(BASE).getItemCover('tok', 'li_1', undefined)
+
+      expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/items/li_1/cover`)
+      expect(cover.contentType).toBe('image/jpeg')
+      expect(cover.cacheHeaders).toEqual({})
+    })
+
+    it('maps a missing cover to AbsNotFoundError', async () => {
+      stubCover(new Response(null, { status: 404 }))
+      await expect(new AbsClient(BASE).getItemCover('tok', 'ghost', undefined)).rejects.toBeInstanceOf(AbsNotFoundError)
+    })
+
+    it('maps a rejected token to AbsAuthError', async () => {
+      stubCover(new Response(null, { status: 401 }))
+      await expect(new AbsClient(BASE).getItemCover('tok', 'li_1', undefined)).rejects.toBeInstanceOf(AbsAuthError)
+    })
+
+    it('maps any other upstream status to AbsUpstreamError', async () => {
+      stubCover(new Response(null, { status: 500 }))
+      await expect(new AbsClient(BASE).getItemCover('tok', 'li_1', undefined)).rejects.toBeInstanceOf(AbsUpstreamError)
     })
   })
 })

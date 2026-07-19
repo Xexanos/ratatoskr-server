@@ -3,6 +3,7 @@ import type { Server as HttpsServer } from 'node:https'
 import { openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
+import { API_PREFIX } from '../apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
@@ -109,7 +110,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
           }
     },
     securityHandlers,
-    prefix: '/v1',
+    prefix: API_PREFIX,
   })
 
   return app

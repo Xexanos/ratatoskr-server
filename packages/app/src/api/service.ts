@@ -97,6 +97,18 @@ export class ApiService {
     return this.abs.getItem(request.absToken as string, itemId)
   }
 
+  // Cover proxy (SPEC section 2 / section 8). Forwards the caller's token to ABS, which both fetches
+  // the image and validates the token (so an invalid token → 401, a missing item → 404). The body is
+  // sent as a Buffer deliberately: Fastify skips preSerialization for Buffer payloads, so the dev-mode
+  // response validator does not try to validate raw image bytes against the image/* schema. ABS's own
+  // cache headers are passed through so HTTP caches benefit without Ratatoskr caching anything.
+  async getLibraryItemCover(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const { itemId } = request.params as { itemId: string }
+    const { h } = request.query as { h?: number }
+    const cover = await this.abs.getItemCover(request.absToken as string, itemId, h)
+    await reply.headers(cover.cacheHeaders).type(cover.contentType).send(cover.body)
+  }
+
   async listSpeakers(): Promise<Speaker[]> {
     return this.sonos.listSpeakers()
   }
