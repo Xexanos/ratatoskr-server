@@ -188,9 +188,9 @@ describe('SonosClient', () => {
   })
 
   describe('isReachable', () => {
-    it('is false before any read, then true after a successful read', async () => {
+    it('is undefined (probing) before any read settles, then true after a successful read', async () => {
       const client = clientWith(fakeManager(SOLO))
-      expect(await client.isReachable()).toBe(false) // no live read has completed yet
+      expect(await client.isReachable()).toBeUndefined() // no live read has settled yet
       await client.listSpeakers()
       expect(await client.isReachable()).toBe(true)
     })

@@ -31,9 +31,18 @@ async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
 }
 
 // isReachable() is non-blocking: it reports the last known state and warms up discovery in the
-// background, so this unauthenticated, frequently polled endpoint never waits on SSDP.
-async function checkSonos(sonos: SonosClient): Promise<DependencyStatus> {
-  return (await sonos.isReachable()) ? { reachable: true } : { reachable: false, detail: 'Sonos did not respond' }
+// background, so this unauthenticated, frequently polled endpoint never waits on SSDP. Before
+// the very first probe settles there is no known state yet — report that as probing so a single
+// post-startup health check reads as "come back shortly", not as a Sonos outage. The raw
+// tri-state is returned alongside the response shape so getHealth can tell "still probing" apart
+// from "confirmed unreachable" (only the latter should drag the overall status to degraded).
+async function checkSonos(sonos: SonosClient): Promise<{ status: DependencyStatus; reachable: boolean | undefined }> {
+  const reachable = await sonos.isReachable()
+  if (reachable === undefined) return { status: { reachable: false, detail: 'probing, retry shortly' }, reachable }
+  return {
+    status: reachable ? { reachable: true } : { reachable: false, detail: 'Sonos did not respond' },
+    reachable,
+  }
 }
 
 export interface ApiServiceDeps {
@@ -58,10 +67,14 @@ export class ApiService {
   }
 
   async getHealth(): Promise<Health> {
-    const [abs, sonos] = await Promise.all([checkAbs(this.abs), checkSonos(this.sonos)])
+    const [abs, sonosCheck] = await Promise.all([checkAbs(this.abs), checkSonos(this.sonos)])
     // SPEC section 14: /health reports only coarse reachability — deliberately no version and
     // no URLs, since it is unauthenticated on an untrusted LAN.
-    return { status: abs.reachable && sonos.reachable ? 'ok' : 'degraded', abs, sonos }
+    // A still-probing Sonos (reachable === undefined, only ever right after startup) must not
+    // drag the overall status to degraded — that would be a false alarm for the boot window
+    // this state exists to avoid, so only a *confirmed* unreachable Sonos (=== false) counts.
+    const sonosDown = sonosCheck.reachable === false
+    return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
   async login(request: FastifyRequest): Promise<AuthTokens> {

@@ -2,6 +2,7 @@ import { AbsClient } from './abs/client.js'
 import { buildAbsDispatcher } from './abs/transport.js'
 import { buildApp } from './api/app.js'
 import { ConfigError, loadConfig } from './config/index.js'
+import { SonosClient } from './sonos/client.js'
 
 async function main(): Promise<void> {
   let config
@@ -14,6 +15,14 @@ async function main(): Promise<void> {
     }
     throw err
   }
+
+  // Built here (rather than left to buildApp's default) so the first reachability probe can be
+  // kicked off below, in the background, before the ABS checks below even start — /health
+  // otherwise only triggers that first probe on its own first call (api/service.ts), so a
+  // readiness check landing shortly after boot would see the full "probing" window from zero
+  // instead of a head start. Non-blocking: SSDP/seed I/O never delays startup.
+  const sonos = new SonosClient(config.sonosSeedHost, undefined, config.sonosRequestTimeoutMs)
+  void sonos.isReachable()
 
   // Soft startup check: confirm ABS_URL points at a genuine Audiobookshelf server. A host that
   // answers but is not ABS is almost always a misconfiguration — fail loud now rather than
@@ -44,7 +53,7 @@ async function main(): Promise<void> {
       process.exit(1)
     }
   }
-  const app = await buildApp(config, { absClient: abs })
+  const app = await buildApp(config, { absClient: abs, sonosClient: sonos })
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw
   // unhandled rejection instead of the same clean, formatted exit the config path gives.

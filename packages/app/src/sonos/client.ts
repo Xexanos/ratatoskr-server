@@ -33,7 +33,9 @@ export type SonosManagerFactory = () => SonosManager
 export class SonosClient {
   private manager: SonosManager | undefined
   private initPromise: Promise<SonosManager> | undefined
-  private reachable = false
+  // undefined until the first live read settles — /health distinguishes "not probed yet"
+  // (reported as probing) from a probe that actually failed.
+  private reachable: boolean | undefined
   private closed = false
   private refreshing = false
 
@@ -74,7 +76,9 @@ export class SonosClient {
 
   // Non-blocking: returns the last live-read outcome and refreshes it in the background, so a
   // frequently polled /health neither waits on SSDP nor trusts a never-shrinking device cache.
-  async isReachable(): Promise<boolean> {
+  // `undefined` means no probe has settled yet (only ever right after startup) — the caller
+  // reports that as "probing" rather than as an outage.
+  async isReachable(): Promise<boolean | undefined> {
     void this.refreshReachability()
     return this.reachable
   }

@@ -65,13 +65,16 @@ Notes that apply either way:
   way:
   - **Named volume** (YAML route): inherits writable ownership from the image — works as-is.
   - **ixVolume** (form): created **root-owned**, so no container user can write to it out of the
-    box. In the volume's config, check *Enable ACL* and add an ACL entry for the uid the
-    container runs as (ID Type *User*, ID `1000` — or `568` if you set *Custom User* — with
-    *Modify* access). Equivalent alternative: a one-time
-    `chown -R <uid>:<gid> /mnt/.ix-apps/app_mounts/<app>/<volume>` from the NAS shell, though the
-    ACL lives in the app config and is re-applied on redeploy. (Images released before the
-    entrypoint's write-probe fix refuse ACL-only grants — their writability check read plain mode
-    bits — so on an older image use `chown`.)
+    box. Most robust: a one-time
+    `chown -R <uid>:<gid> /mnt/.ix-apps/app_mounts/<app>/<volume>` from the NAS shell (`1000` by
+    default, `568` if you set *Custom User*) — the ownership persists across app edits, redeploys
+    and updates. The volume's *Enable ACL* option (an entry for that uid with *Modify* access)
+    works too, but with two catches: once the volume contains data, every later app edit fails
+    with `path contains existing data and 'force' was not specified` unless the ACL's *Force
+    Flag* is set — and not every TrueNAS release exposes that flag in the custom-app form; if
+    yours doesn't, drop the ACL and use `chown`. Additionally, images released before the
+    entrypoint's write-probe fix refuse ACL-only grants (their writability check read plain mode
+    bits, which ACLs don't touch).
   - **Host path** on a dataset: `chown` it to whatever uid the container runs as (`1000:1000` by
     default).
 - **Updates:** TrueNAS watches the `latest` digest and shows *Update available* in the Apps
