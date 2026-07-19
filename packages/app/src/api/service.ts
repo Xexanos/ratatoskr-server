@@ -31,9 +31,13 @@ async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
 }
 
 // isReachable() is non-blocking: it reports the last known state and warms up discovery in the
-// background, so this unauthenticated, frequently polled endpoint never waits on SSDP.
+// background, so this unauthenticated, frequently polled endpoint never waits on SSDP. Before
+// the very first probe settles there is no known state yet — report that as probing so a single
+// post-startup health check reads as "come back shortly", not as a Sonos outage.
 async function checkSonos(sonos: SonosClient): Promise<DependencyStatus> {
-  return (await sonos.isReachable()) ? { reachable: true } : { reachable: false, detail: 'Sonos did not respond' }
+  const reachable = await sonos.isReachable()
+  if (reachable === undefined) return { reachable: false, detail: 'probing, retry shortly' }
+  return reachable ? { reachable: true } : { reachable: false, detail: 'Sonos did not respond' }
 }
 
 export interface ApiServiceDeps {

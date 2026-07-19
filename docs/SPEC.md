@@ -492,7 +492,9 @@ Hardening checklist (small items, still binding):
 - Validate and URL-encode client-supplied path parameters (`itemId`) before they enter
   upstream URLs.
 - `/health` stays unauthenticated but reports only coarse reachability — no versions,
-  no URLs.
+  no URLs. The Sonos state is the last background probe's outcome (the endpoint never waits
+  on SSDP); before the first probe settles it reports `detail: "probing, retry shortly"`, so
+  a single post-startup check is distinguishable from an actual Sonos outage.
 - No CORS headers (the API is not for browsers); bearer-token auth means no cookie-based
   CSRF surface.
 - Commit the lockfile; run `npm audit` in CI.

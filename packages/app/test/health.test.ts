@@ -50,6 +50,20 @@ describe('GET /v1/health', () => {
     await app.close()
   })
 
+  it('reports degraded with a probing detail before the first Sonos check settles', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
+    // isReachable() resolves undefined until the first background probe has settled.
+    const app = await appWith({ isReachable: vi.fn().mockResolvedValue(undefined) })
+    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.status).toBe('degraded')
+    expect(body.sonos).toEqual({ reachable: false, detail: 'probing, retry shortly' })
+
+    await app.close()
+  })
+
   it('reports degraded when Sonos is unreachable even though Audiobookshelf is up', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(false) })
