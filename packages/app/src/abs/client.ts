@@ -51,6 +51,15 @@ export interface ProgressUpdate {
   isFinished: boolean
 }
 
+// A cover image proxied from Audiobookshelf: the raw bytes, the upstream content type, and any
+// upstream HTTP caching headers worth passing through to the client (SPEC: rely on ABS's own
+// resized-cover cache rather than caching in Ratatoskr).
+export interface CoverImage {
+  contentType: string
+  body: Buffer
+  cacheHeaders: Record<string, string>
+}
+
 // Client for the Audiobookshelf REST API. Auth (SPEC section 8) proxies login/refresh;
 // the library methods produce the thin projection (SPEC section 2) for /library/*. The
 // optional dispatcher carries the TLS trust settings for ABS (self-signed pin / insecure);
@@ -131,6 +140,47 @@ export class AbsClient {
       this.getProgress(token, itemId),
     ])
     return toLibraryItem(item, progress)
+  }
+
+  // Proxy the item's cover image from ABS (GET /api/items/{id}/cover). Forwarding the caller's token
+  // both fetches the image and proves the token is valid (SPEC section 8: validity is proven by the
+  // upstream ABS call), which is why this route can declare 401/404 like the other library calls.
+  // `height` maps to ABS's own `height` cover-resize param, so scaling and the resized-variant cache
+  // both live upstream. Unlike getJson/handle the body is binary, so this parses no JSON: it returns
+  // the raw bytes, the upstream content type, and the cache headers worth passing through.
+  async getItemCover(token: string, itemId: string, height: number | undefined): Promise<CoverImage> {
+    const query = height !== undefined ? `?height=${encodeURIComponent(String(height))}` : ''
+    let res: Response
+    try {
+      res = await fetch(`${this.baseUrl}/api/items/${encodeURIComponent(itemId)}/cover${query}`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        ...this.dispatcherOption(),
+      })
+    } catch {
+      throw new AbsUpstreamError('Audiobookshelf did not respond')
+    }
+    if (res.status === 401) {
+      await res.body?.cancel()
+      throw new AbsAuthError()
+    }
+    if (res.status === 404) {
+      await res.body?.cancel()
+      throw new AbsNotFoundError()
+    }
+    if (!res.ok) {
+      await res.body?.cancel()
+      throw new AbsUpstreamError(`Audiobookshelf returned status ${res.status}`)
+    }
+    const body = Buffer.from(await res.arrayBuffer())
+    // ABS always sets a concrete image content type; fall back to a sensible image default just in case.
+    const contentType = res.headers.get('content-type') ?? 'image/jpeg'
+    const cacheHeaders: Record<string, string> = {}
+    for (const name of ['cache-control', 'etag', 'last-modified']) {
+      const value = res.headers.get(name)
+      if (value !== null) cacheHeaders[name] = value
+    }
+    return { contentType, body, cacheHeaders }
   }
 
   async getProgress(token: string, itemId: string): Promise<Progress> {
@@ -353,14 +403,23 @@ interface AbsItem {
   media?: { duration?: unknown; metadata?: { title?: unknown; authorName?: unknown; narratorName?: unknown; description?: unknown } }
 }
 
+// The cover image is served by Ratatoskr's own cover-proxy route (getItemCover), so coverUrl points
+// there rather than at ABS. A path relative to the server origin (it already includes the /v1 mount
+// prefix): the client resolves it against the same base it is already talking to, and it needs no
+// request context, so it can be built here in the pure projection.
+function coverPathFor(id: string): string {
+  return `/v1/library/items/${encodeURIComponent(id)}/cover`
+}
+
 function toSummary(raw: unknown): LibraryItemSummary {
   const item = (raw ?? {}) as AbsItem
   const meta = item.media?.metadata ?? {}
+  const id = String(item.id)
   return {
-    id: String(item.id),
+    id,
     title: typeof meta.title === 'string' ? meta.title : '(unknown title)',
     durationSeconds: typeof item.media?.duration === 'number' && item.media.duration >= 0 ? item.media.duration : 0,
-    coverUrl: null, // v1: no cover route in the contract yet (SPEC section 14 open point)
+    coverUrl: coverPathFor(id),
     ...(typeof meta.authorName === 'string' ? { author: meta.authorName } : {}),
   }
 }

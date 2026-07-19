@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 1.3.0
+  version: 1.3.1
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -460,7 +460,10 @@ components:
         coverUrl:
           type: string
           nullable: true
-          description: Absolute URL served by Ratatoskr; may require the token.
+          description: >-
+            Path to the item's cover image on this API (the cover-proxy route, e.g.
+            /v1/library/items/{id}/cover), relative to the server origin the client is already
+            talking to; requires the bearer token. Null when no cover is available.
         progress:
           $ref: "#/components/schemas/Progress"
 
