@@ -139,6 +139,11 @@ must build on:
   optional ones; introduce breaking changes only under a new major version and path.
 - A CI job runs oasdiff against the previous tagged contract and fails the build on an
   unflagged breaking change.
+- Any operation whose request is validated — a bounded or typed query param, a required body, a
+  path param — must declare `400: BadRequest` in the contract. Fastify rejects an invalid request
+  with a 400 before the handler runs (mapped to the contract's error shape, section 12), so an
+  endpoint that omits it documents a response it does not actually have. This has been a recurring
+  omission on new endpoints: whenever a parameter carries constraints, add the `400`.
 
 ## 7. Configuration
 
