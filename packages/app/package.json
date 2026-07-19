@@ -16,7 +16,7 @@
     "@ratatoskr/contract": "workspace:*",
     "@ratatoskr/position": "workspace:*",
     "@svrooij/sonos": "^2.5.0",
-    "fast-xml-parser": "^5.9.3",
+    "fast-xml-parser": "^5.10.0",
     "fastify": "^5.10.0",
     "fastify-openapi-glue": "^4.11.3",
     "undici": "^8.7.0"
