@@ -58,13 +58,11 @@ export interface ProgressUpdate {
   isFinished: boolean
 }
 
-// A cover image proxied from Audiobookshelf: the raw bytes, the upstream content type, and any
-// upstream HTTP caching headers worth passing through to the client (SPEC: rely on ABS's own
-// resized-cover cache rather than caching in Ratatoskr).
+// A cover image proxied from Audiobookshelf: the raw bytes and the upstream content type
+// (SPEC: rely on ABS's own resized-cover cache rather than caching in Ratatoskr).
 export interface CoverImage {
   contentType: string
   body: Buffer
-  cacheHeaders: Record<string, string>
 }
 
 // Client for the Audiobookshelf REST API. Auth (SPEC section 8) proxies login/refresh;
@@ -154,7 +152,10 @@ export class AbsClient {
   // upstream ABS call), which is why this route can declare 401/404 like the other library calls.
   // `height` maps to ABS's own `height` cover-resize param, so scaling and the resized-variant cache
   // both live upstream. Unlike getJson/handle the body is binary, so this parses no JSON: it returns
-  // the raw bytes, the upstream content type, and the cache headers worth passing through.
+  // the raw bytes and the upstream content type. Deliberately no cache-header forwarding (issue
+  // #100): ABS sends none on this path (its CacheManager sets only Content-Type unless the request
+  // carries the ABS web client's `?ts=` cache buster, which this proxy never sends), and the only
+  // client caches independently of HTTP headers — do not "fix" the forwarding back in.
   async getItemCover(token: string, itemId: string, height: number | undefined): Promise<CoverImage> {
     const query = height !== undefined ? `?height=${encodeURIComponent(String(height))}` : ''
     let res: Response
@@ -182,12 +183,7 @@ export class AbsClient {
     const body = Buffer.from(await res.arrayBuffer())
     // ABS always sets a concrete image content type; fall back to a sensible image default just in case.
     const contentType = res.headers.get('content-type') ?? 'image/jpeg'
-    const cacheHeaders: Record<string, string> = {}
-    for (const name of ['cache-control', 'etag', 'last-modified']) {
-      const value = res.headers.get(name)
-      if (value !== null) cacheHeaders[name] = value
-    }
-    return { contentType, body, cacheHeaders }
+    return { contentType, body }
   }
 
   // The continue-listening shelf (SPEC section 2): books the user has started but not finished,
