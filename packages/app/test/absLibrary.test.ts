@@ -27,7 +27,11 @@ function stubRoutes(routes: { match: string; body?: unknown; status?: number }[]
 const absBook = (id: string, title: string, author: string, duration: number) => ({
   id,
   mediaType: 'book',
-  media: { duration, metadata: { title, authorName: author, narratorName: 'Nar', description: 'Desc' } },
+  media: {
+    duration,
+    coverPath: `/metadata/items/${id}/cover.jpg`,
+    metadata: { title, authorName: author, narratorName: 'Nar', description: 'Desc' },
+  },
 })
 
 const TWO_BOOK_LIBS = {
@@ -104,6 +108,18 @@ describe('AbsClient library projection', () => {
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 1, page: 0 })
     })
 
+    it('projects coverUrl as null when Audiobookshelf reports no cover for the item', async () => {
+      // ABS signals "has a cover" via media.coverPath (null/absent when there is none). The contract
+      // promises coverUrl null in that case, so clients never chase a guaranteed 404.
+      const coverless = { id: 'li_nc', mediaType: 'book', media: { duration: 5, coverPath: null, metadata: { title: 'Bare' } } }
+      stubRoutes([
+        TWO_BOOK_LIBS,
+        { match: '/api/libraries/lib1/items', body: { results: [coverless], total: 1 } },
+      ])
+      const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
+      expect(page.items[0]?.coverUrl).toBeNull()
+    })
+
     it('returns an empty page when the cursor points past the last library', async () => {
       stubRoutes([TWO_BOOK_LIBS])
       const cursor = Buffer.from(JSON.stringify({ libraryIndex: 5, page: 0 }), 'utf8').toString('base64url')
@@ -154,7 +170,7 @@ describe('AbsClient library projection', () => {
         id: 'li_min',
         title: '(unknown title)',
         durationSeconds: 0,
-        coverUrl: '/v1/library/items/li_min/cover',
+        coverUrl: null, // no media at all implies no cover art either
         progress: { positionSeconds: 0, isFinished: false },
       })
       expect(item).not.toHaveProperty('author')
