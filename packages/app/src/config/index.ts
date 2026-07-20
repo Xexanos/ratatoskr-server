@@ -13,16 +13,10 @@ export interface Config {
   // most read/stream of the library, never account takeover. Long-lived (no expiry to manage), which
   // is why the media path uses this rather than the listening user's or a short-lived token.
   absStreamerApiKey: string
-  // Per-request cap (ms) on Audiobookshelf HTTP calls. ABS is a network dependency that can hang
-  // (down / slow / packet-dropping host), so bound each request: a dead ABS then surfaces as a
-  // prompt 502 upstream error rather than a stalled request. Kept comfortably under a typical
-  // client read timeout so the client sees the server's mapped error, not its own timeout.
+  // Per-request cap (ms) on Audiobookshelf HTTP calls — rationale on AbsClient's requestTimeoutMs.
   absRequestTimeoutMs: number
   sonosSeedHost: string | undefined
-  // Per-request cap (ms) on Sonos SOAP/discovery I/O. node-sonos-ts sets no timeout, so a speaker
-  // that vanishes mid-session (powered off / off the network) would otherwise hang the live reads
-  // — and with them GET /v1/sessions/current — indefinitely (SPEC §4). This bounds each call so a
-  // dead speaker surfaces as a prompt SonosUpstreamError → 502 instead of a hung request.
+  // Per-request cap (ms) on Sonos SOAP/discovery I/O — rationale on SonosClient's requestTimeoutMs.
   sonosRequestTimeoutMs: number
   port: number
   pollIntervalSeconds: number
@@ -115,9 +109,9 @@ class EnvReader {
     return this.env[name] === 'true'
   }
 
-  // ABS_URL must be HTTPS so per-user credentials and tokens (and the phase-4 streamer login)
-  // do not cross the network in cleartext (SPEC section 14). Plain HTTP requires an explicit
-  // opt-out, mirroring ALLOW_PLAIN_HTTP for Ratatoskr's own listener.
+  // ABS_URL must be HTTPS so per-user credentials and tokens do not cross the network in
+  // cleartext (SPEC section 14). Plain HTTP requires an explicit opt-out, mirroring
+  // ALLOW_PLAIN_HTTP for Ratatoskr's own listener.
   absUrl(): string {
     const value = this.url('ABS_URL')
     if (value.startsWith('http://') && this.env.ABS_ALLOW_PLAIN_HTTP !== 'true') {

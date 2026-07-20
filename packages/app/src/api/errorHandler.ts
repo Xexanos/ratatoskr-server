@@ -5,9 +5,8 @@ import { NoActiveSessionError } from '../playback/errors.js'
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
 
-// Thrown for contract operations that openapi-glue registers but we have not implemented yet
-// (the /sessions/* playback ops arrive in phase 4). Mapped to 404 not_found, which the contract
-// declares for all of those operations — instead of glue's default 500.
+// Thrown for contract operations that openapi-glue registers but ApiService does not implement.
+// Mapped to 404 not_found (which the contract declares) instead of glue's default 500.
 export class NotImplementedError extends Error {
   constructor() {
     super('This operation is not implemented yet')
@@ -34,8 +33,7 @@ function isGlueSecurityError(error: unknown): error is { statusCode: number; err
 }
 
 // Maps any thrown value to the contract's Error shape ({ code, message }) plus a status code.
-// Central so every route shares one mapping — this used to be duplicated across the per-route
-// reply helpers (absErrorReply/libraryErrorReply/speakerErrorReply).
+// Central so every route shares one mapping.
 export function mapError(error: unknown): MappedError {
   if (isGlueSecurityError(error)) {
     return mapError(error.errors[0] ?? new MissingBearerError())

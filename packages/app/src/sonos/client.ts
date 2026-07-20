@@ -24,9 +24,8 @@ const DISCOVERY_TIMEOUT_SECONDS = 5
 // Lets tests inject a fake manager; production uses a real node-sonos-ts manager.
 export type SonosManagerFactory = () => SonosManager
 
-// Controls Sonos over the LAN via node-sonos-ts (SPEC section 3). Phase 3b is just the
-// discovery/topology slice behind /speakers and /health; playback lands in phase 4 on the same
-// (kept) manager. Every read hits the live zone topology (GetZoneGroupState, a unicast request)
+// Controls Sonos over the LAN via node-sonos-ts (SPEC section 3).
+// Every read hits the live zone topology (GetZoneGroupState, a unicast request)
 // rather than the manager's cached `.Devices`, which only stays current via a UPnP event
 // subscription a bridged Docker network can't deliver; a failed read drops the manager so the
 // next call re-discovers, and reachability tracks the last live read rather than the cache.

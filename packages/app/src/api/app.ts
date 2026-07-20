@@ -30,12 +30,10 @@ function loggerOptions() {
   return { serializers: { req: redactedReqSerializer } }
 }
 
+// Tests inject fakes for any of these; each defaults to a real one built from config.
 export interface BuildAppOptions {
-  // Inject a fake Audiobookshelf client in tests. Defaults to a real one built from config.
   absClient?: AbsClient
-  // Inject a fake Sonos client in tests. Defaults to a real one built from config.
   sonosClient?: SonosClient
-  // Inject a fake session manager in tests. Defaults to one built from abs/sonos/config.
   sessionManager?: SessionManager
 }
 
@@ -99,8 +97,8 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   await app.register(openapiGlue, {
     specification: openapiDocument,
     // glue registers every contract path. Resolve each operationId to its ApiService method;
-    // operations without one (the phase-4 /sessions/* ops) get a stub that throws
-    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500.
+    // operations without one get a stub that throws NotImplementedError → 404, rather than
+    // glue's default notImplemented stub → 500.
     operationResolver: (operationId) => {
       const method = methods[operationId]
       return typeof method === 'function'

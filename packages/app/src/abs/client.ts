@@ -427,7 +427,11 @@ export class AbsClient {
 
 interface AbsItem {
   id?: unknown
-  media?: { duration?: unknown; metadata?: { title?: unknown; authorName?: unknown; narratorName?: unknown; description?: unknown } }
+  media?: {
+    duration?: unknown
+    coverPath?: unknown
+    metadata?: { title?: unknown; authorName?: unknown; narratorName?: unknown; description?: unknown }
+  }
 }
 
 // The cover image is served by Ratatoskr's own cover-proxy route (getItemCover), so coverUrl points
@@ -443,11 +447,15 @@ function toSummary(raw: unknown): LibraryItemSummary {
   const item = (raw ?? {}) as AbsItem
   const meta = item.media?.metadata ?? {}
   const id = String(item.id)
+  // ABS signals cover presence via media.coverPath (null when the item has no cover art). The
+  // contract promises coverUrl null in that case — pointing at the proxy route anyway would hand
+  // clients a guaranteed 404 they re-fetch on every scroll.
+  const hasCover = typeof item.media?.coverPath === 'string' && item.media.coverPath !== ''
   return {
     id,
     title: typeof meta.title === 'string' ? meta.title : '(unknown title)',
     durationSeconds: typeof item.media?.duration === 'number' && item.media.duration >= 0 ? item.media.duration : 0,
-    coverUrl: coverPathFor(id),
+    coverUrl: hasCover ? coverPathFor(id) : null,
     ...(typeof meta.authorName === 'string' ? { author: meta.authorName } : {}),
   }
 }
