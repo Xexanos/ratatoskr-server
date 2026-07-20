@@ -109,8 +109,6 @@ describe('AbsClient library projection', () => {
     })
 
     it('projects coverUrl as null when Audiobookshelf reports no cover for the item', async () => {
-      // ABS signals "has a cover" via media.coverPath (null/absent when there is none). The contract
-      // promises coverUrl null in that case, so clients never chase a guaranteed 404.
       const coverless = { id: 'li_nc', mediaType: 'book', media: { duration: 5, coverPath: null, metadata: { title: 'Bare' } } }
       stubRoutes([
         TWO_BOOK_LIBS,

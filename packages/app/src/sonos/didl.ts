@@ -44,7 +44,6 @@ export function buildTrackMetadata(track: DidlTrack): string {
         '@_id': '-1',
         '@_parentID': '-1',
         '@_restricted': 'true',
-        // res@duration gives the app the track length (progress bar); Sonos reports it as 0 (SPEC §4).
         res: {
           '@_protocolInfo': `http-get:*:${track.mimeType}:*`,
           '@_duration': secondsToHms(track.durationSeconds),

@@ -449,7 +449,7 @@ function toSummary(raw: unknown): LibraryItemSummary {
   const id = String(item.id)
   // ABS signals cover presence via media.coverPath (null when the item has no cover art). The
   // contract promises coverUrl null in that case — pointing at the proxy route anyway would hand
-  // clients a guaranteed 404 they re-fetch on every scroll (issue #98).
+  // clients a guaranteed 404 they re-fetch on every scroll.
   const hasCover = typeof item.media?.coverPath === 'string' && item.media.coverPath !== ''
   return {
     id,

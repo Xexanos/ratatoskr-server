@@ -229,9 +229,8 @@ export class FakeSonos {
 
   private setAvTransportUri(body: string): string {
     const uri = param(body, 'CurrentURI') ?? ''
-    // Same quirk as addUriToQueue (see hasDidlMime): pointing the transport straight at a bare
-    // http(s) URL without DIDL-Lite is answered with UPnP 714 by real Sonos — a server regression
-    // that skips the queue must fail here too. Rincon schemes (x-rincon-queue:<uuid>#0)
+    // Same quirk as on enqueue (see hasDidlMime), so a server regression that points the transport
+    // straight at a bare http(s) URL fails here too. Rincon schemes (x-rincon-queue:<uuid>#0)
     // legitimately travel without metadata.
     const metadata = unesc(param(body, 'CurrentURIMetaData') ?? '')
     if (/^https?:\/\//i.test(uri) && !hasDidlMime(metadata)) {
@@ -245,8 +244,6 @@ export class FakeSonos {
     const uri = param(body, 'EnqueuedURI') ?? ''
     const rawMeta = param(body, 'EnqueuedURIMetaData') ?? ''
     const metadata = unesc(rawMeta)
-    // SPEC §4 quirk (see hasDidlMime): a bare URL with no DIDL-Lite carrying the mime is illegal —
-    // real Sonos answers UPnP 714.
     if (!hasDidlMime(metadata)) {
       throw new Error('illegal mime-type (missing DIDL-Lite)')
     }

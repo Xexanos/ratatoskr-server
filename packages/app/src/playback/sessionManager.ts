@@ -39,7 +39,7 @@ interface ActiveSession {
 }
 
 // Owns the one in-memory session and drives ABS + Sonos to start / report / stop playback
-// (SPEC sections 4 and 5). The sync loop and pause/resume/seek live in a later slice.
+// (SPEC sections 4 and 5).
 export class SessionManager {
   private session: ActiveSession | undefined
   // Fastify serves requests concurrently, and the operations below interleave `await`s around the
@@ -231,8 +231,8 @@ export class SessionManager {
 
   // Write the given payload (best-effort), cancel the sync loop, stop the speaker, and clear the
   // session. Shared by stop(), the replace path in start(), and the loop's end/device-stop handling.
-  // A failed write (e.g. the ~1h listening token expiring mid-book — renewal via the stored
-  // refreshToken lands with the rotation slice) must not block the teardown.
+  // A failed write (e.g. an expired listening token that could not be renewed) must not block the
+  // teardown.
   private async finalize(session: ActiveSession, write: ProgressUpdate | undefined): Promise<void> {
     this.stopLoop()
     if (write !== undefined) {
@@ -248,8 +248,8 @@ export class SessionManager {
       // best effort — the session is ending regardless
     }
     this.session = undefined
-    // The listening user's tokens are discarded on stop (SPEC section 8); a pair still pending here
-    // was already handed back in stop()'s final Session (or is lost on shutdown, by design).
+    // A pair still pending here was already handed back in stop()'s final Session (or is lost on
+    // shutdown, by design).
     this.pendingRotatedTokens = undefined
     this.preRotationToken = undefined
   }
@@ -270,9 +270,7 @@ export class SessionManager {
   }
 
   private async tick(generation: number): Promise<void> {
-    // A tick from a superseded loop (its timer fired just before a replace-start()/stop) must not
-    // run or reschedule — otherwise it would spawn a second, orphaned poll chain.
-    if (generation !== this.loopGeneration) return
+    if (generation !== this.loopGeneration) return // superseded loop — see loopGeneration
     await this.serialize(() => this.syncOnce()).catch(() => undefined)
     // Reschedule only while this is still the current loop and a session is active (syncOnce may
     // have finalized it).
@@ -320,7 +318,7 @@ export class SessionManager {
   }
 
   // Does the coordinator's reported TrackURI belong to this session's queue? Compared without the
-  // query string so a re-issued media URL (streamer token refreshed in a later slice) still matches;
+  // query string so a re-issued media URL (same file, different streamer token) still matches;
   // an empty URI (cleared queue) is never ours.
   private isOurTrack(session: ActiveSession, trackUri: string): boolean {
     if (trackUri === '') return false
