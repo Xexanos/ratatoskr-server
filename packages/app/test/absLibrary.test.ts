@@ -235,8 +235,10 @@ describe('AbsClient library projection', () => {
       return fetchMock
     }
 
-    it('returns the bytes, content type and pass-through cache headers, forwarding the token and height', async () => {
+    it('returns the bytes and content type, ignoring upstream cache headers, forwarding the token and height', async () => {
       const bytes = Uint8Array.from([1, 2, 3, 4])
+      // Even if ABS ever sent cache headers on this path (today it does not), they are
+      // deliberately not part of the CoverImage — the proxy owns its own contract.
       const fetchMock = stubCover(
         new Response(bytes, {
           status: 200,
@@ -245,7 +247,6 @@ describe('AbsClient library projection', () => {
             'cache-control': 'private, max-age=3600',
             etag: '"abc"',
             'last-modified': 'Wed, 21 Oct 2026 07:28:00 GMT',
-            'x-ignored': 'nope',
           },
         }),
       )
@@ -254,11 +255,7 @@ describe('AbsClient library projection', () => {
       expect(cover.contentType).toBe('image/png')
       expect(cover.body).toBeInstanceOf(Buffer)
       expect(Uint8Array.from(cover.body)).toEqual(bytes)
-      expect(cover.cacheHeaders).toEqual({
-        'cache-control': 'private, max-age=3600',
-        etag: '"abc"',
-        'last-modified': 'Wed, 21 Oct 2026 07:28:00 GMT',
-      })
+      expect(cover).not.toHaveProperty('cacheHeaders')
       const url = fetchMock.mock.calls[0][0] as string
       expect(url).toBe(`${BASE}/api/items/li_1/cover?height=240`)
       const init = fetchMock.mock.calls[0][1] as RequestInit
@@ -271,7 +268,6 @@ describe('AbsClient library projection', () => {
 
       expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/items/li_1/cover`)
       expect(cover.contentType).toBe('image/jpeg')
-      expect(cover.cacheHeaders).toEqual({})
     })
 
     it('maps a missing cover to AbsNotFoundError', async () => {

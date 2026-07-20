@@ -111,25 +111,25 @@ describe('GET /v1/library/items/:itemId/cover', () => {
 
   const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47])
 
-  it('serves the proxied bytes with the upstream content type and cache headers', async () => {
-    const getItemCover = vi.fn().mockResolvedValue({
-      contentType: 'image/png',
-      body: PNG,
-      cacheHeaders: { 'cache-control': 'private, max-age=3600' },
-    })
+  it('serves the proxied bytes with the upstream content type and no cache headers', async () => {
+    const getItemCover = vi.fn().mockResolvedValue({ contentType: 'image/png', body: PNG })
     const app = await appWith({ getItemCover })
     const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1/cover?h=240', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-type']).toContain('image/png')
-    expect(res.headers['cache-control']).toBe('private, max-age=3600')
+    // Deliberately no caching guidance (issue #100): ABS sends no cache headers on this
+    // path, and the only client caches independently of them.
+    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.headers.etag).toBeUndefined()
+    expect(res.headers['last-modified']).toBeUndefined()
     expect(res.rawPayload).toEqual(PNG)
     expect(getItemCover).toHaveBeenCalledWith('user-token', 'li_1', 240)
     await app.close()
   })
 
   it('forwards no height when h is omitted', async () => {
-    const getItemCover = vi.fn().mockResolvedValue({ contentType: 'image/jpeg', body: PNG, cacheHeaders: {} })
+    const getItemCover = vi.fn().mockResolvedValue({ contentType: 'image/jpeg', body: PNG })
     const app = await appWith({ getItemCover })
     const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1/cover', headers: AUTH })
 
