@@ -219,12 +219,15 @@ to the person who is actually listening.
   view and playback progress are scoped to that user.
 - Access tokens are short-lived; clients exchange the refresh token for a new pair via
   `POST /v1/auth/refresh`. Both auth endpoints proxy to Audiobookshelf.
-- All endpoints require a valid token except `/health`, `/auth/login`, and `/auth/refresh`.
-  Validity is proven by the upstream Audiobookshelf call each endpoint makes with the token.
-  `GET /speakers` is the one exception: Sonos discovery is local, so nothing is forwarded to
-  ABS and the bearer token is checked for **presence only**. This is deliberate — a device on
-  the same LAN can already enumerate the Sonos topology directly via SSDP/UPnP (section 14) — so
-  it leaks nothing new; real per-request validation for it arrives with playback in phase 4.
+- All endpoints require a valid token except `/health`, `/auth/login`, `/auth/refresh`, and
+  `GET /speakers`. Validity is proven by the upstream Audiobookshelf call each endpoint makes
+  with the token.
+  `GET /speakers` is deliberately unauthenticated (contract 1.4.0): Sonos discovery is local,
+  nothing is forwarded to ABS, and a device on the same LAN can already enumerate the Sonos
+  topology directly via SSDP/UPnP (section 14) — a token requirement would gate nothing. The
+  speaker list carries only ids, names, and group membership; the id is only usable through
+  the authenticated playback endpoints. (An earlier revision checked the bearer for presence
+  and promised full validation later — superseded by this decision, on the same rationale.)
 - The listening user's token is used for Audiobookshelf **API** calls only. The media URLs
   handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).

@@ -27,14 +27,15 @@ describe('GET /v1/speakers', () => {
     await app.close()
   })
 
-  it('rejects a request with no bearer token as 401', async () => {
-    const listSpeakers = vi.fn()
+  // Deliberately unauthenticated (contract 1.4.0, SPEC section 8): any LAN device can already
+  // enumerate the Sonos topology via SSDP/UPnP, so gating the list adds nothing.
+  it('serves the speakers without any bearer token', async () => {
+    const listSpeakers = vi.fn().mockResolvedValue(SPEAKERS)
     const app = await appWith({ listSpeakers })
     const res = await app.inject({ method: 'GET', url: '/v1/speakers' })
 
-    expect(res.statusCode).toBe(401)
-    expect(res.json().code).toBe('unauthorized')
-    expect(listSpeakers).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual(SPEAKERS)
     await app.close()
   })
 
