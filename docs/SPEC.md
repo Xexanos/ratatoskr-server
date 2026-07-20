@@ -503,9 +503,11 @@ Decisions (binding for the implementation):
   upstream errors before they reach responses or logs. (Also note: ABS and any proxy in
   between will log media-URL query strings — one more reason those URLs carry only the
   streamer API key.)
-- **Rate-limit the unauthenticated endpoints.** `/auth/login` and `/auth/refresh` get a
+- **Rate-limit the credential endpoints.** `/auth/login` and `/auth/refresh` get a
   conservative per-IP rate limit so Ratatoskr is not a free brute-force funnel in front
-  of ABS.
+  of ABS. The other unauthenticated endpoints (`/health`, `GET /speakers`) take no
+  credentials and stay unlimited — they serve cached local state and are polled
+  legitimately.
 
 Hardening checklist (small items, still binding):
 
