@@ -12,6 +12,7 @@ import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
 import { securityHandlers } from './security.js'
 import { ApiService } from './service.js'
+import { createTokenGuard } from './tokenGuard.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -94,6 +95,11 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
   const service = new ApiService({ abs, sonos, sessions })
   const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
+  // Every bearer-protected operation proves the caller's token against ABS before acting —
+  // either its handler forwards the token itself (self-validating), or the guard runs
+  // validateToken first. Derived from the contract, so a new operation is guarded by default;
+  // throws at startup on a stale exemption (tokenGuard.ts).
+  const guardOperation = createTokenGuard(openapiDocument, (token) => abs.validateToken(token))
   await app.register(openapiGlue, {
     specification: openapiDocument,
     // glue registers every contract path. Resolve each operationId to its ApiService method;
@@ -102,7 +108,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     operationResolver: (operationId) => {
       const method = methods[operationId]
       return typeof method === 'function'
-        ? method.bind(service)
+        ? guardOperation(operationId, method.bind(service))
         : () => {
             throw new NotImplementedError()
           }

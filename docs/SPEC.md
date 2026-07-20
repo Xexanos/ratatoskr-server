@@ -220,8 +220,12 @@ to the person who is actually listening.
 - Access tokens are short-lived; clients exchange the refresh token for a new pair via
   `POST /v1/auth/refresh`. Both auth endpoints proxy to Audiobookshelf.
 - All endpoints require a valid token except `/health`, `/auth/login`, `/auth/refresh`, and
-  `GET /speakers`. Validity is proven by the upstream Audiobookshelf call each endpoint makes
-  with the token.
+  `GET /speakers`. Validity is proven against Audiobookshelf in one of two ways: an operation
+  whose handler forwards the caller's token upstream as part of its real work is
+  **self-validating** (an invalid token 401s there); every other bearer-protected operation is
+  run through the **token guard**, which proves the token via a cheap authenticated ABS call
+  before dispatch. The guard derives the protected set from the contract, so a new operation
+  is guarded by default and cannot silently skip validation.
   `GET /speakers` is deliberately unauthenticated (contract 1.4.0): Sonos discovery is local,
   nothing is forwarded to ABS, and a device on the same LAN can already enumerate the Sonos
   topology directly via SSDP/UPnP (section 14) — a token requirement would gate nothing. The

@@ -124,12 +124,11 @@ export class ApiService {
 
   // --- Playback (SPEC sections 4 and 5) ---
 
-  // getCurrentSession/stopSession never forward the caller's token to ABS on their own, so validate
-  // it upstream first — otherwise the presence-only bearer check would let any non-empty bearer read
-  // or stop the session on the untrusted LAN (SPEC section 14). startSession needs no explicit check:
-  // it already presents the token to ABS via getPlaybackManifest, which 401s an invalid one.
+  // The session methods never forward the caller's token to ABS on their own (they act on the
+  // session's stored listening token), so the token guard validates it upstream before dispatch —
+  // see tokenGuard.ts. startSession is the exception (self-validating): it presents the token to
+  // ABS via getPlaybackManifest, which 401s an invalid one.
   async getCurrentSession(request: FastifyRequest): Promise<Session> {
-    await this.abs.validateToken(request.absToken as string)
     return this.sessions.current(request.absToken as string)
   }
 
@@ -142,27 +141,23 @@ export class ApiService {
   // client can adopt it (SPEC section 8) — stop discards the in-memory tokens, so this is the last
   // chance to deliver the pair.
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    await this.abs.validateToken(request.absToken as string)
     const final = await this.sessions.stop(request.absToken as string)
     if (final !== undefined) await reply.code(200).send(final)
     else await reply.code(204).send()
   }
 
-  // pause/resume/seek validate the bearer upstream first (like getCurrentSession/stopSession), then
-  // command Sonos and write the reached position back to ABS (SPEC section 5). The caller's token is
-  // forwarded so an adopted rotated pair stops being redelivered (SPEC section 8).
+  // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).
+  // The caller's token is forwarded so an adopted rotated pair stops being redelivered (SPEC
+  // section 8).
   async pauseSession(request: FastifyRequest): Promise<Session> {
-    await this.abs.validateToken(request.absToken as string)
     return this.sessions.pause(request.absToken as string)
   }
 
   async resumeSession(request: FastifyRequest): Promise<Session> {
-    await this.abs.validateToken(request.absToken as string)
     return this.sessions.resume(request.absToken as string)
   }
 
   async seekSession(request: FastifyRequest): Promise<Session> {
-    await this.abs.validateToken(request.absToken as string)
     const { positionSeconds } = request.body as SeekRequest
     return this.sessions.seek(request.absToken as string, positionSeconds)
   }
