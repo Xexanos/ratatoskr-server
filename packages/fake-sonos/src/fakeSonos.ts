@@ -6,8 +6,9 @@ import { hmsToSeconds, secondsToHms } from './time.js'
 // a REAL HTTP server that @svrooij/sonos talks to via InitializeFromDevice(host, port) — point the
 // SonosClient at it with SONOS_SEED_HOST=host:port and set SONOS_DISABLE_EVENTS=1 so the library
 // skips UPnP eventing (the double implements only the control SOAP, not eventing). It reproduces
-// the SPEC §4 quirks: DIDL-Lite metadata is REQUIRED to enqueue (a bare URL is rejected like the
-// real 714), TrackDuration is always 0:00:00, and RelTime is the authoritative elapsed position.
+// the SPEC §4 quirks: DIDL-Lite metadata is REQUIRED on enqueue AND on an http(s) transport URI
+// (a bare URL is rejected like the real 714), TrackDuration is always 0:00:00, and RelTime is the
+// authoritative elapsed position.
 //
 // One behavioral definition, consumed two ways: imported in-process by the server's tests, and
 // run standalone (main.ts) inside the container image the central E2E repo consumes — so the
@@ -49,6 +50,14 @@ function unesc(value: string): string {
 function param(body: string, name: string): string | undefined {
   const match = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(body)
   return match ? match[1] : undefined
+}
+
+// SPEC §4 quirk shared by enqueue and transport-URI: DIDL-Lite must carry the mime via a
+// <res protocolInfo="http-get:*:<mime>:*"> resource, else real Sonos answers UPnP 714. (Real
+// hardware would sniff a file extension as a fallback, but ABS raw-file URLs never carry one, so
+// the double is deliberately stricter: no valid DIDL means 714, full stop.)
+function hasDidlMime(metadata: string): boolean {
+  return /protocolInfo="http-get:\*:[^"]+:\*"/.test(metadata)
 }
 
 export interface FakeSonosOptions {
@@ -187,8 +196,7 @@ export class FakeSonos {
       case 'AddURIToQueue':
         return this.addUriToQueue(body)
       case 'SetAVTransportURI':
-        this.transportUri = param(body, 'CurrentURI') ?? ''
-        return soap(`<u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
+        return this.setAvTransportUri(body)
       case 'Play':
         if (this.advanceWhilePlaying) this.playStartedAt = Date.now()
         this.transportState = 'PLAYING'
@@ -219,13 +227,27 @@ export class FakeSonos {
     }
   }
 
+  private setAvTransportUri(body: string): string {
+    const uri = param(body, 'CurrentURI') ?? ''
+    // Same quirk as addUriToQueue (see hasDidlMime): pointing the transport straight at a bare
+    // http(s) URL without DIDL-Lite is answered with UPnP 714 by real Sonos — a server regression
+    // that skips the queue must fail here too. Rincon schemes (x-rincon-queue:<uuid>#0)
+    // legitimately travel without metadata.
+    const metadata = unesc(param(body, 'CurrentURIMetaData') ?? '')
+    if (/^https?:\/\//i.test(uri) && !hasDidlMime(metadata)) {
+      throw new Error('illegal mime-type (bare http transport URI without DIDL-Lite)')
+    }
+    this.transportUri = uri
+    return soap(`<u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/>`)
+  }
+
   private addUriToQueue(body: string): string {
     const uri = param(body, 'EnqueuedURI') ?? ''
     const rawMeta = param(body, 'EnqueuedURIMetaData') ?? ''
     const metadata = unesc(rawMeta)
-    // SPEC §4 quirk: a bare URL (no DIDL-Lite carrying the mime) is illegal — real Sonos answers
-    // UPnP 714. Reject anything without a <res protocolInfo="http-get:*:<mime>:*"> resource.
-    if (!/protocolInfo="http-get:\*:[^"]+:\*"/.test(metadata)) {
+    // SPEC §4 quirk (see hasDidlMime): a bare URL with no DIDL-Lite carrying the mime is illegal —
+    // real Sonos answers UPnP 714.
+    if (!hasDidlMime(metadata)) {
       throw new Error('illegal mime-type (missing DIDL-Lite)')
     }
     this.queue.push({ uri, metadata })

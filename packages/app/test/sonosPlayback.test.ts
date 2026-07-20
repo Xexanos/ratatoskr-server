@@ -137,6 +137,28 @@ describe('SonosClient playback against the fake Sonos', () => {
     expect(res.status).toBe(500)
     expect(await res.text()).toContain('714')
   })
+
+  it('the double rejects a bare http transport URI without DIDL metadata (documents the 714 quirk)', async () => {
+    // A regression that skips the queue and points the transport straight at the track URL
+    // (instead of x-rincon-queue + enqueued DIDL) passes a lenient double but fails on real
+    // Sonos with UPnP 714 — the double must reject it the same way so E2E catches it.
+    const res = await fetch(`http://127.0.0.1:${port}/MediaRenderer/AVTransport/Control`, {
+      method: 'POST',
+      headers: {
+        SOAPAction: '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"',
+        'content-type': 'text/xml; charset=utf8',
+      },
+      body:
+        '<s:Envelope><s:Body><u:SetAVTransportURI>' +
+        '<CurrentURI>http://abs/api/items/li_1/file/10?token=s</CurrentURI>' +
+        '<CurrentURIMetaData></CurrentURIMetaData>' +
+        '</u:SetAVTransportURI></s:Body></s:Envelope>',
+    })
+    expect(res.status).toBe(500)
+    expect(await res.text()).toContain('714')
+    // The rejected URI must not leak into the transport state.
+    expect(fake.transportUri).not.toContain('li_1/file/10')
+  })
 })
 
 describe('SonosClient against a vanished speaker', () => {
