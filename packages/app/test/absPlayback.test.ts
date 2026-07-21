@@ -53,6 +53,46 @@ describe('AbsClient.getPlaybackManifest', () => {
     expect(manifest.author).toBe('')
   })
 
+  it('carries the library item summary (same projection as the library endpoints), cover included', async () => {
+    stubFetch(() =>
+      jsonResponse({
+        id: 'li_1',
+        media: {
+          duration: 999,
+          coverPath: '/covers/li_1.jpg',
+          metadata: { title: 'A Book', authorName: 'Jane Doe' },
+          audioFiles: [{ ino: '10', index: 1, duration: 100, mimeType: 'audio/mpeg' }],
+        },
+      }),
+    )
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
+    // The whole-book duration (999), not the track-sum (100), and the cover-proxy path — exactly what
+    // GET /v1/library/items/li_1 projects for the same book.
+    expect(manifest.item).toEqual({
+      id: 'li_1',
+      title: 'A Book',
+      author: 'Jane Doe',
+      durationSeconds: 999,
+      coverUrl: '/v1/library/items/li_1/cover',
+    })
+  })
+
+  it('projects item.coverUrl as null when the book has no cover art', async () => {
+    stubFetch(() =>
+      jsonResponse({
+        id: 'li_1',
+        media: {
+          duration: 100,
+          coverPath: null,
+          metadata: { title: 'A Book' },
+          audioFiles: [{ ino: '10', index: 1, duration: 100, mimeType: 'audio/mpeg' }],
+        },
+      }),
+    )
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
+    expect(manifest.item.coverUrl).toBeNull()
+  })
+
   it('rejects a book with no audio files', async () => {
     stubFetch(() => jsonResponse({ media: { audioFiles: [] } }))
     await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1')).rejects.toBeInstanceOf(ItemNotPlayableError)

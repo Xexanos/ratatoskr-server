@@ -3,30 +3,13 @@ import { get as httpsGet } from 'node:https'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../src/api/app.js'
-import type { Config } from '../src/config/index.js'
+import { testConfig } from './helpers/testConfig.js'
 
 // The one thing worth proving end-to-end here (SPEC section 14): a configured
 // certificate actually results in a real, working HTTPS listener — not just that the
 // `https` option was accepted by the types. This is the code path behind the
 // `as unknown as FastifyInstance` cast in api/app.ts.
 const FIXTURES = fileURLToPath(new URL('./fixtures/tls/', import.meta.url))
-
-function testConfig(overrides: Partial<Config> = {}): Config {
-  return {
-    absUrl: 'http://abs.invalid',
-    absStreamerApiKey: 'streamer-key',
-    sonosSeedHost: undefined,
-    port: 0,
-    pollIntervalSeconds: 15,
-    seekSettleMs: 1000,
-    seekToleranceSeconds: 3,
-    seekRetries: 2,
-    progressWriteThresholdSeconds: 5,
-    tls: undefined,
-    validateResponses: true,
-    ...overrides,
-  }
-}
 
 describe('buildApp TLS wiring', () => {
   let app: Awaited<ReturnType<typeof buildApp>> | undefined

@@ -8,6 +8,7 @@ import { NoActiveSessionError } from './errors.js'
 type Session = components['schemas']['Session']
 type PlaybackState = components['schemas']['PlaybackState']
 type RotatedTokens = components['schemas']['RotatedTokens']
+type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 
 // How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds
 // is about seek accuracy) so that raising the seek tolerance for a flaky speaker does not silently
@@ -36,6 +37,9 @@ interface ActiveSession {
   // The queue's media URLs, so the sync loop can tell our book from a LAN takeover (a household
   // member starting other content on the speaker) by comparing the coordinator's reported TrackURI.
   mediaUrls: string[]
+  // The playing book's library summary (see PlaybackManifest.item), captured once at start and never
+  // refreshed — a metadata edit during playback stays stale until the next session.
+  item: LibraryItemSummary
 }
 
 // Owns the one in-memory session and drives ABS + Sonos to start / report / stop playback
@@ -116,6 +120,7 @@ export class SessionManager {
         trackDurations: [...plan.trackDurations],
         totalDurationSeconds: plan.totalDurationSeconds,
         mediaUrls: plan.tracks.map((track) => track.url),
+        item: manifest.item,
       }
       this.lastWrittenSeconds = resumeSeconds
       // Fresh session baseline: `userToken` is the client's current access token, so any pending pair
@@ -185,13 +190,14 @@ export class SessionManager {
       if (callerToken !== undefined) this.noteCaller(callerToken)
       // Only hand the pair back if this caller is the owner (same gate as toSession).
       const pending = callerToken !== undefined && this.shouldDeliverRotated(callerToken) ? this.pendingRotatedTokens : undefined
-      const { itemId, speakerId, totalDurationSeconds } = session
+      const { itemId, item, speakerId, totalDurationSeconds } = session
       const reached = await this.stopInternal() // writes the final position, then clears the session
       if (pending === undefined) return undefined
       const position = reached ?? this.lastWrittenSeconds
       const finished = totalDurationSeconds - position <= END_OF_BOOK_TOLERANCE_SECONDS
       return {
         itemId,
+        item,
         speakerId,
         state: finished ? 'finished' : 'stopped',
         positionSeconds: finished ? totalDurationSeconds : position,
@@ -473,6 +479,7 @@ export class SessionManager {
     const session = this.requireSession()
     const result: Session = {
       itemId: session.itemId,
+      item: session.item,
       speakerId: session.speakerId,
       state,
       positionSeconds,

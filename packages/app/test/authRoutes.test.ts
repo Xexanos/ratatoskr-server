@@ -2,23 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../src/api/app.js'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, AbsUpstreamError } from '../src/abs/errors.js'
-import type { Config } from '../src/config/index.js'
-
-function testConfig(): Config {
-  return {
-    absUrl: 'http://abs.invalid',
-    absStreamerApiKey: 'streamer-key',
-    sonosSeedHost: undefined,
-    port: 0,
-    pollIntervalSeconds: 15,
-    seekSettleMs: 1000,
-    seekToleranceSeconds: 3,
-    seekRetries: 2,
-    progressWriteThresholdSeconds: 5,
-    tls: undefined,
-    validateResponses: true,
-  }
-}
+import { testConfig } from './helpers/testConfig.js'
 
 const TOKENS = { accessToken: 'a', refreshToken: 'r', user: { id: '42', username: 'lars' } }
 
