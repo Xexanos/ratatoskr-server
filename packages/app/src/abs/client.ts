@@ -167,38 +167,21 @@ export class AbsClient {
   // both fetches the image and proves the token is valid (SPEC section 8: validity is proven by the
   // upstream ABS call), which is why this route can declare 401/404 like the other library calls.
   // `height` maps to ABS's own `height` cover-resize param, so scaling and the resized-variant cache
-  // both live upstream. Unlike getJson/handle the body is binary, so this parses no JSON: it returns
-  // the raw bytes and the upstream content type. Deliberately no cache-header forwarding (issue
-  // #100): ABS sends none on this path (its CacheManager sets only Content-Type unless the request
-  // carries the ABS web client's `?ts=` cache buster, which this proxy never sends), and the only
-  // client caches independently of HTTP headers — do not "fix" the forwarding back in.
+  // both live upstream. Unlike getJson the body is binary, so this parses no JSON: it reads the raw
+  // bytes and the upstream content type off the request() core's unconsumed success response.
+  // Deliberately no cache-header forwarding (issue #100): ABS sends none on this path (its
+  // CacheManager sets only Content-Type unless the request carries the ABS web client's `?ts=`
+  // cache buster, which this proxy never sends), and the only client caches independently of HTTP
+  // headers — do not "fix" the forwarding back in.
   async getItemCover(token: string, itemId: string, height: number | undefined): Promise<CoverImage> {
     const query = height !== undefined ? `?height=${encodeURIComponent(String(height))}` : ''
-    let res: Response
-    try {
-      res = await fetch(`${this.baseUrl}/api/items/${encodeURIComponent(itemId)}/cover${query}`, {
-        headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
-        ...this.dispatcherOption(),
-      })
-    } catch {
-      throw new AbsUpstreamError('Audiobookshelf did not respond')
-    }
-    if (res.status === 401) {
-      await res.body?.cancel()
-      throw new AbsAuthError()
-    }
-    if (res.status === 404) {
-      await res.body?.cancel()
-      throw new AbsNotFoundError()
-    }
-    if (!res.ok) {
-      await res.body?.cancel()
-      throw new AbsUpstreamError(`Audiobookshelf returned status ${res.status}`)
-    }
-    const body = Buffer.from(await res.arrayBuffer())
+    const result = await this.request(`/api/items/${encodeURIComponent(itemId)}/cover${query}`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    if (result.kind === 'notFound') throw new AbsNotFoundError()
+    const body = Buffer.from(await result.res.arrayBuffer())
     // ABS always sets a concrete image content type; fall back to a sensible image default just in case.
-    const contentType = res.headers.get('content-type') ?? 'image/jpeg'
+    const contentType = result.res.headers.get('content-type') ?? 'image/jpeg'
     return { contentType, body }
   }
 
@@ -229,7 +212,7 @@ export class AbsClient {
   }
 
   async getProgress(token: string, itemId: string): Promise<Progress> {
-    const data = await this.getJson(`/api/me/progress/${encodeURIComponent(itemId)}`, token, true)
+    const data = await this.getJsonOrNull(`/api/me/progress/${encodeURIComponent(itemId)}`, token)
     if (data === null) return { positionSeconds: 0, isFinished: false } // 404: nothing listened yet
     const progressData = data as { currentTime?: unknown; isFinished?: unknown }
     return {
@@ -399,80 +382,82 @@ export class AbsClient {
     return { items, nextCursor: null }
   }
 
-  private async postJson(
-    path: string,
-    headers: Record<string, string>,
-    body: unknown,
-  ): Promise<unknown> {
+  // Transport + status core shared by every authenticated/proxied ABS call: fetch with the
+  // per-request timeout and TLS dispatcher; a network failure becomes AbsUpstreamError, 401
+  // becomes AbsAuthError, and any other non-2xx becomes AbsUpstreamError. 404 is reported as a
+  // value rather than thrown — getJsonOrNull and getItemCover's "not found" cases are routine
+  // outcomes for some callers, not exceptional ones, and paying for an exception on that path
+  // matters when it happens on every never-started book in a large library (getProgress). The
+  // success response is returned unconsumed: callers read it as JSON, bytes, or discard it,
+  // whichever the endpoint calls for.
+  private async request(path: string, init: RequestInit): Promise<{ kind: 'ok'; res: Response } | { kind: 'notFound' }> {
     let res: Response
     try {
       res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...headers },
-        body: JSON.stringify(body),
+        ...init,
         signal: AbortSignal.timeout(this.requestTimeoutMs),
         ...this.dispatcherOption(),
       })
     } catch {
       throw new AbsUpstreamError('Audiobookshelf did not respond')
     }
-    return this.handle(res, false)
-  }
-
-  private async getJson(path: string, token: string, allowNotFound = false): Promise<unknown> {
-    let res: Response
-    try {
-      res = await fetch(`${this.baseUrl}${path}`, {
-        headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
-        ...this.dispatcherOption(),
-      })
-    } catch {
-      throw new AbsUpstreamError('Audiobookshelf did not respond')
-    }
-    return this.handle(res, allowNotFound)
-  }
-
-  // PATCH that only checks the status; the success body is ignored (ABS returns the updated
-  // progress, which the caller does not need), so — unlike getJson/handle — it is not parsed.
-  private async patchJson(path: string, token: string, body: unknown): Promise<void> {
-    let res: Response
-    try {
-      res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
-        ...this.dispatcherOption(),
-      })
-    } catch {
-      throw new AbsUpstreamError('Audiobookshelf did not respond')
-    }
-    await res.body?.cancel()
-    if (res.status === 401) throw new AbsAuthError()
-    if (res.status === 404) throw new AbsNotFoundError()
-    if (!res.ok) throw new AbsUpstreamError(`Audiobookshelf returned status ${res.status}`)
-  }
-
-  private async handle(res: Response, allowNotFound: boolean): Promise<unknown> {
     if (res.status === 401) {
       await res.body?.cancel()
       throw new AbsAuthError()
     }
     if (res.status === 404) {
       await res.body?.cancel()
-      if (allowNotFound) return null
-      throw new AbsNotFoundError()
+      return { kind: 'notFound' }
     }
     if (!res.ok) {
       await res.body?.cancel()
       throw new AbsUpstreamError(`Audiobookshelf returned status ${res.status}`)
     }
+    return { kind: 'ok', res }
+  }
+
+  private async parseJson(res: Response): Promise<unknown> {
     try {
       return await res.json()
     } catch {
       throw new AbsUpstreamError('Audiobookshelf returned an unparseable response')
     }
+  }
+
+  private async postJson(path: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
+    const result = await this.request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    })
+    if (result.kind === 'notFound') throw new AbsNotFoundError()
+    return this.parseJson(result.res)
+  }
+
+  private async getJson(path: string, token: string): Promise<unknown> {
+    const result = await this.request(path, { headers: { authorization: `Bearer ${token}` } })
+    if (result.kind === 'notFound') throw new AbsNotFoundError()
+    return this.parseJson(result.res)
+  }
+
+  // Like getJson, but 404 is a normal outcome for the caller (e.g. getProgress: no progress
+  // recorded yet) rather than an exceptional one — see the request() core's `notFound` kind.
+  private async getJsonOrNull(path: string, token: string): Promise<unknown | null> {
+    const result = await this.request(path, { headers: { authorization: `Bearer ${token}` } })
+    if (result.kind === 'notFound') return null
+    return this.parseJson(result.res)
+  }
+
+  // PATCH that only checks the status; the success body is ignored (ABS returns the updated
+  // progress, which the caller does not need), so it is cancelled rather than parsed.
+  private async patchJson(path: string, token: string, body: unknown): Promise<void> {
+    const result = await this.request(path, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    })
+    if (result.kind === 'notFound') throw new AbsNotFoundError()
+    await result.res.body?.cancel()
   }
 }
 
