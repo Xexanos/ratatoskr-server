@@ -311,6 +311,17 @@ describe('AbsClient library projection', () => {
       expect(meCalls()).toBe(1)
     })
 
+    it('search fetches the progress map exactly once regardless of item count', async () => {
+      stubRoutes([
+        TWO_BOOK_LIBS,
+        ME_WITH_PROGRESS,
+        { match: '/api/libraries/lib1/search', body: { book: [{ libraryItem: absBook('li_1', 'A', 'a', 1) }] } },
+        { match: '/api/libraries/lib3/search', body: { book: [{ libraryItem: absBook('li_2', 'B', 'b', 2) }] } },
+      ])
+      await new AbsClient(BASE).listItems('tok', { searchQuery: 'match', limit: 50, cursor: undefined })
+      expect(meCalls()).toBe(1)
+    })
+
     it('the shelf fetches the progress map exactly once regardless of item count', async () => {
       stubRoutes([
         ME_WITH_PROGRESS,
@@ -332,6 +343,25 @@ describe('AbsClient library projection', () => {
       const page = await new AbsClient(BASE, undefined, undefined, logger).listItems('tok', {
         searchQuery: undefined,
         limit: 2,
+        cursor: undefined,
+      })
+
+      expect(page.items.map((item) => item.id)).toEqual(['li_1'])
+      expect(page.items[0]).not.toHaveProperty('progress')
+      expect(logger.warn).toHaveBeenCalledOnce()
+    })
+
+    it('serves search results without progress and warns when the progress lookup fails', async () => {
+      stubRoutes([
+        TWO_BOOK_LIBS,
+        { match: '/api/me', status: 500 },
+        { match: '/api/libraries/lib1/search', body: { book: [{ libraryItem: absBook('li_1', 'Match', 'A', 10) }] } },
+        { match: '/api/libraries/lib3/search', body: { book: [] } },
+      ])
+      const logger = { warn: vi.fn() }
+      const page = await new AbsClient(BASE, undefined, undefined, logger).listItems('tok', {
+        searchQuery: 'match',
+        limit: 50,
         cursor: undefined,
       })
 
