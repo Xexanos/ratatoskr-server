@@ -61,13 +61,13 @@ function bearerProtectedOperationIds(): string[] {
     security?: unknown[]
     paths?: Record<string, Record<string, { operationId?: string; security?: unknown[] }>>
   }
-  const globallyProtected = (document.security ?? []).length > 0
+  const namesBearer = (requirements: unknown[]) =>
+    requirements.some((requirement) => typeof requirement === 'object' && requirement !== null && 'bearerAuth' in requirement)
   const ids: string[] = []
   for (const pathItem of Object.values(document.paths ?? {})) {
     for (const operation of Object.values(pathItem)) {
       if (typeof operation !== 'object' || operation === null || operation.operationId === undefined) continue
-      const security = operation.security ?? (globallyProtected ? [{}] : [])
-      if (security.length > 0) ids.push(operation.operationId)
+      if (namesBearer(operation.security ?? document.security ?? [])) ids.push(operation.operationId)
     }
   }
   return ids.sort()

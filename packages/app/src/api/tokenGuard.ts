@@ -29,6 +29,13 @@ export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
 // Walk the contract for the operationIds that carry a bearer requirement: the global
 // `security` applies unless an operation overrides it (`security: []` opts out — getHealth,
 // login, refresh, listSpeakers).
+//
+// Only requirements naming this scheme count: the guard reads request.absToken, which the
+// bearerAuth security handler alone sets (security.ts), so an operation secured by any other
+// scheme must not land in the guarded set — a bearer check against a missing absToken would
+// reject it unconditionally.
+const BEARER_SCHEME = 'bearerAuth'
+
 function bearerProtectedOperationIds(document: Record<string, unknown>): Set<string> {
   const globalSecurity = Array.isArray(document['security']) ? (document['security'] as unknown[]) : []
   const ids = new Set<string>()
@@ -38,10 +45,19 @@ function bearerProtectedOperationIds(document: Record<string, unknown>): Set<str
       if (typeof operation !== 'object' || operation === null) continue
       const { operationId, security } = operation as { operationId?: string; security?: unknown[] }
       if (operationId === undefined) continue
-      if ((security ?? globalSecurity).length > 0) ids.add(operationId)
+      if (requiresBearer(security ?? globalSecurity)) ids.add(operationId)
     }
   }
   return ids
+}
+
+// A security requirement object is keyed by scheme name (OpenAPI 3), so bearer protection
+// means some requirement carries the bearer scheme's key — an operation secured only by
+// some other scheme is not this guard's business.
+function requiresBearer(requirements: unknown[]): boolean {
+  return requirements.some(
+    (requirement) => typeof requirement === 'object' && requirement !== null && BEARER_SCHEME in requirement,
+  )
 }
 
 // Returns the wrap function buildApp's operationResolver runs every handler through:

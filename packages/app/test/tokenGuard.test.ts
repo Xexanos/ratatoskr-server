@@ -4,13 +4,16 @@ import { openapiDocument } from '@ratatoskr/contract'
 import { createTokenGuard, SELF_VALIDATING_OPERATIONS } from '../src/api/tokenGuard.js'
 
 // A minimal contract shape: global bearer security, one op inheriting it, one opting out,
-// and one bearer-protected op that will be exempted as self-validating.
+// one bearer-protected op that will be exempted as self-validating, and one secured by a
+// different scheme — which the guard must leave alone (only the bearerAuth handler sets
+// request.absToken, so a bearer check against it would 401 unconditionally).
 const DOCUMENT: Record<string, unknown> = {
   security: [{ bearerAuth: [] }],
   paths: {
     '/guarded': { get: { operationId: 'guardedOp' } },
     '/open': { get: { operationId: 'openOp', security: [] } },
     '/self': { post: { operationId: 'selfOp' } },
+    '/other': { get: { operationId: 'otherSchemeOp', security: [{ apiKeyAuth: [] }] } },
   },
 }
 
@@ -60,6 +63,18 @@ describe('createTokenGuard', () => {
     // Unknown operationIds (glue's NotImplemented stubs) pass through untouched too.
     expect(guard('unknownOp', handler)).toBe(handler)
     expect(validate).not.toHaveBeenCalled()
+  })
+
+  it('leaves an operation secured by a non-bearer scheme alone', () => {
+    const validate = vi.fn()
+    const handler = vi.fn()
+    const guard = createTokenGuard(DOCUMENT, validate, new Set(['selfOp']))
+
+    // Secured, but not by bearerAuth: no absToken is stashed for it, so a bearer check
+    // would reject it unconditionally. Its own scheme's handler is responsible for it.
+    expect(guard('otherSchemeOp', handler)).toBe(handler)
+    // And exempting it as self-validating is a category error the startup assertion rejects.
+    expect(() => createTokenGuard(DOCUMENT, validate, new Set(['otherSchemeOp']))).toThrow(/otherSchemeOp/)
   })
 
   it('rejects a self-validating entry that is not a bearer-protected operation', () => {
