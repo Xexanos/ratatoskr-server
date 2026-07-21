@@ -25,6 +25,11 @@ const IN_PROGRESS_UPSTREAM_LIMIT = 100
 // (misconfiguration), or no answer at all (down / wrong host / TLS failure).
 export type AbsProbeResult = 'ok' | 'not-audiobookshelf' | 'unreachable'
 
+// The slice of a logger the client needs (structurally satisfied by Fastify's pino logger).
+export interface AbsClientLogger {
+  warn(obj: unknown, msg?: string): void
+}
+
 export interface ListItemsQuery {
   searchQuery: string | undefined
   limit: number
@@ -82,6 +87,9 @@ export class AbsClient {
     // it becomes a prompt AbsUpstreamError (-> 502) instead of a stalled request; set it under the
     // client's own read timeout so callers see the mapped 502, not their own timeout.
     private readonly requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    // Where the degraded-list warning goes (see progressByItemIdOrEmpty). Optional so tests and
+    // callers without a logger can omit it.
+    private readonly logger?: AbsClientLogger,
   ) {}
 
   // Only include the dispatcher option when one is configured — with exactOptionalPropertyTypes
@@ -137,11 +145,14 @@ export class AbsClient {
   // set) merges each book library's top matches, capped at `limit`, with no cursor
   // (the ABS search endpoint returns bounded top matches and is not paginated).
   async listItems(token: string, query: ListItemsQuery): Promise<LibraryItemPage> {
-    const libraries = await this.listBookLibraries(token)
+    const [libraries, progressByItemId] = await Promise.all([
+      this.listBookLibraries(token),
+      this.progressByItemIdOrEmpty(token),
+    ])
     if (query.searchQuery !== undefined && query.searchQuery !== '') {
-      return this.search(token, libraries, query.searchQuery, query.limit)
+      return this.search(token, libraries, query.searchQuery, query.limit, progressByItemId)
     }
-    return this.browse(token, libraries, query.limit, query.cursor)
+    return this.browse(token, libraries, query.limit, query.cursor, progressByItemId)
   }
 
   async getItem(token: string, itemId: string): Promise<LibraryItem> {
@@ -195,8 +206,7 @@ export class AbsClient {
   // most-recently-listened first. ABS's GET /api/me/items-in-progress already returns exactly that,
   // recency-ordered and excluding finished books, so no client-side sorting is needed. Bounded by
   // `limit` and not paginated (the shelf is a complete, capped set). Filtered to books to match the
-  // browse list's book-only scope; podcasts are out of scope for v1. Per-item progress is omitted,
-  // consistent with the browse projection (the field is optional; the app derives the marker itself).
+  // browse list's book-only scope; podcasts are out of scope for v1.
   //
   // ABS applies its own `limit` to the mixed-media in-progress list *before* we filter to books, so
   // asking upstream for exactly `limit` could return fewer than `limit` books when podcasts are
@@ -204,14 +214,17 @@ export class AbsClient {
   // buffer (the in-progress list is per-user and inherently small) and then cap at `limit`.
   async listInProgressItems(token: string, limit: number): Promise<LibraryItemList> {
     const upstreamLimit = Math.max(limit, IN_PROGRESS_UPSTREAM_LIMIT)
-    const data = (await this.getJson(`/api/me/items-in-progress?limit=${upstreamLimit}`, token)) as {
-      libraryItems?: unknown[]
-    }
+    const [data, progressByItemId] = await Promise.all([
+      this.getJson(`/api/me/items-in-progress?limit=${upstreamLimit}`, token) as Promise<{
+        libraryItems?: unknown[]
+      }>,
+      this.progressByItemIdOrEmpty(token),
+    ])
     const rawItems = Array.isArray(data.libraryItems) ? data.libraryItems : []
     const items = rawItems
       .filter((raw) => (raw as { mediaType?: unknown })?.mediaType === 'book')
       .slice(0, limit)
-      .map(toSummary)
+      .map((raw) => toSummaryWithProgress(raw, progressByItemId))
     return { items }
   }
 
@@ -299,11 +312,44 @@ export class AbsClient {
       .map((library) => ({ id: library.id as string }))
   }
 
+  // The user's stored listening progress per library item, from the user object's `mediaProgress`
+  // (GET /api/me) — the one upstream progress call a list request makes, regardless of item count.
+  // Episode-scoped entries (podcasts) are skipped: they describe an episode, not the item, and the
+  // lists are book-only anyway. Value mapping matches getProgress so lists and the item detail
+  // endpoint report the same numbers for the same book.
+  private async progressByItemId(token: string): Promise<Map<string, Progress>> {
+    const data = (await this.getJson('/api/me', token)) as { mediaProgress?: unknown[] }
+    const entries = Array.isArray(data.mediaProgress) ? data.mediaProgress : []
+    const map = new Map<string, Progress>()
+    for (const raw of entries) {
+      const entry = raw as { libraryItemId?: unknown; episodeId?: unknown; currentTime?: unknown; isFinished?: unknown }
+      if (typeof entry.libraryItemId !== 'string' || entry.episodeId != null) continue
+      map.set(entry.libraryItemId, {
+        positionSeconds: typeof entry.currentTime === 'number' && entry.currentTime > 0 ? entry.currentTime : 0,
+        isFinished: entry.isFinished === true,
+      })
+    }
+    return map
+  }
+
+  // Progress is auxiliary to a list: if the lookup fails, serve the list without it (and warn)
+  // rather than failing the whole request. An invalid token still surfaces as 401 — the list's
+  // own upstream call rejects it independently of this one.
+  private async progressByItemIdOrEmpty(token: string): Promise<Map<string, Progress>> {
+    try {
+      return await this.progressByItemId(token)
+    } catch (err) {
+      this.logger?.warn({ err }, 'progress lookup failed; serving the list without progress')
+      return new Map()
+    }
+  }
+
   private async browse(
     token: string,
     libraries: { id: string }[],
     limit: number,
     cursor: string | undefined,
+    progressByItemId: Map<string, Progress>,
   ): Promise<LibraryItemPage> {
     const { libraryIndex, page } = decodeCursor(cursor)
     const library = libraries[libraryIndex]
@@ -327,7 +373,7 @@ export class AbsClient {
     } else if (libraryIndex + 1 < libraries.length) {
       nextCursor = encodeCursor({ libraryIndex: libraryIndex + 1, page: 0 })
     }
-    return { items: results.map(toSummary), nextCursor }
+    return { items: results.map((raw) => toSummaryWithProgress(raw, progressByItemId)), nextCursor }
   }
 
   private async search(
@@ -335,6 +381,7 @@ export class AbsClient {
     libraries: { id: string }[],
     searchQuery: string,
     limit: number,
+    progressByItemId: Map<string, Progress>,
   ): Promise<LibraryItemPage> {
     const perLibrary = await Promise.all(
       libraries.map(async (library) => {
@@ -347,7 +394,7 @@ export class AbsClient {
     )
     const items = perLibrary
       .flat()
-      .map((match) => toSummary(match.libraryItem))
+      .map((match) => toSummaryWithProgress(match.libraryItem, progressByItemId))
       .slice(0, limit)
     return { items, nextCursor: null }
   }
@@ -449,7 +496,9 @@ function coverPathFor(id: string): string {
   return `${API_PREFIX}/library/items/${encodeURIComponent(id)}/cover`
 }
 
-function toSummary(raw: unknown): LibraryItemSummary {
+// `progress` is present exactly when the user has recorded listening history for the item —
+// a book never listened to carries no progress field (contract: the field is optional).
+function toSummary(raw: unknown, progress?: Progress): LibraryItemSummary {
   const item = (raw ?? {}) as AbsItem
   const meta = item.media?.metadata ?? {}
   const id = String(item.id)
@@ -463,7 +512,14 @@ function toSummary(raw: unknown): LibraryItemSummary {
     durationSeconds: typeof item.media?.duration === 'number' && item.media.duration >= 0 ? item.media.duration : 0,
     coverUrl: hasCover ? coverPathFor(id) : null,
     ...(typeof meta.authorName === 'string' ? { author: meta.authorName } : {}),
+    ...(progress !== undefined ? { progress } : {}),
   }
+}
+
+// Summary projection with the user's progress joined in from the per-list progress map.
+function toSummaryWithProgress(raw: unknown, progressByItemId: Map<string, Progress>): LibraryItemSummary {
+  const id = (raw as { id?: unknown } | null | undefined)?.id
+  return toSummary(raw, typeof id === 'string' ? progressByItemId.get(id) : undefined)
 }
 
 function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {

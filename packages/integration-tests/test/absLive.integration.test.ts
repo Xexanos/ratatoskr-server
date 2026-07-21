@@ -150,4 +150,32 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     // Progress. Holds on the shared container BECAUSE the user is exclusive to this file.
     expect(body.progress).toEqual({ positionSeconds: 0, isFinished: false })
   })
+
+  // Ordered after the zero-progress detail test: this one records progress for the file's user,
+  // so it must run last. Verifies the list join's upstream shape dependency (GET /api/me →
+  // mediaProgress) against a real ABS, not just the unit tests' fetch stubs (issue #108).
+  it('GET /v1/library/items joins the stored progress into the list once the user has listened', async () => {
+    // Record progress directly in ABS — the server's accessToken IS the user's ABS token.
+    const patchRes = await fetch(`${abs!.absBase}/api/me/progress/${encodeURIComponent(seededItemId)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.accessToken}` },
+      body: JSON.stringify({ currentTime: 12.5, duration: 60, progress: 12.5 / 60, isFinished: false }),
+    })
+    expect(patchRes.ok).toBe(true)
+
+    const res = await fetch(`${serverBase}/v1/library/items`, {
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      items: { id: string; progress?: { positionSeconds: number; isFinished: boolean } }[]
+    }
+
+    const validate = contractValidator('LibraryItemPage')
+    expect(validate(body)).toBe(true)
+    expect(validate.errors).toBeNull()
+
+    const seeded = body.items.find((item) => item.id === seededItemId)
+    expect(seeded?.progress).toEqual({ positionSeconds: 12.5, isFinished: false })
+  })
 })

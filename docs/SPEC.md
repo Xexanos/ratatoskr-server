@@ -21,6 +21,12 @@ AirPlay is not an option.
 - Discover Sonos speakers and groups on the LAN.
 - Browse and search the ABS library (thin projection; each client authenticates with its
   own Audiobookshelf identity, so the library view and progress are per-user).
+  Every list response (browse, search, and the in-progress shelf) carries the user's
+  stored progress on each item: the server fetches the user's `mediaProgress` map from
+  ABS once per list request (`GET /api/me`) and joins it into the summaries — one
+  upstream call per list, never one per item. A book with no listening history carries
+  no `progress` field. Progress is auxiliary to a list: if the lookup fails, the list is
+  still served without `progress` and a warning is logged, never a failed request.
 - Play one audiobook at a time on one speaker or group.
 - Control: start, pause, resume, seek (absolute position), stop.
 - Resume from the position stored in ABS when starting.
