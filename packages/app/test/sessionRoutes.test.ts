@@ -2,26 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, ItemNotPlayableError } from '../src/abs/errors.js'
 import { buildApp } from '../src/api/app.js'
-import type { Config } from '../src/config/index.js'
 import { NoActiveSessionError } from '../src/playback/errors.js'
 import type { SessionManager } from '../src/playback/sessionManager.js'
 import type { SonosClient } from '../src/sonos/client.js'
-
-function testConfig(): Config {
-  return {
-    absUrl: 'http://abs.invalid',
-    absStreamerApiKey: 'streamer-key',
-    sonosSeedHost: undefined,
-    port: 0,
-    pollIntervalSeconds: 15,
-    seekSettleMs: 1000,
-    seekToleranceSeconds: 3,
-    seekRetries: 2,
-    progressWriteThresholdSeconds: 5,
-    tls: undefined,
-    validateResponses: true,
-  } as Config
-}
+import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
 const SESSION = {
