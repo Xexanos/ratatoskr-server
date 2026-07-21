@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 1.3.1
+  version: 1.4.0
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -111,6 +111,11 @@ paths:
     get:
       operationId: listSpeakers
       summary: List discovered Sonos speakers and groups
+      # Deliberately unauthenticated (SPEC section 8): discovery is local-only and any LAN
+      # device can already enumerate the Sonos topology directly via SSDP/UPnP, so requiring
+      # a token here gates nothing. The speaker id is only usable through the authenticated
+      # playback endpoints.
+      security: []
       tags: [speakers]
       responses:
         "200":
@@ -121,7 +126,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Speaker"
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "502": { $ref: "#/components/responses/UpstreamError" }
 
   /library/items:

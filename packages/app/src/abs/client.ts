@@ -227,9 +227,10 @@ export class AbsClient {
   }
 
   // Prove a caller's bearer token is a genuine, current ABS token via a cheap authenticated call
-  // (GET /api/me). Session endpoints that otherwise never reach ABS (getCurrentSession, stopSession)
-  // use this so the presence-only bearer check can't let an unauthenticated LAN caller read or stop
-  // the session (the contract declares 401 for an invalid token, not just a missing one).
+  // (GET /api/me). The token guard (api/tokenGuard.ts) runs this before every bearer-protected
+  // operation whose handler doesn't reach ABS itself, so the presence-only bearer check can't let
+  // an unauthenticated LAN caller act (the contract declares 401 for an invalid token, not just a
+  // missing one).
   async validateToken(token: string): Promise<void> {
     await this.getJson('/api/me', token)
   }
