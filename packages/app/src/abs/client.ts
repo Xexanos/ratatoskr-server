@@ -50,6 +50,11 @@ export interface PlaybackManifest {
   // for playback itself; falls back to a placeholder title / empty author when ABS omits them.
   title: string
   author: string
+  // The same contract summary the library endpoints project for this book (same title/author/
+  // durationSeconds/coverUrl), built from this manifest's own ABS response so the session can echo
+  // it on its Session responses without re-fetching. `progress` is deliberately omitted (the session
+  // carries the live position separately).
+  item: LibraryItemSummary
 }
 
 export interface ProgressUpdate {
@@ -263,7 +268,7 @@ export class AbsClient {
     const meta = media?.metadata ?? {}
     const title = typeof meta.title === 'string' && meta.title !== '' ? meta.title : '(unknown title)'
     const author = typeof meta.authorName === 'string' ? meta.authorName : ''
-    return { itemId, tracks, totalDurationSeconds, title, author }
+    return { itemId, tracks, totalDurationSeconds, title, author, item: toSummary(data) }
   }
 
   // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts.
