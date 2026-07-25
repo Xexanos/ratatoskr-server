@@ -258,6 +258,11 @@ jobs:
     needs: merge
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.trigger_e2e)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Post an "e2e" commit status on this commit (below), so the cross-repo E2E result (run in
+      # Xexanos/ratatoskr-e2e) is visible here. Same-repo status write; the built-in token suffices.
+      statuses: write
     steps:
       - name: Dispatch the E2E suite
         env:
@@ -279,3 +284,23 @@ jobs:
             -F client_payload[tag]="$TAG" \
             -F client_payload[digest]="$DIGEST" \
             -F client_payload[sha]="$SHA"
+
+      # Surface that dispatch on this commit straight away: a pending "e2e" status the E2E suite
+      # overwrites with success/failure when it finishes (same context, same commit), so the
+      # cross-repo verdict is visible here without opening ratatoskr-e2e. Informational only -
+      # a failed status POST must never fail the pipeline (unlike the dispatch above, whose
+      # failure is deliberately loud), so this only warns.
+      - name: Mark the E2E status pending on this commit
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
+          E2E_ACTIONS_URL: ${{ github.server_url }}/${{ github.repository_owner }}/ratatoskr-e2e/actions
+        run: |
+          gh api "repos/${OWNER}/ratatoskr-server/statuses/${SHA}" \
+            -f state=pending \
+            -f context=e2e \
+            -f description="Cross-component E2E dispatched, awaiting result" \
+            -f target_url="${E2E_ACTIONS_URL}" \
+            || echo "::warning title=E2E status::could not set the pending commit status (visibility only; pipeline unaffected)."
