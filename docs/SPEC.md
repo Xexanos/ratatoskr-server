@@ -137,8 +137,11 @@ must build on:
 ## 6. API and versioning
 
 - `contract/openapi.yaml` is the single source of truth. Implement it exactly.
-- Everything is mounted under `/v1`. Keep the version prefix in one place so a future
-  `/v2` can be served alongside `/v1`.
+- Everything is mounted under the version prefix, kept in one place (`servers.url`), so two
+  majors can be served side by side. The pending **contract 2.0.0 cut under `/v2`** — the
+  new auth surface, with `/v1` served in parallel frozen at the 1.4.0 tag until its sunset
+  (then an unauthenticated 410 `UPGRADE_REQUIRED` stub) — is decided and recorded in
+  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md).
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
   practice for the server: never remove or repurpose a field within `/v1`, only add
@@ -203,9 +206,14 @@ if something required is missing:
   `SEEK_RETRIES` (optional, default 2) — tuning knobs for section 4; defaults come from the
   spike findings there.
 - `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default 5).
+- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required once the `/v2` auth model lands,
+  mutually exclusive) — key for the encrypted session store (section 8), as a value or a
+  Docker-secret-compatible file path. Missing key → the server refuses to boot; wrong key →
+  a clear error, never silent data loss.
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
-  its old access token is still valid (section 8).
+  its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
+  1.4.0 contract, see section 8) and is removed together with `/v1`.
 - `SHUTDOWN_TIMEOUT_MS` (optional, default 5000) — upper bound on the graceful-shutdown drain
   (section 5); the process exits after this even if the final write is still hung.
 - `RESUME_REWIND_SECONDS` (optional, default 10) — resume this many seconds before the stored
@@ -216,92 +224,76 @@ if something required is missing:
 ## 8. Auth
 
 Authentication is per-user and backed by Audiobookshelf, so that progress is attributed
-to the person who is actually listening.
+to the person who is actually listening. The client credential, however, is
+**Ratatoskr-issued**: the server is the sole holder of ABS token pairs
+([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), decided in
+[#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes
+the target model for contract 2.0.0 under `/v2`; the previous shared-token model and its
+rotation-handover protocol stay served under `/v1`, frozen at the 1.4.0 contract tag,
+until the sunset described in the ADR — the old protocol's specification lives in that
+tag, not here.
 
-- A client authenticates by posting Audiobookshelf credentials to `POST /v1/auth/login`.
-  Ratatoskr forwards them to Audiobookshelf and returns the access and refresh tokens plus
-  the identified user. The client then sends the access token as a bearer token on every
-  request, and Ratatoskr uses it for its upstream Audiobookshelf calls — so the library
-  view and playback progress are scoped to that user.
-- Access tokens are short-lived; clients exchange the refresh token for a new pair via
-  `POST /v1/auth/refresh`. Both auth endpoints proxy to Audiobookshelf.
-- All endpoints require a valid token except `/health`, `/auth/login`, `/auth/refresh`, and
-  `GET /speakers`. Validity is proven against Audiobookshelf in one of two ways: an operation
-  whose handler forwards the caller's token upstream as part of its real work is
-  **self-validating** (an invalid token 401s there); every other bearer-protected operation is
-  run through the **token guard**, which proves the token via a cheap authenticated ABS call
-  before dispatch. The guard derives the protected set from the contract, so a new operation
-  is guarded by default and cannot silently skip validation.
-  `GET /speakers` is deliberately unauthenticated (contract 1.4.0): Sonos discovery is local,
-  nothing is forwarded to ABS, and a device on the same LAN can already enumerate the Sonos
-  topology directly via SSDP/UPnP (section 14) — a token requirement would gate nothing. The
-  speaker list carries only ids, names, and group membership; the id is only usable through
-  the authenticated playback endpoints. (An earlier revision checked the bearer for presence
-  and promised full validation later — superseded by this decision, on the same rationale.)
-- The listening user's token is used for Audiobookshelf **API** calls only. The media URLs
+The hard requirement this model exists to meet: **the user stays signed in until an
+explicit sign-out.** Server restarts and arbitrarily long usage pauses must never force a
+re-login.
+
+- **Sign-in**: the client posts Audiobookshelf credentials to `POST /v2/auth/login`.
+  Ratatoskr validates them against ABS — creating its own, private ABS session chain for
+  this device login — and returns an opaque Ratatoskr token plus the identified user. The
+  password is never stored, on either side; the client never sees ABS tokens.
+- **The Ratatoskr token** is an opaque 256-bit random value, sent as a bearer token on
+  every request. It does not expire and is never rotated — it is valid until explicit
+  sign-out, and revocable at any moment by deleting its session entry. The server stores
+  only its **hash**; validation is an in-process lookup. (Rationale and the security
+  comparison against expiring/rotating alternatives: ADR-0001.)
+- **Session store**: one entry per device login — the token hash, that device's own ABS
+  chain, and metadata. **One ABS chain per device, never shared**; no two consumers of a
+  rotating chain ever exist again. The store is a single AES-256-GCM-encrypted file on the
+  mounted volume (where the TLS cert already lives), file mode 0600, non-root. The key is
+  operator-supplied and mandatory (`SESSION_STORE_KEY`, section 7); without it the server
+  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14).
+- **Keep-alive**: the server refreshes every stored ABS chain daily (jittered), refreshes
+  stale chains on boot, and refreshes on demand when an access token expires mid-use. A
+  chain now dies only if server↔ABS contact is lost for the entire ABS refresh window
+  (≥ 7 days by default) or on an ABS username change. Operator guidance: raise ABS's
+  `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days) if longer outages are expected.
+- **Dead chain, valid token**: the keep-alive loop marks a dead chain but keeps the entry,
+  so the user's next request answers **401 with the machine-readable
+  `code: "UPSTREAM_SESSION_LOST"`** in the error body instead of a generic "unknown
+  token". The app reacts with a targeted password prompt; re-login creates a fresh chain
+  and a **new** token and deletes the old entry (no in-place repair). This failure is rare
+  and loud — the inverse of the old model's frequent silent re-logins.
+- **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
+  immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
+  killing exactly this device's ABS session; other devices and other ABS clients are
+  untouched. Idempotent and best-effort: unknown token or unreachable ABS still answers
+  204 (an orphaned ABS session expires on its own, since nobody refreshes it).
+- All endpoints require a valid Ratatoskr token except `/health`, `/auth/login`, and
+  `GET /speakers`. The **token guard** is now an in-process hash lookup — no per-request
+  ABS roundtrip — but keeps deriving the protected set from the contract, so a new
+  operation is guarded by default and cannot silently skip validation.
+  `GET /speakers` stays deliberately unauthenticated (decided in contract 1.4.0): Sonos
+  discovery is local, nothing is forwarded to ABS, and a device on the same LAN can
+  already enumerate the Sonos topology directly via SSDP/UPnP (section 14) — a token
+  requirement would gate nothing. The speaker list carries only ids, names, and group
+  membership; the id is only usable through the authenticated playback endpoints.
+- **Upstream calls** use the session entry's ABS chain — so the library view and playback
+  progress remain scoped to the ABS user who signed in, and the sync loop keeps writing
+  progress during long unattended playback without any client involvement. The media URLs
   handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).
 
-Ratatoskr keeps no user database. For the single active playback session it holds that
-user's tokens in memory only, so the sync loop can renew the access token and keep writing
-progress during long unattended playback; the tokens are discarded on stop and on restart.
-There are no Ratatoskr-native accounts and no multi-tenant session store in v1 — one active
-session at a time, owned by one authenticated user.
+The client-side half is specified in the app's SPEC, section 5, and degenerates to:
+attach the token; on 401 + `UPSTREAM_SESSION_LOST` show a targeted re-login prompt; on any
+other 401 treat the device as signed out. The entire rotation-adoption protocol on the app
+side drops with `/v1`.
 
-**Refresh-token rotation handover** (contract 1.1.0). Audiobookshelf rotates the refresh
-token on every use, so when the sync loop renews the session user's tokens, the pair the
-client stored at login is invalidated — without a hand-back channel the client's next
-`/auth/refresh` would fail and force a re-login. The `Session` schema therefore carries an
-optional `rotatedTokens` object (`accessToken` + `refreshToken`, both or neither).
-
-This relies on two properties of Audiobookshelf's token model (verified against the
-version this server targets; see the README's minimum-version requirement):
-
-- Access tokens are **stateless** — validated by signature and expiry only, with no
-  server-side session lookup — so a given access token stays valid until its own expiry
-  even after the pair has been rotated. (Refresh tokens, by contrast, are stateful and the
-  old one is invalidated the moment it is used.)
-- Because Ratatoskr and the client hold the *same* access token during a session, the sync
-  loop must **refresh proactively, before that token expires** — never only after a 401.
-  This leaves a handover window in which the client's still-valid old access token can
-  authenticate the very request that fetches the rotated pair. (Concrete lifetimes are an
-  Audiobookshelf configuration detail — e.g. access tokens on the order of hours, refresh
-  tokens on the order of weeks — so this spec states the ordering requirement, not a
-  number.)
-
-Server behavior:
-
-- When the sync loop refreshes the session user's tokens, the server marks the new pair
-  as pending delivery **to this client**.
-- It includes `rotatedTokens` in every `Session` response until the client authenticates
-  with the new access token — i.e. delivery is confirmed by **adoption, not by a single
-  send**, so a dropped or half-read response cannot strand the client. Every playback
-  operation returns a `Session`, so the pair reaches the client through the polling it
-  already does for its now-playing view — no new endpoint. (v1 has exactly one session and
-  one session user, so "this client" is simply the authenticated caller of a session
-  endpoint.) To keep the pair from reaching a *different* valid ABS user on a multi-user
-  server — v1 has no general same-user check (section 16) — delivery is gated on the caller
-  presenting the **pre-rotation access token** (the one the owner still holds, valid until
-  its own expiry); a caller with any other token is not offered the pair. The loop also
-  rotates at most one pair ahead of the client (it does not refresh again while a pair is
-  awaiting adoption), which bounds a mis-configured refresh margin and keeps that
-  pre-rotation token equal to the one the client is still using.
-- `stopSession` discards the in-memory tokens, so a pair still pending at stop cannot be
-  redelivered afterwards. To close that race, `stopSession` returns **200 with a final
-  `Session`** carrying the pending `rotatedTokens` (instead of the usual 204) whenever a
-  pair is outstanding.
-- `rotatedTokens` appears in response bodies, so it falls under the log-redaction rule
-  extended for it in section 14.
-
-The client-side half of the protocol is specified in the app's SPEC, section 5: the client
-never calls `/auth/refresh` while its session is active and adopts tokens only from
-`Session` responses (including the 200 body from `stopSession`). On a 401 during an active
-session it first re-fetches `getCurrentSession` — which succeeds because the old access
-token is still valid until its expiry — to pick up a rotated pair, and only falls back to
-`/auth/refresh` if none is offered. One irreducible residual remains: if the single
-response that would carry the final pair at stop is lost in transit, the client re-logs in;
-this is far narrower than the original send-once race and needs no persistence to recover
-from. Implementation lands with the playback design (phase 4).
+Progress and user data still live in ABS only (section 11); the session store persists
+**credentials**, not domain state. There are no Ratatoskr-native accounts — identity is
+ABS identity — and still exactly one active playback session at a time, owned by one
+authenticated user. A later operator view over the store (list sessions, sign out a
+device) is a planned feature on top of this model, tracked in the issue tracker
+(section 16).
 
 ## 9. Testing
 
@@ -331,7 +323,11 @@ minimum and are subsumed by that document; keep the two consistent.
 
 ## 11. Coding constraints for the implementing agent
 
-- Do not introduce a database or persistence layer; the only persistent state is in ABS.
+- Do not introduce a database or persistence layer for **domain state** — progress and user
+  data live in ABS only. The single deliberate exception is the encrypted session store of
+  section 8 (credentials, not domain state), decided in
+  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md); do not extend it beyond
+  that purpose.
 - Do not add dependencies beyond what a small HTTP server, an HTTP client, and testing
   need, without a clear reason.
 - Keep the position-mapping logic free of I/O; it is pure logic and must be unit-testable
@@ -491,8 +487,8 @@ Decisions (binding for the implementation):
   (and on the user's own client). Setup cost: the admin creates the stream-only account once
   and generates one API key for it (Settings → Users → API Keys), then locks the account down
   (no download/upload/delete, minimal library access).
-- **TLS between clients and Ratatoskr.** Login credentials and the 30-day refresh token
-  must not cross the network in cleartext. Ratatoskr serves HTTPS using a self-signed
+- **TLS between clients and Ratatoskr.** Login credentials and the bearer credential (the
+  non-expiring Ratatoskr token, section 8) must not cross the network in cleartext. Ratatoskr serves HTTPS using a self-signed
   certificate or a local CA (`TLS_CERT_PATH` / `TLS_KEY_PATH`); the Android app trusts it on
   first connect by its SHA-256 certificate fingerprint (trust-on-first-use — the fingerprint is
   shown on the connect screen), so hostname/CA validation is not required and no public CA is
@@ -504,16 +500,30 @@ Decisions (binding for the implementation):
   — for setups that terminate TLS in a reverse proxy or accept the risk knowingly.
 - **Log redaction is normative.** Never log `Authorization` headers, query strings
   containing `token`, the request bodies of the `/auth/*` endpoints, or response bodies
-  that carry tokens — specifically the `AuthTokens` returned by `/auth/*` and the
-  `rotatedTokens` object on a `Session` (section 8). The error mapper strips URLs from
-  upstream errors before they reach responses or logs. (Also note: ABS and any proxy in
-  between will log media-URL query strings — one more reason those URLs carry only the
-  streamer API key.)
-- **Rate-limit the credential endpoints.** `/auth/login` and `/auth/refresh` get a
-  conservative per-IP rate limit so Ratatoskr is not a free brute-force funnel in front
-  of ABS. The other unauthenticated endpoints (`/health`, `GET /speakers`) take no
-  credentials and stay unlimited — they serve cached local state and are polled
-  legitimately.
+  that carry credentials — the Ratatoskr token returned by `/v2/auth/login`, and on the
+  frozen `/v1` surface the `AuthTokens` from `/auth/*` and the `rotatedTokens` object on a
+  `Session`, until `/v1` sunsets. The error mapper strips URLs from upstream errors before
+  they reach responses or logs. (Also note: ABS and any proxy in between will log
+  media-URL query strings — one more reason those URLs carry only the streamer API key.)
+- **Rate-limit the credential endpoints.** `/auth/login` (and `/v1`'s `/auth/refresh`
+  while it is still served) get a conservative per-IP rate limit so Ratatoskr is not a
+  free brute-force funnel in front of ABS. The other unauthenticated endpoints (`/health`,
+  `GET /speakers`) take no credentials and stay unlimited — they serve cached local state
+  and are polled legitimately.
+- **The session store is encrypted, keyed by the operator.** The per-device ABS chains and
+  Ratatoskr token hashes (section 8) persist as a single AES-256-GCM file on the mounted
+  volume, key from `SESSION_STORE_KEY` (mandatory — no key, no boot). A foreign container
+  mounting the volume reads only ciphertext. Honest boundary: compromise of *this*
+  container (env + memory readable) defeats the encryption — true for anything that holds
+  tokens server-side. The store keeps only the **hash** of each Ratatoskr token, so even a
+  full store-plus-key leak cannot reproduce a client credential.
+- **The Ratatoskr token is deliberately non-expiring, mitigated by revocability.** Like
+  the streamer API key (mitigated by scope), this is a considered trade-off, not an
+  oversight: the token is opaque (no offline structure), 256-bit random, carried only in
+  `Authorization` headers over pinned TLS, hash-stored server-side, Keystore-backed on the
+  device, and dead the instant its session entry is deleted. Revocation-by-lookup is
+  strictly stronger than revocation-by-expiry; the full threat comparison is in
+  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md).
 
 Hardening checklist (small items, still binding):
 
@@ -551,12 +561,14 @@ Known accepted risks / open points:
   host answers but is not Audiobookshelf, so a misconfiguration fails loud instead of leaking
   credentials to the wrong host. (This is a fingerprint check, not authentication — the real
   guarantee against an impostor/MITM is HTTPS with a verified certificate.)
-- Refresh-token rotation: ABS rotates refresh tokens on every use, so the app and the
-  server must not both consume the same refresh token independently. Addressed at the
-  contract level (1.1.0): the client hands its refresh token over in `startSession`, the
-  server hands rotated pairs back through the optional `Session.rotatedTokens` object and
-  the 200 `stopSession` body (see section 8). The operational risk remains open until the
-  phase-4 server implementation lands.
+- Refresh-token rotation across two consumers: resolved by decision, pending
+  implementation. The shared-chain model (contract 1.1.0 handover through
+  `Session.rotatedTokens`) proved structurally fragile — repeated silent re-logins and
+  second-order bugs — and is replaced by Ratatoskr-native sessions under `/v2`
+  ([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), section 8): the server
+  is the sole holder of ABS chains, one per device, so no rotating token ever has two
+  consumers again. The handover protocol remains live on the frozen `/v1` surface until
+  its sunset.
 - `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
   per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
   cache the dependency status for a short TTL once the polling/reachability patterns exist
