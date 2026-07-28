@@ -11,7 +11,13 @@ import { Ajv, type ValidateFunction } from 'ajv'
 // Both the config/health smoke test and the live-Audiobookshelf tests build on this.
 
 export const DIST_MAIN = fileURLToPath(new URL('../../app/dist/main.js', import.meta.url))
-export const CONTRACT = fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url))
+// The document of the major the spawned server actually serves — today the frozen /v1 one (api/app.ts
+// mounts it). A response has to be graded against the contract that promised it: schema names mean
+// different things per major (a /v1 Session may carry the rotation handover, a /v2 one has no such
+// field, and AuthTokens exists only in 1.4.0), so grading against contract/openapi.yaml — the document
+// under development, not mounted yet — would check shapes this server never promised, and fail
+// outright on the ones 2.0.0 dropped.
+export const CONTRACT = fileURLToPath(new URL('../../../contract/v1/openapi.yaml', import.meta.url))
 
 // Env keys the config reader consumes — removed from the inherited env so a test is
 // hermetic no matter what the host shell has set. The rest of process.env is inherited
