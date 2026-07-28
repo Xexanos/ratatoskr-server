@@ -34,7 +34,11 @@ export type SonosSpeakerIsNotASpeaker = Assert<Rejects<SonosSpeaker, components[
 
 // Deliberately NOT asserted here: AbsTokenPair, RotatedTokenPair and PlaybackPhase. Those contract
 // schemas are all-required (or a bare string union), so a domain twin of each is structurally
-// identical and no assertion could hold. That costs nothing, because an identical twin passed through
-// unmapped would put exactly the right bytes on the wire — the silent-wrong-value risk this file
-// guards only exists where the shapes genuinely differ. What keeps those three out of the core is the
-// import boundary in eslint.config.js, not the type system.
+// identical and no assertion could hold — Rejects<> would resolve to false and fail this file's own
+// build. That costs nothing: an identical twin passed through unmapped puts exactly the right bytes on
+// the wire, so the silent-wrong-value risk this file guards only exists where the shapes differ.
+//
+// They are not unguarded, just guarded elsewhere. Drift between PlaybackPhase and the contract's
+// PlaybackState is a compile error in contractMapping.ts, because MappedSession.state is the contract
+// enum. And what keeps all three out of the core to begin with is the import boundary in
+// eslint.config.js, which no type could express.

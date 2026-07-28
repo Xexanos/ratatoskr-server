@@ -16,7 +16,7 @@ export interface ListeningProgress {
 // The optional-looking members are `| undefined` rather than `?:` on purpose: the projection always
 // reaches a decision about them, so "not known" is a value it produces, not a property it forgets.
 // The contract's own choice to omit the field instead is a wire concern, applied by the mapper. That
-// difference is also load-bearing for the compiler — api/contractShapeAssertion.ts explains why, and
+// difference is also load-bearing for the compiler — api/domainShapeAssertion.ts explains why, and
 // pins it.
 export interface LibraryBook {
   id: string

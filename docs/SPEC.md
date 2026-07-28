@@ -450,7 +450,7 @@ ratatoskr-server/
 │   │   │                       #   (apiPrefix.ts), and mapping between the domain and the
 │   │   │                       #   contract types: contractMapping.ts is the one place
 │   │   │                       #   contract-shaped library and session values are built, and
-│   │   │                       #   the only place a cover URL is minted; contractShapeAssertion.ts
+│   │   │                       #   the only place a cover URL is minted; domainShapeAssertion.ts
 │   │   │                       #   makes skipping that step a build error rather than a wrong URL
 │   │   └── main.ts             #   startup wiring
 │   │
@@ -467,13 +467,17 @@ all; a scoped ESLint import-boundary rule additionally forbids its `src/` from i
 Node built-ins or other workspace packages.
 
 The contract types stay inside `api/`, enforced the same way: a second import-boundary rule
-forbids `@ratatoskr/contract` everywhere in `app/src` except `api/` itself (and
-`contractTypeAssertion.ts`, which has to sit outside `api/` — see section 12). So the core
-speaks domain types and `api/contractMapping.ts` is the only place they become
-contract-shaped. The point is not tidiness: a value shaped for one API major must not
-escape a module that cannot know which major is being served — that is what made the cover
-URL, minted deep in the ABS projection, the wrong thing in the wrong place. The rule is
-default-deny, so a new core module is covered the moment it lands.
+forbids `@ratatoskr/contract` everywhere in `app/src` except `api/` itself and
+`contractTypeAssertion.ts` (whose own header explains why it has to sit outside `api/`). The
+same rule forbids the core from importing `api/` at all — the dependency runs one way, and
+that also stops the first half being sidestepped by re-exporting the contract types from
+somewhere in `api/`. So the core speaks domain types and `api/contractMapping.ts` is the
+only place they become contract-shaped.
+
+The point is not tidiness: a value shaped for one API major must not escape a module that
+cannot know which major is being served — that is what made the cover URL, minted deep in
+the ABS projection, the wrong thing in the wrong place. Both halves are default-deny, so a
+new core module is covered the moment it lands.
 
 Keeping the generated contract artifacts in their own `@ratatoskr/contract` package (rather
 than inside `app`) means the app imports them as an ordinary module and never reads the

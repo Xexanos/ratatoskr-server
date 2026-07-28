@@ -126,8 +126,6 @@ describe('domain -> contract mapping', () => {
       expect(toSpeaker(zone)).toEqual(zone)
     })
 
-    // The contract documents members as "room names in the group, when isGroup is true", so an absent
-    // list and an empty one are not interchangeable to a client rendering it.
     it('drops members entirely for a lone speaker rather than sending undefined or an empty list', () => {
       const speaker = toSpeaker({ id: 'rincon_2', name: 'Office', isGroup: false, members: undefined })
       expect(speaker).toEqual({ id: 'rincon_2', name: 'Office', isGroup: false })

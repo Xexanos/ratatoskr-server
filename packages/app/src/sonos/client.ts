@@ -5,8 +5,8 @@ import { hmsToSeconds, secondsToHms } from './time.js'
 import { SonosUpstreamError } from './errors.js'
 
 // One addressable playback target: a single speaker, or a zone group presented as one. `members`
-// carries the group's room names and is undefined for a lone speaker — explicitly, not by omission,
-// so the projection states the decision it reached and api/ owns how the contract expresses it.
+// carries the group's room names, and is undefined for a lone speaker — explicitly, so the
+// projection states the decision it reached rather than leaving the field off.
 export interface SonosSpeaker {
   id: string
   name: string
