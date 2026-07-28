@@ -1,14 +1,17 @@
 import type { components } from '@ratatoskr/contract'
-import { API_PREFIX } from '../apiPrefix.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from './errors.js'
+import {
+  toLibraryBook,
+  toLibraryBookDetail,
+  toLibraryBookWithProgress,
+  type LibraryBook,
+  type LibraryBookDetail,
+  type LibraryBookPage,
+  type ListeningProgress,
+} from './library.js'
 
 type AuthTokens = components['schemas']['AuthTokens']
-type LibraryItemSummary = components['schemas']['LibraryItemSummary']
-type LibraryItem = components['schemas']['LibraryItem']
-type LibraryItemList = components['schemas']['LibraryItemList']
-type LibraryItemPage = components['schemas']['LibraryItemPage']
-type Progress = components['schemas']['Progress']
 
 // Startup-probe timeout (GET /ping). Separate from the per-request timeout: the probe is a one-off
 // reachability fingerprint at boot, kept short so a wrong/dead ABS_URL fails startup fast.
@@ -55,11 +58,10 @@ export interface PlaybackManifest {
   // for playback itself; falls back to a placeholder title / empty author when ABS omits them.
   title: string
   author: string
-  // The same contract summary the library endpoints project for this book (same title/author/
-  // durationSeconds/coverUrl), built from this manifest's own ABS response so the session can echo
-  // it on its Session responses without re-fetching. `progress` is deliberately omitted (the session
-  // carries the live position separately).
-  item: LibraryItemSummary
+  // The same book the library endpoints project for this item, built from this manifest's own ABS
+  // response so the session can echo it on its Session responses without re-fetching. `progress` is
+  // deliberately left unset (the session carries the live position separately).
+  item: LibraryBook
 }
 
 export interface ProgressUpdate {
@@ -144,7 +146,7 @@ export class AbsClient {
   // Browse (no query) paginates per book library behind the opaque cursor; search (query
   // set) merges each book library's top matches, capped at `limit`, with no cursor
   // (the ABS search endpoint returns bounded top matches and is not paginated).
-  async listItems(token: string, query: ListItemsQuery): Promise<LibraryItemPage> {
+  async listItems(token: string, query: ListItemsQuery): Promise<LibraryBookPage> {
     const [libraries, progressByItemId] = await Promise.all([
       this.listBookLibraries(token),
       this.progressByItemIdOrEmpty(token),
@@ -155,12 +157,12 @@ export class AbsClient {
     return this.browse(token, libraries, query.limit, query.cursor, progressByItemId)
   }
 
-  async getItem(token: string, itemId: string): Promise<LibraryItem> {
+  async getItem(token: string, itemId: string): Promise<LibraryBookDetail> {
     const [item, progress] = await Promise.all([
       this.getJson(`/api/items/${encodeURIComponent(itemId)}`, token),
       this.getProgress(token, itemId),
     ])
-    return toLibraryItem(item, progress)
+    return toLibraryBookDetail(item, progress)
   }
 
   // Proxy the item's cover image from ABS (GET /api/items/{id}/cover). Forwarding the caller's token
@@ -195,7 +197,7 @@ export class AbsClient {
   // asking upstream for exactly `limit` could return fewer than `limit` books when podcasts are
   // interleaved. The endpoint is not paginated and has no media-type filter, so over-fetch a generous
   // buffer (the in-progress list is per-user and inherently small) and then cap at `limit`.
-  async listInProgressItems(token: string, limit: number): Promise<LibraryItemList> {
+  async listInProgressItems(token: string, limit: number): Promise<LibraryBook[]> {
     const upstreamLimit = Math.max(limit, IN_PROGRESS_UPSTREAM_LIMIT)
     const [data, progressByItemId] = await Promise.all([
       this.getJson(`/api/me/items-in-progress?limit=${upstreamLimit}`, token) as Promise<{
@@ -204,14 +206,13 @@ export class AbsClient {
       this.progressByItemIdOrEmpty(token),
     ])
     const rawItems = Array.isArray(data.libraryItems) ? data.libraryItems : []
-    const items = rawItems
+    return rawItems
       .filter((raw) => (raw as { mediaType?: unknown })?.mediaType === 'book')
       .slice(0, limit)
-      .map((raw) => toSummaryWithProgress(raw, progressByItemId))
-    return { items }
+      .map((raw) => toLibraryBookWithProgress(raw, progressByItemId))
   }
 
-  async getProgress(token: string, itemId: string): Promise<Progress> {
+  async getProgress(token: string, itemId: string): Promise<ListeningProgress> {
     const data = await this.getJsonOrNull(`/api/me/progress/${encodeURIComponent(itemId)}`, token)
     if (data === null) return { positionSeconds: 0, isFinished: false } // 404: nothing listened yet
     const progressData = data as { currentTime?: unknown; isFinished?: unknown }
@@ -265,7 +266,7 @@ export class AbsClient {
     const meta = media?.metadata ?? {}
     const title = typeof meta.title === 'string' && meta.title !== '' ? meta.title : '(unknown title)'
     const author = typeof meta.authorName === 'string' ? meta.authorName : ''
-    return { itemId, tracks, totalDurationSeconds, title, author, item: toSummary(data) }
+    return { itemId, tracks, totalDurationSeconds, title, author, item: toLibraryBook(data) }
   }
 
   // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts.
@@ -300,10 +301,10 @@ export class AbsClient {
   // Episode-scoped entries (podcasts) are skipped: they describe an episode, not the item, and the
   // lists are book-only anyway. Value mapping matches getProgress so lists and the item detail
   // endpoint report the same numbers for the same book.
-  private async progressByItemId(token: string): Promise<Map<string, Progress>> {
+  private async progressByItemId(token: string): Promise<Map<string, ListeningProgress>> {
     const data = (await this.getJson('/api/me', token)) as { mediaProgress?: unknown[] }
     const entries = Array.isArray(data.mediaProgress) ? data.mediaProgress : []
-    const map = new Map<string, Progress>()
+    const map = new Map<string, ListeningProgress>()
     for (const raw of entries) {
       const entry = raw as { libraryItemId?: unknown; episodeId?: unknown; currentTime?: unknown; isFinished?: unknown }
       if (typeof entry.libraryItemId !== 'string' || entry.episodeId != null) continue
@@ -318,7 +319,7 @@ export class AbsClient {
   // Progress is auxiliary to a list: if the lookup fails, serve the list without it (and warn)
   // rather than failing the whole request. An invalid token still surfaces as 401 — the list's
   // own upstream call rejects it independently of this one.
-  private async progressByItemIdOrEmpty(token: string): Promise<Map<string, Progress>> {
+  private async progressByItemIdOrEmpty(token: string): Promise<Map<string, ListeningProgress>> {
     try {
       return await this.progressByItemId(token)
     } catch (err) {
@@ -332,11 +333,11 @@ export class AbsClient {
     libraries: { id: string }[],
     limit: number,
     cursor: string | undefined,
-    progressByItemId: Map<string, Progress>,
-  ): Promise<LibraryItemPage> {
+    progressByItemId: Map<string, ListeningProgress>,
+  ): Promise<LibraryBookPage> {
     const { libraryIndex, page } = decodeCursor(cursor)
     const library = libraries[libraryIndex]
-    if (library === undefined) return { items: [], nextCursor: null } // cursor past the last library
+    if (library === undefined) return { books: [], nextCursor: null } // cursor past the last library
 
     const query = `limit=${limit}&page=${page}&sort=media.metadata.title`
     const data = (await this.getJson(`/api/libraries/${encodeURIComponent(library.id)}/items?${query}`, token)) as {
@@ -356,7 +357,7 @@ export class AbsClient {
     } else if (libraryIndex + 1 < libraries.length) {
       nextCursor = encodeCursor({ libraryIndex: libraryIndex + 1, page: 0 })
     }
-    return { items: results.map((raw) => toSummaryWithProgress(raw, progressByItemId)), nextCursor }
+    return { books: results.map((raw) => toLibraryBookWithProgress(raw, progressByItemId)), nextCursor }
   }
 
   private async search(
@@ -364,8 +365,8 @@ export class AbsClient {
     libraries: { id: string }[],
     searchQuery: string,
     limit: number,
-    progressByItemId: Map<string, Progress>,
-  ): Promise<LibraryItemPage> {
+    progressByItemId: Map<string, ListeningProgress>,
+  ): Promise<LibraryBookPage> {
     const perLibrary = await Promise.all(
       libraries.map(async (library) => {
         const data = (await this.getJson(
@@ -375,11 +376,11 @@ export class AbsClient {
         return Array.isArray(data.book) ? data.book : []
       }),
     )
-    const items = perLibrary
+    const books = perLibrary
       .flat()
-      .map((match) => toSummaryWithProgress(match.libraryItem, progressByItemId))
+      .map((match) => toLibraryBookWithProgress(match.libraryItem, progressByItemId))
       .slice(0, limit)
-    return { items, nextCursor: null }
+    return { books, nextCursor: null }
   }
 
   // Transport + status core shared by every authenticated/proxied ABS call: fetch with the
@@ -458,62 +459,6 @@ export class AbsClient {
     })
     if (result.kind === 'notFound') throw new AbsNotFoundError()
     await result.res.body?.cancel()
-  }
-}
-
-// --- Pure projections: ABS item -> contract shapes ---
-
-interface AbsItem {
-  id?: unknown
-  media?: {
-    duration?: unknown
-    coverPath?: unknown
-    metadata?: { title?: unknown; authorName?: unknown; narratorName?: unknown; description?: unknown }
-  }
-}
-
-// The cover image is served by Ratatoskr's own cover-proxy route (getItemCover), so coverUrl points
-// there rather than at ABS. A path relative to the server origin (it includes the same version mount
-// prefix as the routes, from the shared API_PREFIX constant): the client resolves it against the
-// base it is already talking to, and it needs no request context, so it can be built here in the
-// pure projection.
-function coverPathFor(id: string): string {
-  return `${API_PREFIX}/library/items/${encodeURIComponent(id)}/cover`
-}
-
-// `progress` is present exactly when the user has recorded listening history for the item —
-// a book never listened to carries no progress field (contract: the field is optional).
-function toSummary(raw: unknown, progress?: Progress): LibraryItemSummary {
-  const item = (raw ?? {}) as AbsItem
-  const meta = item.media?.metadata ?? {}
-  const id = String(item.id)
-  // ABS signals cover presence via media.coverPath (null when the item has no cover art). The
-  // contract promises coverUrl null in that case — pointing at the proxy route anyway would hand
-  // clients a guaranteed 404 they re-fetch on every scroll.
-  const hasCover = typeof item.media?.coverPath === 'string' && item.media.coverPath !== ''
-  return {
-    id,
-    title: typeof meta.title === 'string' ? meta.title : '(unknown title)',
-    durationSeconds: typeof item.media?.duration === 'number' && item.media.duration >= 0 ? item.media.duration : 0,
-    coverUrl: hasCover ? coverPathFor(id) : null,
-    ...(typeof meta.authorName === 'string' ? { author: meta.authorName } : {}),
-    ...(progress !== undefined ? { progress } : {}),
-  }
-}
-
-// Summary projection with the user's progress joined in from the per-list progress map.
-function toSummaryWithProgress(raw: unknown, progressByItemId: Map<string, Progress>): LibraryItemSummary {
-  const id = (raw as { id?: unknown } | null | undefined)?.id
-  return toSummary(raw, typeof id === 'string' ? progressByItemId.get(id) : undefined)
-}
-
-function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
-  const meta = ((raw ?? {}) as AbsItem).media?.metadata ?? {}
-  return {
-    ...toSummary(raw),
-    progress,
-    ...(typeof meta.description === 'string' ? { description: meta.description } : {}),
-    ...(typeof meta.narratorName === 'string' ? { narrator: meta.narratorName } : {}),
   }
 }
 

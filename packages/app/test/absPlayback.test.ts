@@ -53,7 +53,7 @@ describe('AbsClient.getPlaybackManifest', () => {
     expect(manifest.author).toBe('')
   })
 
-  it('carries the library item summary (same projection as the library endpoints), cover included', async () => {
+  it('carries the playing book (same projection as the library endpoints), cover presence included', async () => {
     stubFetch(() =>
       jsonResponse({
         id: 'li_1',
@@ -66,18 +66,18 @@ describe('AbsClient.getPlaybackManifest', () => {
       }),
     )
     const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
-    // The whole-book duration (999), not the track-sum (100), and the cover-proxy path — exactly what
-    // GET /v1/library/items/li_1 projects for the same book.
+    // The whole-book duration (999), not the track-sum (100) — exactly what GET /v1/library/items/li_1
+    // projects for the same book, and in the same domain shape (the cover URL is minted at the edge).
     expect(manifest.item).toEqual({
       id: 'li_1',
       title: 'A Book',
       author: 'Jane Doe',
       durationSeconds: 999,
-      coverUrl: '/v1/library/items/li_1/cover',
+      hasCover: true,
     })
   })
 
-  it('projects item.coverUrl as null when the book has no cover art', async () => {
+  it('reports item.hasCover false when the book has no cover art', async () => {
     stubFetch(() =>
       jsonResponse({
         id: 'li_1',
@@ -90,7 +90,7 @@ describe('AbsClient.getPlaybackManifest', () => {
       }),
     )
     const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
-    expect(manifest.item.coverUrl).toBeNull()
+    expect(manifest.item.hasCover).toBe(false)
   })
 
   it('rejects a book with no audio files', async () => {

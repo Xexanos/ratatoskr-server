@@ -1,14 +1,27 @@
 import type { components } from '@ratatoskr/contract'
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
 import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
+import type { LibraryBook } from '../abs/library.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
 import { NoActiveSessionError } from './errors.js'
 
-type Session = components['schemas']['Session']
 type PlaybackState = components['schemas']['PlaybackState']
 type RotatedTokens = components['schemas']['RotatedTokens']
-type LibraryItemSummary = components['schemas']['LibraryItemSummary']
+
+// What the manager reports about the one active session. The playing book travels as the domain
+// LibraryBook, so the cover URL is minted per response by api/ against the mount the response is
+// leaving through, rather than being frozen into the session at start() (SPEC section 13).
+export interface PlaybackSession {
+  itemId: string
+  item: LibraryBook
+  speakerId: string
+  state: PlaybackState
+  positionSeconds: number
+  durationSeconds: number
+  updatedAt: string
+  rotatedTokens: RotatedTokens | undefined
+}
 
 // How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds
 // is about seek accuracy) so that raising the seek tolerance for a flaky speaker does not silently
@@ -37,9 +50,9 @@ interface ActiveSession {
   // The queue's media URLs, so the sync loop can tell our book from a LAN takeover (a household
   // member starting other content on the speaker) by comparing the coordinator's reported TrackURI.
   mediaUrls: string[]
-  // The playing book's library summary (see PlaybackManifest.item), captured once at start and never
-  // refreshed — a metadata edit during playback stays stale until the next session.
-  item: LibraryItemSummary
+  // The playing book (see PlaybackManifest.item), captured once at start and never refreshed — a
+  // metadata edit during playback stays stale until the next session.
+  item: LibraryBook
 }
 
 // Owns the one in-memory session and drives ABS + Sonos to start / report / stop playback
@@ -73,7 +86,7 @@ export class SessionManager {
   // Start (or replace) playback: build the queue from ABS track metadata + the streamer token, play
   // it, and resume from the position stored in ABS. Throws ItemNotPlayableError (400) / AbsAuthError
   // (401) for a bad book or an invalid token — validated BEFORE any active session is touched.
-  async start(userToken: string, refreshToken: string | undefined, itemId: string, speakerId: string): Promise<Session> {
+  async start(userToken: string, refreshToken: string | undefined, itemId: string, speakerId: string): Promise<PlaybackSession> {
     return this.serialize(async () => {
       // Validate the token and confirm the book is playable first: getPlaybackManifest presents the
       // token to ABS (401s an invalid one) and rejects an unplayable book. Only after this is known
@@ -134,7 +147,7 @@ export class SessionManager {
 
   // Pause playback and write the current position immediately (SPEC section 5). The sync loop keeps
   // running so a later resume — or a device-side action — is still reflected.
-  async pause(callerToken: string): Promise<Session> {
+  async pause(callerToken: string): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
       this.noteCaller(callerToken)
@@ -146,7 +159,7 @@ export class SessionManager {
   }
 
   // Resume playback on the existing queue.
-  async resume(callerToken: string): Promise<Session> {
+  async resume(callerToken: string): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
       this.noteCaller(callerToken)
@@ -157,7 +170,7 @@ export class SessionManager {
   }
 
   // Seek to an absolute book position and write it back immediately.
-  async seek(callerToken: string, positionSeconds: number): Promise<Session> {
+  async seek(callerToken: string, positionSeconds: number): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
       this.noteCaller(callerToken)
@@ -170,7 +183,7 @@ export class SessionManager {
 
   // The active session with a live position/state read from the coordinator (so a device-side pause
   // is already reflected here). Throws NoActiveSessionError (404) when nothing is playing.
-  async current(callerToken: string): Promise<Session> {
+  async current(callerToken: string): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
       this.noteCaller(callerToken)
@@ -184,7 +197,7 @@ export class SessionManager {
   // stop — the last chance to deliver it, since the tokens are discarded on stop (SPEC section 8) —
   // and undefined (204) otherwise. `callerToken` is optional so the onClose shutdown hook can stop
   // without a caller.
-  async stop(callerToken?: string): Promise<Session | undefined> {
+  async stop(callerToken?: string): Promise<PlaybackSession | undefined> {
     return this.serialize(async () => {
       const session = this.requireSession()
       if (callerToken !== undefined) this.noteCaller(callerToken)
@@ -474,9 +487,9 @@ export class SessionManager {
     return trackToAbsolute(session.trackDurations, boundedIndex, relTimeSeconds)
   }
 
-  private toSession(callerToken: string, state: PlaybackState, positionSeconds: number): Session {
+  private toSession(callerToken: string, state: PlaybackState, positionSeconds: number): PlaybackSession {
     const session = this.requireSession()
-    const result: Session = {
+    return {
       itemId: session.itemId,
       item: session.item,
       speakerId: session.speakerId,
@@ -484,10 +497,8 @@ export class SessionManager {
       positionSeconds,
       durationSeconds: session.totalDurationSeconds,
       updatedAt: new Date().toISOString(),
+      rotatedTokens: this.rotatedTokensFor(callerToken),
     }
-    const rotated = this.rotatedTokensFor(callerToken)
-    if (rotated !== undefined) result.rotatedTokens = rotated
-    return result
   }
 
   // Deliver a pending rotated pair (SPEC section 8) only to the caller presenting the pre-rotation

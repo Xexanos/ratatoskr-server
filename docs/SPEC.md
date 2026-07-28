@@ -447,7 +447,12 @@ ratatoskr-server/
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
 │   │   ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount,
-│   │   │                       #   and mapping between the domain and the contract types
+│   │   │   │                   #   and mapping between the domain and the contract types:
+│   │   │   ├── contractMapping.ts         #   the one place contract-shaped library and session
+│   │   │   │                              #   values are built; mints coverUrl from the mount
+│   │   │   │                              #   prefix, so the core never carries a URL
+│   │   │   └── contractShapeAssertion.ts  #   compile-time proof that skipping that step is a
+│   │   │                                  #   build error, not a wrong URL on the wire
 │   │   └── main.ts             #   startup wiring
 │   │
 │   ├── fake-sonos/           # @ratatoskr/fake-sonos — the UPnP/SOAP speaker double (test-only):

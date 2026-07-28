@@ -3,6 +3,12 @@ import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
 import type { SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
+import {
+  toLibraryItem,
+  toLibraryItemList,
+  toLibraryItemPage,
+  toSessionResponse,
+} from './contractMapping.js'
 
 type Health = components['schemas']['Health']
 type DependencyStatus = components['schemas']['DependencyStatus']
@@ -50,6 +56,11 @@ export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
   sessions: SessionManager
+  // The version-mount prefix this service is served under, used to mint the cover URLs it hands
+  // out. Injected rather than read from a constant so a service instance always speaks for its own
+  // mount: the URLs in a response then carry the prefix of the major that asked, and the core never
+  // has to know about either.
+  apiPrefix: string
 }
 
 // Implements the contract operations, one method per operationId. fastify-openapi-glue resolves
@@ -60,11 +71,13 @@ export class ApiService {
   private readonly abs: AbsClient
   private readonly sonos: SonosClient
   private readonly sessions: SessionManager
+  private readonly apiPrefix: string
 
   constructor(deps: ApiServiceDeps) {
     this.abs = deps.abs
     this.sonos = deps.sonos
     this.sessions = deps.sessions
+    this.apiPrefix = deps.apiPrefix
   }
 
   async getHealth(): Promise<Health> {
@@ -90,12 +103,14 @@ export class ApiService {
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
-    return this.abs.listItems(request.absToken as string, { searchQuery, limit, cursor })
+    const page = await this.abs.listItems(request.absToken as string, { searchQuery, limit, cursor })
+    return toLibraryItemPage(page, this.apiPrefix)
   }
 
   async getLibraryItem(request: FastifyRequest): Promise<LibraryItem> {
     const { itemId } = request.params as { itemId: string }
-    return this.abs.getItem(request.absToken as string, itemId)
+    const detail = await this.abs.getItem(request.absToken as string, itemId)
+    return toLibraryItem(detail, this.apiPrefix)
   }
 
   // Cover proxy (SPEC section 2 / section 8). Forwards the caller's token to ABS, which both fetches
@@ -115,7 +130,8 @@ export class ApiService {
   // caller's token (which ABS validates), and Fastify applies the querystring `default` for `limit`.
   async listInProgressItems(request: FastifyRequest): Promise<LibraryItemList> {
     const { limit } = request.query as { limit: number }
-    return this.abs.listInProgressItems(request.absToken as string, limit)
+    const books = await this.abs.listInProgressItems(request.absToken as string, limit)
+    return toLibraryItemList(books, this.apiPrefix)
   }
 
   async listSpeakers(): Promise<Speaker[]> {
@@ -129,12 +145,13 @@ export class ApiService {
   // see tokenGuard.ts. startSession is the exception (self-validating): it presents the token to
   // ABS via getPlaybackManifest, which 401s an invalid one.
   async getCurrentSession(request: FastifyRequest): Promise<Session> {
-    return this.sessions.current(request.absToken as string)
+    return toSessionResponse(await this.sessions.current(request.absToken as string), this.apiPrefix)
   }
 
   async startSession(request: FastifyRequest): Promise<Session> {
     const { itemId, speakerId, refreshToken } = request.body as StartSessionRequest
-    return this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
+    const session = await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
+    return toSessionResponse(session, this.apiPrefix)
   }
 
   // 204 normally; 200 + a final Session when a rotated token pair was still pending at stop, so the
@@ -142,7 +159,7 @@ export class ApiService {
   // chance to deliver the pair.
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const final = await this.sessions.stop(request.absToken as string)
-    if (final !== undefined) await reply.code(200).send(final)
+    if (final !== undefined) await reply.code(200).send(toSessionResponse(final, this.apiPrefix))
     else await reply.code(204).send()
   }
 
@@ -150,15 +167,16 @@ export class ApiService {
   // The caller's token is forwarded so an adopted rotated pair stops being redelivered (SPEC
   // section 8).
   async pauseSession(request: FastifyRequest): Promise<Session> {
-    return this.sessions.pause(request.absToken as string)
+    return toSessionResponse(await this.sessions.pause(request.absToken as string), this.apiPrefix)
   }
 
   async resumeSession(request: FastifyRequest): Promise<Session> {
-    return this.sessions.resume(request.absToken as string)
+    return toSessionResponse(await this.sessions.resume(request.absToken as string), this.apiPrefix)
   }
 
   async seekSession(request: FastifyRequest): Promise<Session> {
     const { positionSeconds } = request.body as SeekRequest
-    return this.sessions.seek(request.absToken as string, positionSeconds)
+    const session = await this.sessions.seek(request.absToken as string, positionSeconds)
+    return toSessionResponse(session, this.apiPrefix)
   }
 }

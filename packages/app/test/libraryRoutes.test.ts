@@ -6,7 +6,12 @@ import { buildApp } from '../src/api/app.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
+// What AbsClient hands the service (the domain book) and what the route must then put on the wire
+// (the contract summary, cover URL minted under the serving mount). Keeping both here is the point:
+// these tests are where the domain -> contract step is checked end to end through a real route.
+const BOOK = { id: 'li_1', title: 'Alpha', author: undefined, durationSeconds: 3600, hasCover: true, progress: undefined }
 const SUMMARY = { id: 'li_1', title: 'Alpha', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' }
+const BOOK_DETAIL = { ...BOOK, progress: { positionSeconds: 0, isFinished: false }, description: undefined, narrator: undefined }
 const ITEM = { ...SUMMARY, progress: { positionSeconds: 0, isFinished: false } }
 
 function appWith(abs: Partial<AbsClient>) {
@@ -17,7 +22,7 @@ describe('GET /v1/library/items', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the projected page and forwards the token, query and default limit', async () => {
-    const listItems = vi.fn().mockResolvedValue({ items: [SUMMARY], nextCursor: null })
+    const listItems = vi.fn().mockResolvedValue({ books: [BOOK], nextCursor: null })
     const app = await appWith({ listItems })
     const res = await app.inject({ method: 'GET', url: '/v1/library/items?q=alpha', headers: AUTH })
 
@@ -65,7 +70,7 @@ describe('GET /v1/library/items/:itemId', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the item for a valid id', async () => {
-    const getItem = vi.fn().mockResolvedValue(ITEM)
+    const getItem = vi.fn().mockResolvedValue(BOOK_DETAIL)
     const app = await appWith({ getItem })
     const res = await app.inject({ method: 'GET', url: '/v1/library/items/li_1', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -154,7 +159,7 @@ describe('GET /v1/library/in-progress', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the shelf and forwards the token with the default limit', async () => {
-    const listInProgressItems = vi.fn().mockResolvedValue({ items: [SUMMARY] })
+    const listInProgressItems = vi.fn().mockResolvedValue([BOOK])
     const app = await appWith({ listInProgressItems })
     const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress', headers: AUTH })
 
@@ -165,7 +170,7 @@ describe('GET /v1/library/in-progress', () => {
   })
 
   it('forwards an explicit limit', async () => {
-    const listInProgressItems = vi.fn().mockResolvedValue({ items: [] })
+    const listInProgressItems = vi.fn().mockResolvedValue([])
     const app = await appWith({ listInProgressItems })
     const res = await app.inject({ method: 'GET', url: '/v1/library/in-progress?limit=10', headers: AUTH })
 

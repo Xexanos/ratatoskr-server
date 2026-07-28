@@ -94,7 +94,9 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // Routes, request/response schemas and per-operation auth are all derived from the contract
   // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
   // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
-  const service = new ApiService({ abs, sonos, sessions })
+  // The same API_PREFIX the routes are mounted under below, so the cover URLs the service mints can
+  // never drift from the mount they have to be resolvable against.
+  const service = new ApiService({ abs, sonos, sessions, apiPrefix: API_PREFIX })
   const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   // Every bearer-protected operation proves the caller's token against ABS before acting —
   // either its handler forwards the token itself (self-validating), or the guard runs

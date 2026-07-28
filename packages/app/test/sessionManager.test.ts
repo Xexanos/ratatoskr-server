@@ -6,16 +6,17 @@ import type { SonosClient } from '../src/sonos/client.js'
 import { SessionManager } from '../src/playback/sessionManager.js'
 import { NoActiveSessionError } from '../src/playback/errors.js'
 
-// The library summary the manifest carries for li_1 — the same shape the library endpoints project
-// (id/title/author/durationSeconds/coverUrl). durationSeconds here is ABS's whole-book duration
+// The book the manifest carries for li_1 — the same domain shape the library endpoints project
+// (id/title/author/durationSeconds/hasCover). durationSeconds here is ABS's whole-book duration
 // (301), deliberately distinct from the track-sum totalDurationSeconds (300) so tests can tell which
 // value the session echoes on `item`.
-const ITEM_SUMMARY = {
+const ITEM_BOOK = {
   id: 'li_1',
   title: 'The Test Book',
   author: 'Jane Doe',
   durationSeconds: 301,
-  coverUrl: '/v1/library/items/li_1/cover',
+  hasCover: true,
+  progress: undefined,
 }
 
 const MANIFEST: PlaybackManifest = {
@@ -27,7 +28,7 @@ const MANIFEST: PlaybackManifest = {
   totalDurationSeconds: 300,
   title: 'The Test Book',
   author: 'Jane Doe',
-  item: ITEM_SUMMARY,
+  item: ITEM_BOOK,
 }
 
 // A minimal JWT (header.payload.signature, base64url) carrying an `exp` claim, so the manager's
@@ -188,21 +189,21 @@ describe('SessionManager', () => {
   describe('item summary on session responses (#107)', () => {
     it('populates item with the playing book summary on start', async () => {
       const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      expect(session.item).toEqual(ITEM_SUMMARY)
+      expect(session.item).toEqual(ITEM_BOOK)
     })
 
     it('echoes item on current, pause, resume, and seek', async () => {
       await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      expect((await ctx.manager.current('user-tok')).item).toEqual(ITEM_SUMMARY)
-      expect((await ctx.manager.pause('user-tok')).item).toEqual(ITEM_SUMMARY)
-      expect((await ctx.manager.resume('user-tok')).item).toEqual(ITEM_SUMMARY)
-      expect((await ctx.manager.seek('user-tok', 120)).item).toEqual(ITEM_SUMMARY)
+      expect((await ctx.manager.current('user-tok')).item).toEqual(ITEM_BOOK)
+      expect((await ctx.manager.pause('user-tok')).item).toEqual(ITEM_BOOK)
+      expect((await ctx.manager.resume('user-tok')).item).toEqual(ITEM_BOOK)
+      expect((await ctx.manager.seek('user-tok', 120)).item).toEqual(ITEM_BOOK)
     })
 
-    it('carries coverUrl null through to the session when the book has no cover', async () => {
-      ctx.abs.getPlaybackManifest.mockResolvedValue({ ...MANIFEST, item: { ...ITEM_SUMMARY, coverUrl: null } })
+    it('carries hasCover false through to the session when the book has no cover', async () => {
+      ctx.abs.getPlaybackManifest.mockResolvedValue({ ...MANIFEST, item: { ...ITEM_BOOK, hasCover: false } })
       const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      expect(session.item?.coverUrl).toBeNull()
+      expect(session.item.hasCover).toBe(false)
     })
 
     it('keeps item distinct from the session durationSeconds (item carries the whole-book duration)', async () => {
@@ -576,7 +577,7 @@ describe('SessionManager', () => {
       const finalStop = await ctx.manager.stop(ownerToken) // owner, has not adopted yet
       expect(finalStop?.rotatedTokens).toEqual({ accessToken: 'new-access', refreshToken: 'new-refresh' })
       expect(['stopped', 'finished']).toContain(finalStop?.state)
-      expect(finalStop?.item).toEqual(ITEM_SUMMARY) // the final Session carries the item too
+      expect(finalStop?.item).toEqual(ITEM_BOOK) // the final Session carries the item too
 
       // A non-owner stopping while a pair is pending gets the 204 path (no pair leaked).
       await startNearExpiry()
