@@ -201,9 +201,7 @@ describe('SessionStore', () => {
   })
 
   // These payloads authenticate under the right key but are not a store — reachable only by a
-  // format change or a bug on the write side, and the point is that neither degenerates into
-  // silently starting empty (which would sign every device out) or into a TypeError in the auth
-  // path later.
+  // format change or a bug on the write side (see asEntry for why the shape is checked at all).
   it('refuses a decrypted payload that is not JSON', async () => {
     await writeFile(path, encodeStoreFile(KEY, Buffer.from('not json at all', 'utf8')))
     await expect(open()).rejects.toThrow(/not valid JSON/)

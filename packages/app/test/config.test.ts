@@ -4,8 +4,7 @@ import { ConfigError, loadConfig } from '../src/config/index.js'
 
 const CERT = fileURLToPath(new URL('./fixtures/tls/cert.pem', import.meta.url))
 const KEY = fileURLToPath(new URL('./fixtures/tls/key.pem', import.meta.url))
-// The fixture carries a trailing newline on purpose: `docker secret` / `printf` written key
-// files usually do, and the file variant has to tolerate it.
+// The fixture carries a trailing newline on purpose (see EnvReader.sessionStoreKey).
 const SESSION_KEY_FILE = fileURLToPath(new URL('./fixtures/session-store.key', import.meta.url))
 const SESSION_KEY = Buffer.alloc(32, 0x2a)
 const SESSION_KEY_B64 = SESSION_KEY.toString('base64')

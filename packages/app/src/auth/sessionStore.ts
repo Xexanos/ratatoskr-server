@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { SessionStoreCorruptError, SessionStoreError } from './errors.js'
+import { SessionStoreCorruptError, SessionStoreIoError } from './errors.js'
 import { decodeStoreFile, encodeStoreFile, writeFileAtomic } from './sessionFile.js'
 
 // One device login's private Audiobookshelf session: the access token in use plus the refresh
@@ -36,8 +36,8 @@ export interface SessionStoreOptions {
 // device login, held in memory for the token guard's in-process lookup and mirrored into a
 // single AES-256-GCM file so "signed in until explicit sign-out" survives a server restart.
 //
-// Scope guard (SPEC section 11): this store persists **credentials**, not domain state. Progress
-// and user data live in Audiobookshelf only — do not grow this into a database.
+// Scope guard (SPEC section 11): this store persists credentials, not domain state. Progress and
+// user data live in Audiobookshelf only — do not grow this into a database.
 export class SessionStore {
   private entries: Map<string, SessionEntry>
   // Tail of the write chain, so concurrent mutations queue instead of racing the same file.
@@ -54,7 +54,8 @@ export class SessionStore {
   static async open(options: SessionStoreOptions): Promise<SessionStore> {
     const { path, key } = options
     const file = await readStoreFile(path)
-    const entries = file === undefined ? new Map<string, SessionEntry>() : parseEntries(decodeStoreFile(key, file, path), path)
+    const entries =
+      file === undefined ? new Map<string, SessionEntry>() : parseEntries(decodeStoreFile(key, file, path), path)
     const store = new SessionStore(path, key, entries)
     // Create the file right away when it is absent, so an unwritable volume or a broken mount
     // fails loud at boot rather than at some user's first sign-in hours later.
@@ -158,7 +159,7 @@ async function readStoreFile(path: string): Promise<Buffer | undefined> {
     return await readFile(path)
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw new SessionStoreError(`The session store at ${path} could not be read. Refusing to continue.`, { cause })
+    throw new SessionStoreIoError(path, { cause })
   }
 }
 

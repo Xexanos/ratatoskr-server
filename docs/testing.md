@@ -28,9 +28,10 @@ Runner: **Vitest** (TypeScript/ESM-native).
 - config / environment validation
 - log redaction (no secret ever reaches a log line)
 - token-rotation bookkeeping
-- the encrypted session store (`test/sessionStore.test.ts`): the AES-256-GCM envelope, atomic
-  replacement of the file, and its refusal to continue on a wrong key or unreadable content
-  rather than starting from an empty store
+- the encrypted session store (`test/sessionStore.test.ts`, against a temp directory — like the
+  config tests it needs real files): the AES-256-GCM envelope, atomic replacement of the file,
+  and its refusal to continue on a wrong key or unreadable content rather than starting from an
+  empty store
 - seek tolerance / settle math
 
 ### Component — one subsystem against a simulated neighbor

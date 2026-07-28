@@ -23,6 +23,15 @@ export class SessionStoreKeyError extends SessionStoreError {
   }
 }
 
+// The file exists but could not be read at all (permissions, a broken mount, a directory where
+// the store should be). Nothing is known about its contents, so it stays untouched.
+export class SessionStoreIoError extends SessionStoreError {
+  constructor(path: string, options: { cause: unknown }) {
+    super(`The session store at ${path} could not be read. Refusing to continue.`, options)
+    this.name = 'SessionStoreIoError'
+  }
+}
+
 // The file is not a session store this build can read: foreign content, a truncated write,
 // an unknown format version, or a payload that survived decryption but is not the expected
 // shape. Distinct from SessionStoreKeyError because the remedy differs — a wrong key is

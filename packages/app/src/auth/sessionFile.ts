@@ -20,7 +20,7 @@ const IV_LENGTH = 12
 const TAG_LENGTH = 16
 const HEADER_LENGTH = MAGIC.length + IV_LENGTH + TAG_LENGTH
 
-export const KEY_LENGTH = 32
+const KEY_LENGTH = 32
 
 // Owner read/write only: the file holds every signed-in device's ABS chain, and it lives on a
 // volume the operator may share with other containers (the TLS cert sits next to it).

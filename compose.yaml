@@ -123,9 +123,10 @@ services:
     # ./tls persists the auto-generated self-signed certificate across restarts (so the app's pinned
     # fingerprint stays valid), and is also where you drop your OWN cert.pem/key.pem or an ABS CA PEM
     # if you set the *_PATH variables above. The encrypted session store (SESSION_STORE_PATH) shares
-    # it, which is why it must survive a container recreation. The container runs as uid 1000, so this directory must
-    # be writable by it: on Linux, create it first with `mkdir -p tls` (or `chown 1000:1000 tls` if
-    # it already exists root-owned). Prefer a named volume instead? Replace the line below with
+    # it, which is why the directory must survive a container recreation. The container runs as uid
+    # 1000, so this directory must be writable by it: on Linux, create it first with `mkdir -p tls`
+    # (or `chown 1000:1000 tls` if it already exists root-owned).
+    # Prefer a named volume instead? Replace the line below with
     # `- ratatoskr-tls:/tls` and add a top-level `volumes: { ratatoskr-tls: {} }` — it inherits
     # writable ownership automatically, at the cost of the cert being less easy to inspect.
     volumes:
