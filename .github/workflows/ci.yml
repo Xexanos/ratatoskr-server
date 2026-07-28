@@ -84,7 +84,7 @@ jobs:
                        --to ${{ github.event.pull_request.head.sha }} --verbose
 
   # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
-  # change in a breaking way within /v1 without a major version bump.
+  # change in a breaking way within a major without a major version bump.
   oasdiff:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -94,7 +94,32 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - run: git fetch --depth=1 origin ${{ github.base_ref }}
-      - uses: oasdiff/oasdiff-action/breaking@024f6c399f9a21ada1addb0f9a36ce1bfac995f1 # v0.1.6
+      # The rule SPEC section 6 states is "no breaking change *without* a major version bump", so the
+      # major is what decides whether the check applies. Reading it here makes a deliberate cut (the
+      # /v2 auth surface, ADR-0001) pass on its own evidence, instead of a hand-set one-time flag that
+      # someone then has to remember to remove — and every break that does not bump the major, which
+      # is the case the job exists for, still fails. Only the top-level info.version counts; a failure
+      # to read it is fatal rather than a silent skip.
+      - id: contract-major
+        run: |
+          contract_major() {
+            git show "$1:contract/openapi.yaml" |
+              awk '/^info:/ { inside = 1; next } /^[^[:space:]]/ { inside = 0 } inside && $1 == "version:" { print $2; exit }' |
+              cut -d. -f1
+          }
+          base=$(contract_major "origin/${{ github.base_ref }}")
+          head=$(contract_major HEAD)
+          if [ -z "$base" ] || [ -z "$head" ]; then
+            echo "could not read info.version from contract/openapi.yaml (base='$base', head='$head')" >&2
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          if [ "$base" != "$head" ]; then
+            echo "::notice::contract major $base -> $head: breaking changes are expected at a major cut, skipping the oasdiff breaking check"
+          fi
+      - if: steps.contract-major.outputs.base == steps.contract-major.outputs.head
+        uses: oasdiff/oasdiff-action/breaking@024f6c399f9a21ada1addb0f9a36ce1bfac995f1 # v0.1.6
         with:
           base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
           revision: "HEAD:contract/openapi.yaml"
