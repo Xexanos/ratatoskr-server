@@ -102,11 +102,10 @@ services:
       # SESSION_STORE_KEY: "replace-with-the-output-of-openssl-rand--base64-32"
       # SESSION_STORE_KEY_FILE: "/run/secrets/session_store_key"
       # Where the store file lives (file mode 0600). Leave it unset and the container puts it in the
-      # ./tls volume below — the one directory this image persists — so there is nothing extra to
-      # mount. Only ever point ONE running Ratatoskr at a given store file: a second instance
-      # sharing it is refused rather than allowed to overwrite the first one's signed-in devices,
-      # so its sign-ins then fail until you give it its own path.
-      # SESSION_STORE_PATH: "/tls/sessions.enc"
+      # ./data volume below. Only ever point ONE running Ratatoskr at a given store file: a second
+      # instance sharing it is refused rather than allowed to overwrite the first one's signed-in
+      # devices, so its sign-ins then fail until you give it its own path.
+      # SESSION_STORE_PATH: "/data/sessions.enc"
 
       # ─────────── Listener port ───────────
       # PORT: "8080"
@@ -125,12 +124,20 @@ services:
 
     # ./tls persists the auto-generated self-signed certificate across restarts (so the app's pinned
     # fingerprint stays valid), and is also where you drop your OWN cert.pem/key.pem or an ABS CA PEM
-    # if you set the *_PATH variables above. The encrypted session store (SESSION_STORE_PATH) shares
-    # it, which is why the directory must survive a container recreation. The container runs as uid
-    # 1000, so this directory must be writable by it: on Linux, create it first with `mkdir -p tls`
-    # (or `chown 1000:1000 tls` if it already exists root-owned).
-    # Prefer a named volume instead? Replace the line below with
-    # `- ratatoskr-tls:/tls` and add a top-level `volumes: { ratatoskr-tls: {} }` — it inherits
-    # writable ownership automatically, at the cost of the cert being less easy to inspect.
+    # if you set the *_PATH variables above.
+    #
+    # ./data persists the server's own state — currently just the encrypted session store (who is
+    # signed in). It is a SEPARATE directory from ./tls on purpose: the certificate can be
+    # regenerated (delete ./tls and a new one appears, at the cost of re-confirming the fingerprint
+    # in the app), while ./data cannot — deleting the store signs every device out and each has to
+    # log in again. Back up ./data; you do not need to back up ./tls.
+    #
+    # The container runs as uid 1000, so BOTH directories must be writable by it: on Linux, create
+    # them first with `mkdir -p tls data` (or `chown 1000:1000 tls data` if they already exist
+    # root-owned). Prefer named volumes instead? Replace the lines below with `- ratatoskr-tls:/tls`
+    # and `- ratatoskr-data:/data`, and add a top-level `volumes: { ratatoskr-tls: {},
+    # ratatoskr-data: {} }` — they inherit writable ownership automatically, at the cost of the
+    # files being less easy to inspect and back up.
     volumes:
       - ./tls:/tls
+      - ./data:/data

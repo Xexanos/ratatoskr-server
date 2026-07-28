@@ -214,9 +214,10 @@ if something required is missing:
 - `SESSION_STORE_PATH` — where that store file lives (section 8). Deliberately without a default,
   like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation is a
   property of the deployment, and a wrong guess would silently sign every device out on the next
-  restart. The container entrypoint therefore supplies it the same way it supplies the certificate
-  paths — pointing at the one volume the image persists, which is also where the certificate ends
-  up because there is only one, not because the two are related.
+  restart. The container entrypoint supplies it the same way it supplies the certificate paths,
+  pointing into the image's own `/data` volume (the server's own persistent state, so future
+  additions have somewhere to go without another rename) — separate from the certificate's
+  `/tls`, since the certificate is regenerable and the store is not (see section 8).
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
@@ -255,8 +256,12 @@ re-login.
   comparison against expiring/rotating alternatives: ADR-0001.)
 - **Session store**: one entry per device login — the token hash, that device's own ABS
   chain, and metadata. **One ABS chain per device, never shared**; no two consumers of a
-  rotating chain ever exist again. The store is a single AES-256-GCM-encrypted file on the
-  mounted volume (where the TLS cert already lives), file mode 0600, non-root. The key is
+  rotating chain ever exist again. The store is a single AES-256-GCM-encrypted file on its
+  own mounted volume (`/data` in the container), file mode 0600, non-root — deliberately not
+  the certificate's volume, revising ADR-0001's "existing mounted volume": the two share no
+  lifecycle, since a certificate can be regenerated at the price of re-confirming its
+  fingerprint, while this file is irreplaceable and losing it signs every device out. That
+  also makes the backup rule one sentence: back up `/data`, not the cert. The key is
   operator-supplied and mandatory (`SESSION_STORE_KEY`, section 7); without it the server
   refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14).
 - **Keep-alive**: the server refreshes every stored ABS chain daily (jittered), refreshes
