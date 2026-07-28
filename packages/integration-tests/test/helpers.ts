@@ -11,7 +11,16 @@ import { Ajv, type ValidateFunction } from 'ajv'
 // Both the config/health smoke test and the live-Audiobookshelf tests build on this.
 
 export const DIST_MAIN = fileURLToPath(new URL('../../app/dist/main.js', import.meta.url))
-export const CONTRACT = fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url))
+
+// The contract of each served major, keyed by its mount prefix (SPEC section 6). `/v1` is the copy of
+// contract 1.4.0 that the contract-freeze CI job holds byte-identical to the contract-1.4.0 tag, so
+// grading a /v1 response against this file is grading it against that tag.
+export const CONTRACTS = {
+  '/v1': fileURLToPath(new URL('../../../contract/v1/openapi.yaml', import.meta.url)),
+  '/v2': fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url)),
+} as const
+
+export type ServedMajor = keyof typeof CONTRACTS
 
 // Env keys the config reader consumes — removed from the inherited env so a test is
 // hermetic no matter what the host shell has set. The rest of process.env is inherited
@@ -133,14 +142,20 @@ export function assertServerBuilt(): void {
 // its own homework. strict:false because the contract uses OpenAPI-3.0 keywords (nullable,
 // format: double) that plain Ajv rejects; note this *ignores* nullable rather than honoring
 // it, which is fine for the shapes asserted here (their required fields are never null).
-let contractAjv: Ajv | undefined
+//
+// One Ajv per served major, because a schema name means different things in each: a /v1 Session may
+// carry the rotation handover, a /v2 one has no such field. Grading a response against the other
+// major's document would accept shapes the major it came from does not promise.
+const contractAjvs = new Map<ServedMajor, Ajv>()
 
-export function contractValidator(schemaName: string): ValidateFunction {
-  if (!contractAjv) {
-    contractAjv = new Ajv({ strict: false })
-    contractAjv.addSchema(load(readFileSync(CONTRACT, 'utf8')) as object, 'contract')
+export function contractValidator(schemaName: string, major: ServedMajor = '/v2'): ValidateFunction {
+  let ajv = contractAjvs.get(major)
+  if (ajv === undefined) {
+    ajv = new Ajv({ strict: false })
+    ajv.addSchema(load(readFileSync(CONTRACTS[major], 'utf8')) as object, 'contract')
+    contractAjvs.set(major, ajv)
   }
-  const validate = contractAjv.getSchema(`contract#/components/schemas/${schemaName}`)
-  if (!validate) throw new Error(`${schemaName} schema not found in contract`)
+  const validate = ajv.getSchema(`contract#/components/schemas/${schemaName}`)
+  if (!validate) throw new Error(`${schemaName} schema not found in the ${major} contract`)
   return validate as ValidateFunction
 }

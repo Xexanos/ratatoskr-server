@@ -91,6 +91,16 @@ describe('server process smoke test', () => {
     expect(validate.errors).toBeNull()
     expect(valid).toBe(true)
 
+    // The same server also serves the frozen /v1 major (SPEC section 6), which the installed app base
+    // talks to — so the real process, not just an inject()ed app, has to answer there, and answer
+    // conformantly to the 1.4.0 contract rather than to the one under development.
+    const v1 = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    expect(v1.status).toBe(200)
+    const validateV1 = contractValidator('Health', '/v1')
+    const validV1 = validateV1(await v1.json())
+    expect(validateV1.errors).toBeNull()
+    expect(validV1).toBe(true)
+
     // Once the first probe actually settles - no real Sonos on the CI/test network, so discovery
     // finds nothing - the now-confirmed-unreachable Sonos does drag the overall status down.
     const settled = await pollUntilSettled(port)
