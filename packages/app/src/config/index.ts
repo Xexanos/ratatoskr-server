@@ -37,10 +37,11 @@ export interface Config {
   // Position write backoff (SPEC section 5): subtract this from the position written to ABS, since
   // Sonos's reported RelTime runs slightly ahead of the audible output (buffering). 0 disables it.
   writePositionBackoffSeconds: number
-  // Where the encrypted session store lives (SPEC section 8) — rationale on
-  // DEFAULT_SESSION_STORE_PATH — and the operator-supplied key that encrypts it, decoded by
-  // EnvReader's sessionStoreKey.
-  sessionStorePath: string
+  // Where the encrypted session store lives (SPEC section 8) and the operator-supplied key that
+  // encrypts it (decoded by EnvReader's sessionStoreKey). No default for the path: which directory
+  // survives a container recreation is a deployment fact, not something this process can guess, so
+  // the container entrypoint supplies it the same way it supplies TLS_CERT_PATH/TLS_KEY_PATH.
+  sessionStorePath: string | undefined
   sessionStoreKey: Buffer | undefined
   tls: TlsConfig | undefined
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
@@ -54,11 +55,6 @@ export interface Config {
 }
 
 type Env = Record<string, string | undefined>
-
-// The container mounts one volume, /tls, for the certificate it generates; the session store
-// shares it (SPEC section 8) so an upgrading operator has nothing new to mount. Running outside
-// the container means overriding this — /tls does not exist there.
-const DEFAULT_SESSION_STORE_PATH = '/tls/sessions.enc'
 
 // Validation deliberately aggregates every problem and throws a single ConfigError at the
 // end, instead of failing fast on the first — one restart cycle to see everything that's
@@ -260,7 +256,7 @@ export function loadConfig(env: Env = process.env): Config {
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),
     writePositionBackoffSeconds: reader.nonNegativeNumber('WRITE_POSITION_BACKOFF_SECONDS', 2),
-    sessionStorePath: env.SESSION_STORE_PATH?.trim() || DEFAULT_SESSION_STORE_PATH,
+    sessionStorePath: env.SESSION_STORE_PATH?.trim() || undefined,
     sessionStoreKey: reader.sessionStoreKey(),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),

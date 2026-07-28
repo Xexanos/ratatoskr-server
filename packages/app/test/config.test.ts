@@ -202,8 +202,10 @@ describe('loadConfig', () => {
     expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: Buffer.alloc(16).toString('base64') }, 'must be a 256-bit key')
   })
 
-  it('defaults the store path to the mounted volume and lets it be overridden', () => {
-    expect(loadConfig(REQUIRED).sessionStorePath).toBe('/tls/sessions.enc')
+  // No default on purpose — the container entrypoint decides the location (see SPEC section 7),
+  // because guessing a directory that does not outlive a restart would silently sign devices out.
+  it('leaves the store path unset unless it is configured', () => {
+    expect(loadConfig(REQUIRED).sessionStorePath).toBeUndefined()
     expect(loadConfig({ ...REQUIRED, SESSION_STORE_PATH: '/data/s.enc' }).sessionStorePath).toBe('/data/s.enc')
   })
 })

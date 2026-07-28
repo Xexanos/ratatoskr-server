@@ -211,10 +211,12 @@ if something required is missing:
   Docker-secret-compatible file path. A 256-bit key, base64- or hex-encoded (`openssl rand
   -base64 32`); a trailing newline in the file variant is tolerated. Missing key → the server
   refuses to boot; wrong key → a clear error, never silent data loss.
-- `SESSION_STORE_PATH` (optional, default `/tls/sessions.enc`) — where that store file lives.
-  The default is inside the volume the container already mounts for its TLS certificate
-  (section 8), so a deployment needs no second mount; override it when running outside the
-  container, where `/tls` does not exist.
+- `SESSION_STORE_PATH` — where that store file lives (section 8). Deliberately without a default,
+  like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation is a
+  property of the deployment, and a wrong guess would silently sign every device out on the next
+  restart. The container entrypoint therefore supplies it the same way it supplies the certificate
+  paths — pointing at the one volume the image persists, which is also where the certificate ends
+  up because there is only one, not because the two are related.
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
