@@ -1,4 +1,3 @@
-import type { components } from '@ratatoskr/contract'
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
 import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
 import type { LibraryBook } from '../abs/library.js'
@@ -6,8 +5,17 @@ import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
 import { NoActiveSessionError } from './errors.js'
 
-type PlaybackState = components['schemas']['PlaybackState']
-type RotatedTokens = components['schemas']['RotatedTokens']
+// What the transport is doing, as this module understands it. `finished` is not a transport state
+// the speaker reports — it is this module's reading of "stopped within the end-of-book window".
+export type PlaybackPhase = 'playing' | 'paused' | 'buffering' | 'stopped' | 'finished'
+
+// A renewed ABS token pair the server holds for the listening user. Whether it is ever handed to a
+// client is a per-major decision, so it is not a contract type: /v1 delivers it on Session
+// responses (SPEC section 8), and a major with opaque server-side tokens would not.
+export interface RotatedTokenPair {
+  accessToken: string
+  refreshToken: string
+}
 
 // What the manager reports about the one active session. The playing book travels as the domain
 // LibraryBook, so its cover URL is minted per response at the edge rather than frozen into the
@@ -16,11 +24,11 @@ export interface PlaybackSession {
   itemId: string
   item: LibraryBook
   speakerId: string
-  state: PlaybackState
+  state: PlaybackPhase
   positionSeconds: number
   durationSeconds: number
   updatedAt: string
-  rotatedTokens: RotatedTokens | undefined
+  rotatedTokens: RotatedTokenPair | undefined
 }
 
 // How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds
@@ -78,7 +86,7 @@ export class SessionManager {
   // multi-user ABS a different user polling the session can't receive the owner's refresh token — and
   // only until the client authenticates with the new access token (adoption). Both are discarded
   // whenever the session ends.
-  private pendingRotatedTokens: RotatedTokens | undefined
+  private pendingRotatedTokens: RotatedTokenPair | undefined
   private preRotationToken: string | undefined
 
   constructor(private readonly deps: SessionManagerDeps) {}
@@ -303,7 +311,7 @@ export class SessionManager {
     // skipped by a transient speaker hiccup and the write-back/finalize that follow use a fresh token.
     await this.maybeRotateTokens(session)
 
-    let live: { absolute: number; state: PlaybackState; trackUri: string }
+    let live: { absolute: number; state: PlaybackPhase; trackUri: string }
     try {
       live = await this.readLive(session)
     } catch {
@@ -443,7 +451,7 @@ export class SessionManager {
   // playing track's URI — shared by current/syncOnce/stopInternal/pause/resume/seek. The CALLER
   // decides the catch policy: current() propagates (a GET should surface a dead speaker), the loop
   // and stopInternal swallow-and-skip, pause/resume/seek fall back to the last written position.
-  private async readLive(session: ActiveSession): Promise<{ absolute: number; state: PlaybackState; trackUri: string }> {
+  private async readLive(session: ActiveSession): Promise<{ absolute: number; state: PlaybackPhase; trackUri: string }> {
     const [position, transportState] = await Promise.all([
       this.deps.sonos.getPosition(session.speakerId),
       this.deps.sonos.getTransportState(session.speakerId),
@@ -463,7 +471,7 @@ export class SessionManager {
     }
   }
 
-  private async readState(session: ActiveSession): Promise<PlaybackState> {
+  private async readState(session: ActiveSession): Promise<PlaybackPhase> {
     try {
       return (await this.readLive(session)).state
     } catch {
@@ -487,7 +495,7 @@ export class SessionManager {
     return trackToAbsolute(session.trackDurations, boundedIndex, relTimeSeconds)
   }
 
-  private toSession(callerToken: string, state: PlaybackState, positionSeconds: number): PlaybackSession {
+  private toSession(callerToken: string, state: PlaybackPhase, positionSeconds: number): PlaybackSession {
     const session = this.requireSession()
     return {
       itemId: session.itemId,
@@ -505,7 +513,7 @@ export class SessionManager {
   // access token — the session owner, whose old token stays valid until its own expiry. Ties the
   // handover to the owner so a different valid ABS user can't collect it. Never logged: the server
   // does not log response bodies, and the request serializer strips the URL query (section 14).
-  private rotatedTokensFor(callerToken: string): RotatedTokens | undefined {
+  private rotatedTokensFor(callerToken: string): RotatedTokenPair | undefined {
     return callerToken === this.preRotationToken ? this.pendingRotatedTokens : undefined
   }
 
@@ -544,7 +552,7 @@ function jwtExpSeconds(token: string): number | undefined {
   }
 }
 
-function mapTransportState(state: string): PlaybackState {
+function mapTransportState(state: string): PlaybackPhase {
   switch (state) {
     case 'PLAYING':
       return 'playing'

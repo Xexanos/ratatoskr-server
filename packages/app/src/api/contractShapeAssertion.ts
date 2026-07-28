@@ -1,6 +1,7 @@
 import type { components } from '@ratatoskr/contract'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
 import type { PlaybackSession } from '../playback/sessionManager.js'
+import type { SonosSpeaker } from '../sonos/client.js'
 
 // Compile-time assertions that the domain shapes cannot be handed to a caller expecting the
 // contract's — i.e. that skipping contractMapping.ts is a build failure, not a wrong URL on the wire.
@@ -29,3 +30,11 @@ export type DetailIsNotAnItem = Assert<Rejects<LibraryBookDetail, components['sc
 // This one holds without the flag's help: the domain says `books` where the contract requires `items`.
 export type PageIsNotAContractPage = Assert<Rejects<LibraryBookPage, components['schemas']['LibraryItemPage']>>
 export type SessionIsNotAContractSession = Assert<Rejects<PlaybackSession, components['schemas']['Session']>>
+export type SonosSpeakerIsNotASpeaker = Assert<Rejects<SonosSpeaker, components['schemas']['Speaker']>>
+
+// Deliberately NOT asserted here: AbsTokenPair, RotatedTokenPair and PlaybackPhase. Those contract
+// schemas are all-required (or a bare string union), so a domain twin of each is structurally
+// identical and no assertion could hold. That costs nothing, because an identical twin passed through
+// unmapped would put exactly the right bytes on the wire — the silent-wrong-value risk this file
+// guards only exists where the shapes genuinely differ. What keeps those three out of the core is the
+// import boundary in eslint.config.js, not the type system.

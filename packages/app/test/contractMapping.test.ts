@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { LibraryBook, LibraryBookDetail } from '../src/abs/library.js'
 import {
+  toAuthTokens,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
   toLibraryItemSummary,
   toSessionResponse,
+  toSpeaker,
 } from '../src/api/contractMapping.js'
 import type { PlaybackSession } from '../src/playback/sessionManager.js'
 
@@ -115,6 +117,41 @@ describe('domain -> contract mapping', () => {
       const item = toLibraryItem(detail({ description: undefined, narrator: undefined }), PREFIX)
       expect(item).not.toHaveProperty('description')
       expect(item).not.toHaveProperty('narrator')
+    })
+  })
+
+  describe('speaker', () => {
+    it('carries a group with its member room names', () => {
+      const zone = { id: 'rincon_1', name: 'Living Room', isGroup: true, members: ['Kitchen', 'Living Room'] }
+      expect(toSpeaker(zone)).toEqual(zone)
+    })
+
+    // The contract documents members as "room names in the group, when isGroup is true", so an absent
+    // list and an empty one are not interchangeable to a client rendering it.
+    it('drops members entirely for a lone speaker rather than sending undefined or an empty list', () => {
+      const speaker = toSpeaker({ id: 'rincon_2', name: 'Office', isGroup: false, members: undefined })
+      expect(speaker).toEqual({ id: 'rincon_2', name: 'Office', isGroup: false })
+      expect(speaker).not.toHaveProperty('members')
+    })
+  })
+
+  describe('auth tokens', () => {
+    it('maps the ABS pair and its user onto the contract shape', () => {
+      const pair = {
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+        user: { id: 'usr_1', username: 'lars' },
+      }
+      expect(toAuthTokens(pair)).toEqual(pair)
+    })
+
+    // A fresh object, not the upstream one passed through: the two types coincide today but are not
+    // the same thing, and a later major replaces the contract side without ABS changing.
+    it('does not hand back the upstream object itself', () => {
+      const pair = { accessToken: 'a', refreshToken: 'r', user: { id: 'u', username: 'n' } }
+      const mapped = toAuthTokens(pair)
+      expect(mapped).not.toBe(pair)
+      expect(mapped.user).not.toBe(pair.user)
     })
   })
 

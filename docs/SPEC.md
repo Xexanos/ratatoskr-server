@@ -466,6 +466,15 @@ The purity of `@ratatoskr/position` is enforced by it having no runtime dependen
 all; a scoped ESLint import-boundary rule additionally forbids its `src/` from importing
 Node built-ins or other workspace packages.
 
+The contract types stay inside `api/`, enforced the same way: a second import-boundary rule
+forbids `@ratatoskr/contract` everywhere in `app/src` except `api/` itself (and
+`contractTypeAssertion.ts`, which has to sit outside `api/` — see section 12). So the core
+speaks domain types and `api/contractMapping.ts` is the only place they become
+contract-shaped. The point is not tidiness: a value shaped for one API major must not
+escape a module that cannot know which major is being served — that is what made the cover
+URL, minted deep in the ABS projection, the wrong thing in the wrong place. The rule is
+default-deny, so a new core module is covered the moment it lands.
+
 Keeping the generated contract artifacts in their own `@ratatoskr/contract` package (rather
 than inside `app`) means the app imports them as an ordinary module and never reads the
 contract file or walks the repo layout at runtime — so the built container image, which

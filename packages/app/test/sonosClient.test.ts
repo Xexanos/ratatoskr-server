@@ -74,11 +74,13 @@ describe('SonosClient', () => {
       ])
     })
 
-    it('omits members for a standalone speaker', async () => {
+    // The domain says "no group members" with an explicit undefined; dropping the field from the
+    // response body is the mapper's doing (see contractMapping.test.ts).
+    it('reports members as undefined for a standalone speaker', async () => {
       const solo = member('rincon_solo', 'Solo')
       const [speaker] = await clientWith(fakeManager([group(solo, [solo])])).listSpeakers()
       expect(speaker).toEqual({ id: 'rincon_solo', name: 'Solo', isGroup: false })
-      expect(speaker).not.toHaveProperty('members')
+      expect(speaker?.members).toBeUndefined()
     })
 
     it('excludes Invisible members (e.g. a Boost/Bridge)', async () => {
