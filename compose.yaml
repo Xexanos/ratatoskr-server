@@ -93,6 +93,18 @@ services:
       # SONOS_REQUEST_TIMEOUT_MS: "4000"                # per-call cap on Sonos SOAP/discovery I/O so a
       #                                                 # vanished speaker fails fast (502) instead of hanging
 
+      # ─────────── Encrypted session store (SPEC section 8) ───────────
+      # Key for the file that keeps signed-in devices signed in across a server restart. A 256-bit
+      # key, base64 or hex — generate one with `openssl rand -base64 32` and keep a copy: with the
+      # wrong key the store refuses to open rather than throw the file away, and losing the key
+      # means every device has to sign in again. Set the value directly, OR point at a file (a
+      # Docker/Compose secret) — never both.
+      # SESSION_STORE_KEY: "replace-with-the-output-of-openssl-rand--base64-32"
+      # SESSION_STORE_KEY_FILE: "/run/secrets/session_store_key"
+      # Where the store file lives. The default is inside the ./tls volume below (file mode 0600),
+      # so there is nothing extra to mount.
+      # SESSION_STORE_PATH: "/tls/sessions.enc"
+
       # ─────────── Listener port ───────────
       # PORT: "8080"
 
@@ -110,7 +122,8 @@ services:
 
     # ./tls persists the auto-generated self-signed certificate across restarts (so the app's pinned
     # fingerprint stays valid), and is also where you drop your OWN cert.pem/key.pem or an ABS CA PEM
-    # if you set the *_PATH variables above. The container runs as uid 1000, so this directory must
+    # if you set the *_PATH variables above. The encrypted session store (SESSION_STORE_PATH) shares
+    # it, which is why it must survive a container recreation. The container runs as uid 1000, so this directory must
     # be writable by it: on Linux, create it first with `mkdir -p tls` (or `chown 1000:1000 tls` if
     # it already exists root-owned). Prefer a named volume instead? Replace the line below with
     # `- ratatoskr-tls:/tls` and add a top-level `volumes: { ratatoskr-tls: {} }` — it inherits

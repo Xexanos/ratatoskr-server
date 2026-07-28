@@ -37,6 +37,12 @@ export interface Config {
   // Position write backoff (SPEC section 5): subtract this from the position written to ABS, since
   // Sonos's reported RelTime runs slightly ahead of the audible output (buffering). 0 disables it.
   writePositionBackoffSeconds: number
+  // Where the encrypted session store lives (SPEC section 8). Defaults into the volume the TLS
+  // certificate is already mounted from, so a container deployment needs no second mount.
+  sessionStorePath: string
+  // Operator-supplied 256-bit key for that store, decoded from SESSION_STORE_KEY or the
+  // Docker-secret-friendly SESSION_STORE_KEY_FILE. Undefined when no key is configured.
+  sessionStoreKey: Buffer | undefined
   tls: TlsConfig | undefined
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
   // production; the tests turn it on. See src/api/responseValidation.ts.
@@ -49,6 +55,11 @@ export interface Config {
 }
 
 type Env = Record<string, string | undefined>
+
+// The container mounts one volume, /tls, for the certificate it generates; the session store
+// shares it (SPEC section 8) so an upgrading operator has nothing new to mount. Running outside
+// the container means overriding this — /tls does not exist there.
+const DEFAULT_SESSION_STORE_PATH = '/tls/sessions.enc'
 
 // Validation deliberately aggregates every problem and throws a single ConfigError at the
 // end, instead of failing fast on the first — one restart cycle to see everything that's
@@ -151,6 +162,47 @@ class EnvReader {
     return { caCert, insecure }
   }
 
+  // Key for the encrypted session store (SPEC sections 7 and 8), as a value or as a file so a
+  // Docker/Compose secret can be mounted straight in — mutually exclusive, like the ABS CA pair.
+  // Undefined means unconfigured: the store cannot be opened without a key, and whoever opens it
+  // is the one that refuses to boot.
+  sessionStoreKey(): Buffer | undefined {
+    const inline = this.env.SESSION_STORE_KEY
+    const path = this.env.SESSION_STORE_KEY_FILE
+    if (inline && path) {
+      this.problems.push('SESSION_STORE_KEY and SESSION_STORE_KEY_FILE are mutually exclusive; set only one')
+      return undefined
+    }
+    if (inline) return this.decodeSessionStoreKey('SESSION_STORE_KEY', inline)
+    if (path) {
+      let contents: string
+      try {
+        contents = readFileSync(path, 'utf8')
+      } catch {
+        this.problems.push(`SESSION_STORE_KEY_FILE is not readable (${path})`)
+        return undefined
+      }
+      return this.decodeSessionStoreKey('SESSION_STORE_KEY_FILE', contents)
+    }
+    return undefined
+  }
+
+  // AES-256-GCM needs exactly 32 bytes. Both common encodings of a random key are accepted, and
+  // the value is trimmed because a key file written by `docker secret` or a shell redirect
+  // normally ends in a newline — which would otherwise decode to a wrong-length key.
+  private decodeSessionStoreKey(name: string, raw: string): Buffer | undefined {
+    const value = raw.trim()
+    if (/^[0-9a-fA-F]{64}$/.test(value)) return Buffer.from(value, 'hex')
+    if (/^[A-Za-z0-9+/\-_]{43}=?$/.test(value)) {
+      const decoded = Buffer.from(value, 'base64')
+      if (decoded.length === 32) return decoded
+    }
+    this.problems.push(
+      `${name} must be a 256-bit key, base64- or hex-encoded (generate one with: openssl rand -base64 32)`,
+    )
+    return undefined
+  }
+
   port(): number {
     const value = this.positiveNumber('PORT', 8080)
     if (!Number.isInteger(value) || value > 65535) {
@@ -220,6 +272,8 @@ export function loadConfig(env: Env = process.env): Config {
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),
     writePositionBackoffSeconds: reader.nonNegativeNumber('WRITE_POSITION_BACKOFF_SECONDS', 2),
+    sessionStorePath: env.SESSION_STORE_PATH?.trim() || DEFAULT_SESSION_STORE_PATH,
+    sessionStoreKey: reader.sessionStoreKey(),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),
     absCaCert: absTls.caCert,

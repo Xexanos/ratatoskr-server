@@ -208,8 +208,13 @@ if something required is missing:
 - `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default 5).
 - `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required once the `/v2` auth model lands,
   mutually exclusive) — key for the encrypted session store (section 8), as a value or a
-  Docker-secret-compatible file path. Missing key → the server refuses to boot; wrong key →
-  a clear error, never silent data loss.
+  Docker-secret-compatible file path. A 256-bit key, base64- or hex-encoded (`openssl rand
+  -base64 32`); a trailing newline in the file variant is tolerated. Missing key → the server
+  refuses to boot; wrong key → a clear error, never silent data loss.
+- `SESSION_STORE_PATH` (optional, default `/tls/sessions.enc`) — where that store file lives.
+  The default is inside the volume the container already mounts for its TLS certificate
+  (section 8), so a deployment needs no second mount; override it when running outside the
+  container, where `/tls` does not exist.
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
@@ -429,6 +434,8 @@ ratatoskr-server/
 │   │
 │   ├── app/                   # @ratatoskr/app — the service (all I/O); depends on the two above
 │   │   ├── config/             #   load and validate environment variables at startup
+│   │   ├── auth/               #   the encrypted session store: one entry per device login
+│   │   │                       #   (token hash + that device's ABS chain), AES-256-GCM on the volume
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
