@@ -142,7 +142,7 @@ describe('domain -> contract mapping', () => {
         durationSeconds: 3600,
         coverUrl: '/v1/library/items/li_1/cover',
       })
-      expect(toSessionResponse(session(), '/v2').item?.coverUrl).toBe('/v2/library/items/li_1/cover')
+      expect(toSessionResponse(session(), '/v2').item.coverUrl).toBe('/v2/library/items/li_1/cover')
     })
 
     it('carries the session fields through unchanged', () => {

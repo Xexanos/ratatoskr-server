@@ -56,10 +56,8 @@ export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
   sessions: SessionManager
-  // The version-mount prefix this service is served under, used to mint the cover URLs it hands
-  // out. Injected rather than read from a constant so a service instance always speaks for its own
-  // mount: the URLs in a response then carry the prefix of the major that asked, and the core never
-  // has to know about either.
+  // The version-mount prefix this service is served under (see contractMapping.ts's coverPathFor).
+  // Injected rather than read from the constant, so an instance always speaks for its own mount.
   apiPrefix: string
 }
 
@@ -159,8 +157,16 @@ export class ApiService {
   // chance to deliver the pair.
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const final = await this.sessions.stop(request.absToken as string)
-    if (final !== undefined) await reply.code(200).send(toSessionResponse(final, this.apiPrefix))
-    else await reply.code(204).send()
+    if (final === undefined) {
+      await reply.code(204).send()
+      return
+    }
+    // Bound to Session before handing it to send(), which takes `unknown`. Every other operation
+    // returns its body and so has the mapping step enforced by the method's return type; this is the
+    // one response on this surface that does not, and an unmapped domain session would sail through
+    // both the serializer (it drops unknown keys) and response validation (coverUrl is optional).
+    const body: Session = toSessionResponse(final, this.apiPrefix)
+    await reply.code(200).send(body)
   }
 
   // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).

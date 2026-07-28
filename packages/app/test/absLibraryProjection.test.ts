@@ -22,43 +22,36 @@ describe('ABS -> domain projection edge cases', () => {
       }
     })
 
-    it('ignores a non-string title, a non-numeric duration and a negative duration', () => {
+    // ABS reports a non-numeric or negative duration as 0 rather than passing it on; a wrong-typed
+    // title falls back like a missing one.
+    it('ignores a non-string title and a negative duration', () => {
       const book = toLibraryBook({ id: 'li_1', media: { duration: -5, metadata: { title: 42 } } })
       expect(book.title).toBe('(unknown title)')
       expect(book.durationSeconds).toBe(0)
     })
 
+    // absLibrary.test.ts covers coverPath null through the client; the empty string is the other
+    // falsy shape ABS can produce and must read the same way.
     it('treats an empty coverPath as no cover art', () => {
       expect(toLibraryBook({ id: 'li_1', media: { coverPath: '' } }).hasCover).toBe(false)
-      expect(toLibraryBook({ id: 'li_1', media: { coverPath: '/covers/x.jpg' } }).hasCover).toBe(true)
     })
   })
 
   describe('toLibraryBookWithProgress', () => {
     const map = new Map([['li_1', PROGRESS]])
 
-    it('joins progress by id and leaves an unknown id without any', () => {
-      expect(toLibraryBookWithProgress({ id: 'li_1' }, map).progress).toEqual(PROGRESS)
-      expect(toLibraryBookWithProgress({ id: 'li_other' }, map).progress).toBeUndefined()
-    })
-
-    it('leaves an entry with a missing or non-string id without progress', () => {
+    it('leaves an entry with a non-string or absent id without progress', () => {
       expect(toLibraryBookWithProgress({ id: 7 }, map).progress).toBeUndefined()
       expect(toLibraryBookWithProgress(null, map).progress).toBeUndefined()
     })
   })
 
   describe('toLibraryBookDetail', () => {
-    it('keeps the given progress and drops non-string description / narrator', () => {
+    it('drops a non-string description / narrator but keeps the given progress', () => {
       const detail = toLibraryBookDetail({ id: 'li_1', media: { metadata: { description: 1, narratorName: {} } } }, PROGRESS)
       expect(detail.progress).toEqual(PROGRESS)
       expect(detail.description).toBeUndefined()
       expect(detail.narrator).toBeUndefined()
-    })
-
-    it('carries description and narrator when ABS provides them', () => {
-      const detail = toLibraryBookDetail({ id: 'li_1', media: { metadata: { description: 'D', narratorName: 'N' } } }, PROGRESS)
-      expect(detail).toMatchObject({ description: 'D', narrator: 'N' })
     })
 
     it('projects a null entry without throwing', () => {

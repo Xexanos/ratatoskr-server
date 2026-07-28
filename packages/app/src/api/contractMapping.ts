@@ -59,8 +59,6 @@ export function toLibraryItemPage(page: LibraryBookPage, apiPrefix: string): Lib
   return { items: page.books.map((book) => toLibraryItemSummary(book, apiPrefix)), nextCursor: page.nextCursor }
 }
 
-// The session echoes the playing book on every response, so the cover URL is minted per response
-// from the domain book the manager holds — it cannot be stale against the major that asked.
 export function toSessionResponse(session: PlaybackSession, apiPrefix: string): MappedSession {
   return {
     itemId: session.itemId,

@@ -10,8 +10,8 @@ type PlaybackState = components['schemas']['PlaybackState']
 type RotatedTokens = components['schemas']['RotatedTokens']
 
 // What the manager reports about the one active session. The playing book travels as the domain
-// LibraryBook, so the cover URL is minted per response by api/ against the mount the response is
-// leaving through, rather than being frozen into the session at start() (SPEC section 13).
+// LibraryBook, so its cover URL is minted per response at the edge rather than frozen into the
+// session at start().
 export interface PlaybackSession {
   itemId: string
   item: LibraryBook

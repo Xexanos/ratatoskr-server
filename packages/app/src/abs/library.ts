@@ -23,9 +23,8 @@ export interface LibraryBook {
   title: string
   author: string | undefined
   durationSeconds: number
-  // Whether ABS holds cover art for this book — the domain fact behind the contract's coverUrl.
-  // Only the projection can know it (it reads ABS's media.coverPath), and only the edge can mint
-  // the URL (it needs the version-mount prefix), so the bit travels up and the prefix stays put.
+  // Whether ABS holds cover art for this book (from its media.coverPath) — the domain fact behind
+  // the contract's coverUrl.
   hasCover: boolean
   progress: ListeningProgress | undefined
 }
