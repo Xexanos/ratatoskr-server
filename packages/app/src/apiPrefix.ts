@@ -8,7 +8,7 @@ import { openapiDocument } from '@ratatoskr/contract'
 //
 // The URL is a server-variable template (`http://{host}:{port}/v2`), so the path is taken after the
 // authority rather than by parsing it as a URL: the braces are not valid host syntax.
-function versionPrefix(document: Record<string, unknown>): string {
+export function versionPrefix(document: Record<string, unknown>): string {
   const servers = document['servers']
   const url = Array.isArray(servers) ? (servers[0] as { url?: unknown } | undefined)?.url : undefined
   const path = typeof url === 'string' ? /^[a-z][a-z0-9+.-]*:\/\/[^/]+(\/[^?#]*)/i.exec(url)?.[1] : undefined
