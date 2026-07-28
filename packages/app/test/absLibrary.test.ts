@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from '../src/abs/errors.js'
 import { decodeCursor } from '../src/abs/cursor.js'
+import { firstCall } from './helpers/mockCalls.js'
 
 const BASE = 'http://abs.invalid'
 
@@ -293,7 +294,7 @@ describe('AbsClient library projection', () => {
       // than the caller's small limit (here 100, the buffer) rather than 5.
       stubRoutes([{ match: '/api/me/items-in-progress', body: { libraryItems: [] } }])
       await new AbsClient(BASE).listInProgressItems('tok', 5)
-      expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${BASE}/api/me/items-in-progress?limit=100`)
+      expect(firstCall(vi.mocked(fetch))[0]).toBe(`${BASE}/api/me/items-in-progress?limit=100`)
     })
   })
 
@@ -390,7 +391,7 @@ describe('AbsClient library projection', () => {
   describe('getItemCover', () => {
     // The cover response is binary, not JSON, so it needs its own fetch stub (stubRoutes serves JSON).
     function stubCover(response: Response) {
-      const fetchMock = vi.fn(() => Promise.resolve(response))
+      const fetchMock = vi.fn((_url: string, _init?: RequestInit) => Promise.resolve(response))
       vi.stubGlobal('fetch', fetchMock)
       return fetchMock
     }
@@ -416,9 +417,9 @@ describe('AbsClient library projection', () => {
       expect(cover.body).toBeInstanceOf(Buffer)
       expect(Uint8Array.from(cover.body)).toEqual(bytes)
       expect(cover).not.toHaveProperty('cacheHeaders')
-      const url = fetchMock.mock.calls[0][0] as unknown as string
+      const url = firstCall(fetchMock)[0]
       expect(url).toBe(`${BASE}/api/items/li_1/cover?height=240`)
-      const init = fetchMock.mock.calls[0][1] as unknown as RequestInit
+      const init = firstCall(fetchMock)[1] as RequestInit
       expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok')
     })
 
@@ -426,7 +427,7 @@ describe('AbsClient library projection', () => {
       const fetchMock = stubCover(new Response(Uint8Array.from([9]), { status: 200 }))
       const cover = await new AbsClient(BASE).getItemCover('tok', 'li_1', undefined)
 
-      expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/items/li_1/cover`)
+      expect(firstCall(fetchMock)[0]).toBe(`${BASE}/api/items/li_1/cover`)
       expect(cover.contentType).toBe('image/jpeg')
     })
 

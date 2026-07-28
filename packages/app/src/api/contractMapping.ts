@@ -1,7 +1,7 @@
 import type { components } from '@ratatoskr/contract'
 import type { AbsTokenPair } from '../abs/client.js'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
-import type { PlaybackSession } from '../playback/sessionManager.js'
+import type { PlaybackSession, RotatedTokenPair } from '../playback/sessionManager.js'
 import type { SonosSpeaker } from '../sonos/client.js'
 
 type AuthTokens = components['schemas']['AuthTokens']
@@ -21,7 +21,10 @@ type Speaker = components['schemas']['Speaker']
 // promising anything new.
 type MappedSummary = LibraryItemSummary & { coverUrl: string | null }
 type MappedItem = LibraryItem & { coverUrl: string | null; progress: Progress }
-type MappedSession = Session & { item: MappedSummary }
+// The frozen /v1 addition: 1.4.0's Session carries the rotated Audiobookshelf pair when one is
+// pending, and 2.0.0 dropped the field, so — like V1AuthTokens — the served surface's shape is
+// declared here. Optional, because it appears only while a handover is in flight.
+type MappedSession = Session & { item: MappedSummary; rotatedTokens?: RotatedTokenPair | undefined }
 
 // The cover image is served by Ratatoskr's own cover-proxy route, so coverUrl points there rather
 // than at ABS. A path relative to the server origin, carrying the mount prefix of the major that
