@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { openapiDocument } from '@ratatoskr/contract'
+import { frozenV1Document } from '@ratatoskr/contract'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
 import { buildApp } from '../src/api/app.js'
@@ -57,7 +57,7 @@ const FIXTURES: Record<string, { method: 'GET' | 'PUT' | 'POST' | 'DELETE'; url:
 // Derived here with a deliberate, independent walk (not tokenGuard's) so a derivation bug
 // in the implementation cannot hide from the sweep.
 function bearerProtectedOperationIds(): string[] {
-  const document = openapiDocument as {
+  const document = frozenV1Document as {
     security?: unknown[]
     paths?: Record<string, Record<string, { operationId?: string; security?: unknown[] }>>
   }

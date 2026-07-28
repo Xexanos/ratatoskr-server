@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
-import { openapiDocument } from '@ratatoskr/contract'
+import { frozenV1Document } from '@ratatoskr/contract'
 import { createTokenGuard, SELF_VALIDATING_OPERATIONS } from '../src/api/tokenGuard.js'
 
 // A minimal contract shape: global bearer security, one op inheriting it, one opting out,
@@ -88,7 +88,7 @@ describe('createTokenGuard', () => {
   it('accepts the real contract and the real exemption set', () => {
     // The startup assertion must hold for the shipped contract — this is the test that fails
     // when an operation in SELF_VALIDATING_OPERATIONS is renamed or its security changes.
-    expect(() => createTokenGuard(openapiDocument, vi.fn())).not.toThrow()
+    expect(() => createTokenGuard(frozenV1Document, vi.fn())).not.toThrow()
     // The exemptions are exactly the handlers that present the caller's token to ABS themselves.
     expect([...SELF_VALIDATING_OPERATIONS].sort()).toEqual([
       'getLibraryItem',
