@@ -41,7 +41,7 @@ function rejectingAbs(): AbsClient {
 // One well-formed request per bearer-protected operation. Well-formed matters: Fastify's
 // schema validation runs before the handler (and thus before the token guard), so a
 // malformed body would 400 without ever reaching the code under test.
-const FIXTURES: Record<string, { method: 'GET' | 'PUT' | 'POST' | 'DELETE'; url: string; payload?: unknown }> = {
+const FIXTURES: Record<string, { method: 'GET' | 'PUT' | 'POST' | 'DELETE'; url: string; payload?: object }> = {
   listLibraryItems: { method: 'GET', url: '/v1/library/items' },
   getLibraryItem: { method: 'GET', url: '/v1/library/items/li_1' },
   getLibraryItemCover: { method: 'GET', url: '/v1/library/items/li_1/cover' },

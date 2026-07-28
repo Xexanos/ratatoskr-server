@@ -6,6 +6,7 @@
   "license": "GPL-3.0-or-later",
   "description": "Process-level integration tests: spawn the compiled server (packages/app/dist) and drive it over real HTTP — against a live Audiobookshelf container (Testcontainers) and the fake Sonos. Deliberately has no `test` script so the unit-test run never boots containers.",
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
     "test:integration": "vitest run"
   },
   "devDependencies": {

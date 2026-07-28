@@ -5,7 +5,7 @@ import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError 
 const BASE = 'http://abs.invalid'
 
 function stubFetch(impl: (url: string, init: RequestInit) => Response | Promise<Response>) {
-  const mock = vi.fn(impl as never)
+  const mock = vi.fn(impl)
   vi.stubGlobal('fetch', mock)
   return mock
 }

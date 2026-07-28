@@ -2,24 +2,12 @@ import { Agent } from 'undici'
 import { describe, expect, it } from 'vitest'
 import { buildAbsDispatcher } from '../src/abs/transport.js'
 import type { Config } from '../src/config/index.js'
+import { testConfig } from './helpers/testConfig.js'
 
+// The shared helper with the two fields this file's subject depends on: an https upstream (the
+// dispatcher exists only to carry TLS trust) and no response validation.
 function config(overrides: Partial<Config> = {}): Config {
-  return {
-    absUrl: 'https://abs.invalid',
-    absStreamerApiKey: 'streamer-key',
-    sonosSeedHost: undefined,
-    port: 0,
-    pollIntervalSeconds: 15,
-    seekSettleMs: 1000,
-    seekToleranceSeconds: 3,
-    seekRetries: 2,
-    progressWriteThresholdSeconds: 5,
-    tls: undefined,
-    validateResponses: false,
-    absCaCert: undefined,
-    absTlsInsecure: false,
-    ...overrides,
-  }
+  return testConfig({ absUrl: 'https://abs.invalid', validateResponses: false, ...overrides })
 }
 
 describe('buildAbsDispatcher', () => {

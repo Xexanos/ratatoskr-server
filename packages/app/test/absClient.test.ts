@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AbsClient } from '../src/abs/client.js'
+import { firstCall } from './helpers/mockCalls.js'
 import { AbsAuthError, AbsUpstreamError } from '../src/abs/errors.js'
 
 const BASE = 'http://abs.invalid'
 
 function stubFetch(impl: (url: string, init: RequestInit) => Response | Promise<Response>) {
-  const mock = vi.fn(impl as never)
+  const mock = vi.fn(impl)
   vi.stubGlobal('fetch', mock)
   return mock
 }
@@ -89,7 +90,7 @@ describe('AbsClient', () => {
     it('reports ok for a genuine Audiobookshelf /ping', async () => {
       const mock = stubFetch(() => jsonResponse({ success: true }))
       expect(await new AbsClient(BASE).probe()).toBe('ok')
-      expect(mock.mock.calls[0][0]).toBe(`${BASE}/ping`)
+      expect(firstCall(mock)[0]).toBe(`${BASE}/ping`)
     })
 
     it('reports not-audiobookshelf when the host answers but not like ABS', async () => {
