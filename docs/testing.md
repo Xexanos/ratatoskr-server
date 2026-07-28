@@ -30,8 +30,8 @@ Runner: **Vitest** (TypeScript/ESM-native).
 - token-rotation bookkeeping
 - the encrypted session store (`test/sessionStore.test.ts`, against a temp directory — like the
   config tests it needs real files): the AES-256-GCM envelope, atomic replacement of the file,
-  and its refusal to continue on a wrong key or unreadable content rather than starting from an
-  empty store
+  detection of a second writer via the payload revision, and its refusal to continue on a wrong
+  key or unreadable content rather than starting from an empty store
 - seek tolerance / settle math
 
 ### Component — one subsystem against a simulated neighbor

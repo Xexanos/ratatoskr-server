@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SessionStoreCorruptError, SessionStoreKeyError } from '../src/auth/errors.js'
+import { SessionStoreConflictError, SessionStoreCorruptError, SessionStoreKeyError } from '../src/auth/errors.js'
 import { decodeStoreFile, encodeStoreFile } from '../src/auth/sessionFile.js'
 import { SessionStore } from '../src/auth/sessionStore.js'
 
@@ -186,6 +186,49 @@ describe('SessionStore', () => {
     expect((await open()).find('token-phone')).toBeDefined()
   })
 
+  // Two SessionStore instances on one path are exactly what two server processes are: each loads
+  // its own copy of every entry, so whichever writes second would drop the other's sessions.
+  it('refuses to overwrite a store another writer has advanced, keeping that writer’s entry', async () => {
+    const first = await open()
+    const second = await open()
+    await second.create('token-tablet', TABLET)
+
+    await expect(first.create('token-phone', PHONE)).rejects.toBeInstanceOf(SessionStoreConflictError)
+    expect(first.find('token-phone')).toBeUndefined()
+    const onDisk = await open()
+    expect(onDisk.find('token-tablet')).toBeDefined()
+    expect(onDisk.find('token-phone')).toBeUndefined()
+  })
+
+  it('points at SESSION_STORE_PATH in the conflict error, since sharing one file is the cause', async () => {
+    const first = await open()
+    await (await open()).create('token-tablet', TABLET)
+    await expect(first.create('token-phone', PHONE)).rejects.toThrow(/another process|SESSION_STORE_PATH/)
+  })
+
+  it('refuses to write a store that vanished underneath it', async () => {
+    const store = await open()
+    await store.create('token-phone', PHONE)
+    await rm(path)
+
+    await expect(store.delete('token-phone')).rejects.toBeInstanceOf(SessionStoreConflictError)
+  })
+
+  it('bumps the revision on every write, so a foreign write is detectable at all', async () => {
+    const store = await open()
+    expect(JSON.parse(await storedPayload()).revision).toBe(1)
+    await store.create('token-phone', PHONE)
+    expect(JSON.parse(await storedPayload()).revision).toBe(2)
+  })
+
+  it('treats a payload without a revision as untouched, not as somebody else’s work', async () => {
+    await writePayload({ entries: [STORED] })
+    const store = await open()
+
+    await expect(store.create('token-phone', PHONE)).resolves.toBeDefined()
+    expect((await open()).list()).toHaveLength(2)
+  })
+
   it('refuses to open with the wrong key and leaves the file untouched', async () => {
     const store = await open()
     await store.create('token-phone', PHONE)
@@ -249,7 +292,9 @@ describe('SessionStore', () => {
 
   it('rolls back an entry whose write failed, so memory never claims an unpersisted session', async () => {
     const store = await open()
-    await rm(dir, { recursive: true, force: true })
+    // A directory where the temp file has to go: the revision check passes and the store file is
+    // intact, but the write itself cannot proceed — a stand-in for a full or read-only volume.
+    await mkdir(`${path}.${process.pid}.tmp`)
 
     await expect(store.create('token-phone', PHONE)).rejects.toThrow()
     expect(store.find('token-phone')).toBeUndefined()

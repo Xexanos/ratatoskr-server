@@ -103,7 +103,8 @@ services:
       # SESSION_STORE_KEY_FILE: "/run/secrets/session_store_key"
       # Where the store file lives. The default is inside the ./tls volume below (file mode 0600),
       # so there is nothing extra to mount. Only ever point ONE running Ratatoskr at a given store
-      # file: a second instance sharing it would overwrite the first one's signed-in devices.
+      # file — a second instance sharing it is refused rather than allowed to overwrite the first
+      # one's signed-in devices, so its sign-ins then fail until you give it its own path.
       # SESSION_STORE_PATH: "/tls/sessions.enc"
 
       # ─────────── Listener port ───────────

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { SessionStoreCorruptError, SessionStoreIoError } from './errors.js'
+import { SessionStoreConflictError, SessionStoreCorruptError, SessionStoreIoError } from './errors.js'
 import { decodeStoreFile, encodeStoreFile, writeFileAtomic } from './sessionFile.js'
 
 // One device login's private Audiobookshelf session: the access token in use plus the refresh
@@ -39,33 +39,42 @@ export interface SessionStoreOptions {
 // Scope guard (SPEC section 11): this store persists credentials, not domain state. Progress and
 // user data live in Audiobookshelf only — do not grow this into a database.
 //
-// Single writer per file. Mutations within a process are serialized here, and each write replaces
-// the whole file atomically, so nothing can tear. Two processes on one store file are NOT
-// coordinated, though: each holds its own copy of every entry and writes all of them, so the
-// later write silently drops the sessions the other one added — devices signed out with nobody
-// seeing an error. The deployment is one container per volume (compose.yaml), which is what makes
-// this safe; there is no lock enforcing it.
+// Single writer per file, by deployment (one container per volume, compose.yaml) rather than by
+// lock. Mutations within a process are serialized here and each write replaces the whole file
+// atomically, so nothing can tear. A second process is not coordinated with — each holds its own
+// copy of every entry and writes all of them — so it is instead *detected*: every write checks the
+// revision on disk against the one this server left there and refuses on a mismatch, turning the
+// silent loss of another instance's sessions into a loud SessionStoreConflictError. Detection, not
+// coexistence: a conflict means a misconfiguration to fix, and merging would hide it.
 export class SessionStore {
   private entries: Map<string, SessionEntry>
   // Tail of the write chain, so concurrent mutations queue instead of racing the same file.
   private writes: Promise<unknown> = Promise.resolve()
+  // Revision this server last saw in the file, bumped on every successful write. Zero means the
+  // file was absent (or predates the counter), which is the only state where writing over
+  // "nothing" is legitimate.
+  private revision: number
 
   private constructor(
     private readonly path: string,
     private readonly key: Buffer,
-    entries: Map<string, SessionEntry>,
+    loaded: { entries: Map<string, SessionEntry>; revision: number },
   ) {
-    this.entries = entries
+    this.entries = loaded.entries
+    this.revision = loaded.revision
   }
 
   static async open(options: SessionStoreOptions): Promise<SessionStore> {
     const { path, key } = options
     const file = await readStoreFile(path)
-    const entries =
-      file === undefined ? new Map<string, SessionEntry>() : parseEntries(decodeStoreFile(key, file, path), path)
-    const store = new SessionStore(path, key, entries)
+    const loaded =
+      file === undefined
+        ? { entries: new Map<string, SessionEntry>(), revision: 0 }
+        : parsePayload(decodeStoreFile(key, file, path), path)
+    const store = new SessionStore(path, key, loaded)
     // Create the file right away when it is absent, so an unwritable volume or a broken mount
-    // fails loud at boot rather than at some user's first sign-in hours later.
+    // fails loud at boot rather than at some user's first sign-in hours later. Two servers booting
+    // at once on an empty volume also settle here: the loser's first write hits the conflict check.
     if (file === undefined) await store.flush()
     return store
   }
@@ -142,8 +151,33 @@ export class SessionStore {
   }
 
   private async flush(): Promise<void> {
-    const payload = Buffer.from(JSON.stringify({ entries: [...this.entries.values()] }), 'utf8')
+    await this.assertNobodyElseWrote()
+    const revision = this.revision + 1
+    const payload = Buffer.from(JSON.stringify({ revision, entries: [...this.entries.values()] }), 'utf8')
     await writeFileAtomic(this.path, encodeStoreFile(this.key, payload))
+    this.revision = revision
+  }
+
+  // Optimistic concurrency check: re-read the file and compare its revision against what this
+  // server left there. Costs one small read and decrypt per write — writes are sign-ins, sign-outs
+  // and the daily keep-alive, so that is free in practice.
+  //
+  // This narrows the window rather than closing it: another writer could still publish between
+  // this check and the rename below. Closing it would need a lock, and a lock file outlives a
+  // SIGKILL — a stale one would stop the server from booting at all, which is a worse failure for
+  // a self-hosted appliance than the misconfiguration it guards against. The revision lives inside
+  // the encrypted payload, so it is covered by the GCM tag and cannot be edited on its own.
+  private async assertNobodyElseWrote(): Promise<void> {
+    const file = await readStoreFile(this.path)
+    if (file === undefined) {
+      // Nothing on disk is only legitimate before this server has written anything.
+      if (this.revision === 0) return
+      throw new SessionStoreConflictError(this.path, this.revision, undefined)
+    }
+    const { revision } = parsePayload(decodeStoreFile(this.key, file, this.path), this.path)
+    if (revision !== this.revision) {
+      throw new SessionStoreConflictError(this.path, this.revision, revision)
+    }
   }
 }
 
@@ -170,14 +204,14 @@ async function readStoreFile(path: string): Promise<Buffer | undefined> {
   }
 }
 
-function parseEntries(plaintext: Buffer, path: string): Map<string, SessionEntry> {
+function parsePayload(plaintext: Buffer, path: string): { entries: Map<string, SessionEntry>; revision: number } {
   let payload: unknown
   try {
     payload = JSON.parse(plaintext.toString('utf8'))
   } catch {
     throw new SessionStoreCorruptError(path, 'the decrypted payload is not valid JSON')
   }
-  const list = (payload as { entries?: unknown } | null)?.entries
+  const { entries: list, revision } = (payload ?? {}) as { entries?: unknown; revision?: unknown }
   if (!Array.isArray(list)) {
     throw new SessionStoreCorruptError(path, 'the decrypted payload carries no entry list')
   }
@@ -189,7 +223,9 @@ function parseEntries(plaintext: Buffer, path: string): Map<string, SessionEntry
     }
     entries.set(entry.tokenHash, entry)
   }
-  return entries
+  // A payload without a revision counts as zero, so the very first write after this counter was
+  // introduced does not read as somebody else's work.
+  return { entries, revision: typeof revision === 'number' ? revision : 0 }
 }
 
 // Validate the shape rather than trusting our own past writes: the alternative is a malformed
