@@ -5,6 +5,12 @@ import { SonosUpstreamError } from '../src/sonos/errors.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
+// What SonosClient returns (domain: members explicitly undefined for a lone speaker) and what the
+// route must then put on the wire (contract: the field dropped entirely).
+const ZONES = [
+  { id: 'rincon_living', name: 'Living Room', isGroup: true, members: ['Kitchen', 'Living Room'] },
+  { id: 'rincon_office', name: 'Office', isGroup: false, members: undefined },
+]
 const SPEAKERS = [
   { id: 'rincon_living', name: 'Living Room', isGroup: true, members: ['Kitchen', 'Living Room'] },
   { id: 'rincon_office', name: 'Office', isGroup: false },
@@ -18,7 +24,7 @@ describe('GET /v1/speakers', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the projected speakers for an authorized request', async () => {
-    const listSpeakers = vi.fn().mockResolvedValue(SPEAKERS)
+    const listSpeakers = vi.fn().mockResolvedValue(ZONES)
     const app = await appWith({ listSpeakers })
     const res = await app.inject({ method: 'GET', url: '/v1/speakers', headers: AUTH })
 
@@ -30,7 +36,7 @@ describe('GET /v1/speakers', () => {
   // Deliberately unauthenticated (contract 1.4.0, SPEC section 8): any LAN device can already
   // enumerate the Sonos topology via SSDP/UPnP, so gating the list adds nothing.
   it('serves the speakers without any bearer token', async () => {
-    const listSpeakers = vi.fn().mockResolvedValue(SPEAKERS)
+    const listSpeakers = vi.fn().mockResolvedValue(ZONES)
     const app = await appWith({ listSpeakers })
     const res = await app.inject({ method: 'GET', url: '/v1/speakers' })
 

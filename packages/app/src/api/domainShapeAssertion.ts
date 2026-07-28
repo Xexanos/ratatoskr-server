@@ -1,6 +1,7 @@
 import type { components } from '@ratatoskr/contract'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
 import type { PlaybackSession } from '../playback/sessionManager.js'
+import type { SonosSpeaker } from '../sonos/client.js'
 
 // Compile-time assertions that the domain shapes cannot be handed to a caller expecting the
 // contract's — i.e. that skipping contractMapping.ts is a build failure, not a wrong URL on the wire.
@@ -29,3 +30,15 @@ export type DetailIsNotAnItem = Assert<Rejects<LibraryBookDetail, components['sc
 // This one holds without the flag's help: the domain says `books` where the contract requires `items`.
 export type PageIsNotAContractPage = Assert<Rejects<LibraryBookPage, components['schemas']['LibraryItemPage']>>
 export type SessionIsNotAContractSession = Assert<Rejects<PlaybackSession, components['schemas']['Session']>>
+export type SonosSpeakerIsNotASpeaker = Assert<Rejects<SonosSpeaker, components['schemas']['Speaker']>>
+
+// Deliberately NOT asserted here: AbsTokenPair, RotatedTokenPair and PlaybackPhase. Those contract
+// schemas are all-required (or a bare string union), so a domain twin of each is structurally
+// identical and no assertion could hold — Rejects<> would resolve to false and fail this file's own
+// build. That costs nothing: an identical twin passed through unmapped puts exactly the right bytes on
+// the wire, so the silent-wrong-value risk this file guards only exists where the shapes differ.
+//
+// They are not unguarded, just guarded elsewhere. Drift between PlaybackPhase and the contract's
+// PlaybackState is a compile error in contractMapping.ts, because MappedSession.state is the contract
+// enum. And what keeps all three out of the core to begin with is the import boundary in
+// eslint.config.js, which no type could express.

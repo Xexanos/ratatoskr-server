@@ -1,13 +1,17 @@
 import type { components } from '@ratatoskr/contract'
+import type { AbsTokenPair } from '../abs/client.js'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
 import type { PlaybackSession } from '../playback/sessionManager.js'
+import type { SonosSpeaker } from '../sonos/client.js'
 
+type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 type LibraryItem = components['schemas']['LibraryItem']
 type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
 type Progress = components['schemas']['Progress']
 type Session = components['schemas']['Session']
+type Speaker = components['schemas']['Speaker']
 
 // The mappers' return types, not the bare contract types. The contract does not mark coverUrl,
 // progress or Session.item as required, so a mapper that simply forgot one of them would still
@@ -57,6 +61,30 @@ export function toLibraryItemList(books: LibraryBook[], apiPrefix: string): Libr
 
 export function toLibraryItemPage(page: LibraryBookPage, apiPrefix: string): LibraryItemPage {
   return { items: page.books.map((book) => toLibraryItemSummary(book, apiPrefix)), nextCursor: page.nextCursor }
+}
+
+// A Sonos zone group as this major exposes it. `members` is dropped for a lone speaker: the contract
+// documents the field as "room names in the group, when isGroup is true", so an empty or absent list
+// are not interchangeable to a client rendering it.
+export function toSpeaker(speaker: SonosSpeaker): Speaker {
+  return {
+    id: speaker.id,
+    name: speaker.name,
+    isGroup: speaker.isGroup,
+    ...(speaker.members !== undefined ? { members: speaker.members } : {}),
+  }
+}
+
+// ABS's own token pair, which /v1 hands to the client as-is. The shapes coincide today; they are
+// mapped rather than passed through because they are not the same thing — the contract's AuthTokens
+// is what this major promises, AbsTokenPair is what upstream issued, and a later major replaces the
+// former without ABS changing at all.
+export function toAuthTokens(pair: AbsTokenPair): AuthTokens {
+  return {
+    accessToken: pair.accessToken,
+    refreshToken: pair.refreshToken,
+    user: { id: pair.user.id, username: pair.user.username },
+  }
 }
 
 export function toSessionResponse(session: PlaybackSession, apiPrefix: string): MappedSession {

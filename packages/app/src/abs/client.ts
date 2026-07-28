@@ -1,4 +1,3 @@
-import type { components } from '@ratatoskr/contract'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from './errors.js'
 import {
@@ -11,7 +10,20 @@ import {
   type ListeningProgress,
 } from './library.js'
 
-type AuthTokens = components['schemas']['AuthTokens']
+// The Audiobookshelf identity a token pair was issued for.
+export interface AbsUser {
+  id: string
+  username: string
+}
+
+// An ABS token pair as ABS itself issues it: a short-lived access token plus the longer-lived
+// refresh token, which ABS rotates on every use. An upstream fact, deliberately not a contract type
+// — how (or whether) a pair is handed to a client is per-major and belongs to api/.
+export interface AbsTokenPair {
+  accessToken: string
+  refreshToken: string
+  user: AbsUser
+}
 
 // Startup-probe timeout (GET /ping). Separate from the per-request timeout: the probe is a one-off
 // reachability fingerprint at boot, kept short so a wrong/dead ABS_URL fails startup fast.
@@ -130,15 +142,15 @@ export class AbsClient {
 
   // POST /login with `x-return-tokens: true` so a non-browser client gets the refresh
   // token in the body rather than only as an httpOnly cookie (ABS 2.26+).
-  async login(username: string, password: string): Promise<AuthTokens> {
+  async login(username: string, password: string): Promise<AbsTokenPair> {
     const data = await this.postJson('/login', { 'x-return-tokens': 'true' }, { username, password })
-    return toAuthTokens(data)
+    return toAbsTokenPair(data)
   }
 
   // POST /auth/refresh with the refresh token in the `x-refresh-token` header (ABS 2.26+).
-  async refresh(refreshToken: string): Promise<AuthTokens> {
+  async refresh(refreshToken: string): Promise<AbsTokenPair> {
     const data = await this.postJson('/auth/refresh', { 'x-refresh-token': refreshToken }, {})
-    return toAuthTokens(data)
+    return toAbsTokenPair(data)
   }
 
   // --- Library projection (SPEC section 2) ---
@@ -462,7 +474,7 @@ export class AbsClient {
   }
 }
 
-function toAuthTokens(data: unknown): AuthTokens {
+function toAbsTokenPair(data: unknown): AbsTokenPair {
   const user = (data as { user?: { id?: unknown; username?: unknown; accessToken?: unknown; refreshToken?: unknown } })?.user
   const accessToken = user?.accessToken
   const refreshToken = user?.refreshToken

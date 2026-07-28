@@ -4,10 +4,12 @@ import type { AbsClient } from '../abs/client.js'
 import type { SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 import {
+  toAuthTokens,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
   toSessionResponse,
+  toSpeaker,
 } from './contractMapping.js'
 
 type Health = components['schemas']['Health']
@@ -91,12 +93,12 @@ export class ApiService {
 
   async login(request: FastifyRequest): Promise<AuthTokens> {
     const { username, password } = request.body as LoginRequest
-    return this.abs.login(username, password)
+    return toAuthTokens(await this.abs.login(username, password))
   }
 
   async refresh(request: FastifyRequest): Promise<AuthTokens> {
     const { refreshToken } = request.body as RefreshRequest
-    return this.abs.refresh(refreshToken)
+    return toAuthTokens(await this.abs.refresh(refreshToken))
   }
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
@@ -133,7 +135,7 @@ export class ApiService {
   }
 
   async listSpeakers(): Promise<Speaker[]> {
-    return this.sonos.listSpeakers()
+    return (await this.sonos.listSpeakers()).map(toSpeaker)
   }
 
   // --- Playback (SPEC sections 4 and 5) ---

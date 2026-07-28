@@ -1,11 +1,18 @@
-import type { components } from '@ratatoskr/contract'
 import type { PlaybackPlan, SeekPlan } from '@ratatoskr/position'
 import { SonosDevice, SonosManager } from '@svrooij/sonos'
 import { buildTrackMetadata, escapeXml } from './didl.js'
 import { hmsToSeconds, secondsToHms } from './time.js'
 import { SonosUpstreamError } from './errors.js'
 
-type Speaker = components['schemas']['Speaker']
+// One addressable playback target: a single speaker, or a zone group presented as one. `members`
+// carries the group's room names, and is undefined for a lone speaker — explicitly, so the
+// projection states the decision it reached rather than leaving the field off.
+export interface SonosSpeaker {
+  id: string
+  name: string
+  isGroup: boolean
+  members: string[] | undefined
+}
 
 // Where the coordinator currently is: which queue track (0-based), elapsed seconds within it, and
 // the URI of the track it is actually playing. RelTime is authoritative; Sonos's TrackDuration is
@@ -69,8 +76,8 @@ export class SonosClient {
     }
   }
 
-  async listSpeakers(): Promise<Speaker[]> {
-    return toSpeakers(await this.readTopology())
+  async listSpeakers(): Promise<SonosSpeaker[]> {
+    return toSonosSpeakers(await this.readTopology())
   }
 
   // Non-blocking: returns the last live-read outcome and refreshes it in the background, so a
@@ -357,20 +364,20 @@ function asUpstream(err: unknown): SonosUpstreamError {
 // method so we don't deep-import the library's internal ZoneGroup type).
 type ZoneGroups = Awaited<ReturnType<SonosDevice['GetZoneGroupState']>>
 
-// Project the zone-group topology onto the contract's Speaker shape: one Speaker per group.
-// Invisible members (e.g. a Boost/Bridge or other hidden device) are excluded so a lone speaker
-// is not reported as a group. id/name come from the coordinator; a multi-member group lists the
-// visible members' room names.
-function toSpeakers(groups: ZoneGroups): Speaker[] {
+// Project the zone-group topology onto one SonosSpeaker per group. Invisible members (e.g. a
+// Boost/Bridge or other hidden device) are excluded so a lone speaker is not reported as a group.
+// id/name come from the coordinator; a multi-member group lists the visible members' room names.
+function toSonosSpeakers(groups: ZoneGroups): SonosSpeaker[] {
   return groups
     .map((group) => {
       const visible = group.members.filter((member) => !member.Invisible)
       const isGroup = visible.length > 1
-      const speaker: Speaker = { id: group.coordinator.uuid, name: group.coordinator.name, isGroup }
-      if (isGroup) {
-        speaker.members = visible.map((member) => member.name).sort((a, b) => a.localeCompare(b))
+      return {
+        id: group.coordinator.uuid,
+        name: group.coordinator.name,
+        isGroup,
+        members: isGroup ? visible.map((member) => member.name).sort((a, b) => a.localeCompare(b)) : undefined,
       }
-      return speaker
     })
     .sort((a, b) => a.name.localeCompare(b.name))
 }
