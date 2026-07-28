@@ -188,8 +188,7 @@ export class SessionManager {
     return this.serialize(async () => {
       const session = this.requireSession()
       if (callerToken !== undefined) this.noteCaller(callerToken)
-      // Only hand the pair back if this caller is the owner (same gate as toSession).
-      const pending = callerToken !== undefined && this.shouldDeliverRotated(callerToken) ? this.pendingRotatedTokens : undefined
+      const pending = callerToken === undefined ? undefined : this.rotatedTokensFor(callerToken)
       const { itemId, item, speakerId, totalDurationSeconds } = session
       const reached = await this.stopInternal() // writes the final position, then clears the session
       if (pending === undefined) return undefined
@@ -486,7 +485,8 @@ export class SessionManager {
       durationSeconds: session.totalDurationSeconds,
       updatedAt: new Date().toISOString(),
     }
-    if (this.shouldDeliverRotated(callerToken)) result.rotatedTokens = this.pendingRotatedTokens
+    const rotated = this.rotatedTokensFor(callerToken)
+    if (rotated !== undefined) result.rotatedTokens = rotated
     return result
   }
 
@@ -494,8 +494,8 @@ export class SessionManager {
   // access token — the session owner, whose old token stays valid until its own expiry. Ties the
   // handover to the owner so a different valid ABS user can't collect it. Never logged: the server
   // does not log response bodies, and the request serializer strips the URL query (section 14).
-  private shouldDeliverRotated(callerToken: string): boolean {
-    return this.pendingRotatedTokens !== undefined && callerToken === this.preRotationToken
+  private rotatedTokensFor(callerToken: string): RotatedTokens | undefined {
+    return callerToken === this.preRotationToken ? this.pendingRotatedTokens : undefined
   }
 
   private requireSession(): ActiveSession {
