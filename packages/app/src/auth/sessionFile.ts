@@ -80,9 +80,14 @@ function describeForeignMagic(magic: Buffer): string {
 // within a directory is atomic, so a crash at any point leaves either the previous store or
 // the new one — never a truncated mix, which would cost every device its session.
 export async function writeFileAtomic(path: string, bytes: Buffer): Promise<void> {
-  const tmp = `${path}.tmp`
-  // A temp file from an earlier crash is never read (only `path` is), but it may carry the
-  // wrong mode, and 'wx' below would refuse to reuse it — so drop it first.
+  // The temp name is per-process, and no other name in the directory is ever touched. Two
+  // processes sharing one name would defeat the atomic replace outright: one unlinks the name
+  // the other still holds open, so a rename can publish a file its writer has not finished —
+  // the exact truncated store this function exists to prevent. Distinct names degrade a second
+  // writer to a lost update instead (see the single-writer note on SessionStore).
+  const tmp = `${path}.${process.pid}.tmp`
+  // A temp file left by an earlier crash of this process is never read (only `path` is), but it
+  // may carry the wrong mode, and 'wx' below would refuse to reuse it — so drop it first.
   await rm(tmp, { force: true })
   const handle = await open(tmp, 'wx', FILE_MODE)
   try {

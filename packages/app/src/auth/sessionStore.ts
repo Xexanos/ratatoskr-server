@@ -38,6 +38,13 @@ export interface SessionStoreOptions {
 //
 // Scope guard (SPEC section 11): this store persists credentials, not domain state. Progress and
 // user data live in Audiobookshelf only — do not grow this into a database.
+//
+// Single writer per file. Mutations within a process are serialized here, and each write replaces
+// the whole file atomically, so nothing can tear. Two processes on one store file are NOT
+// coordinated, though: each holds its own copy of every entry and writes all of them, so the
+// later write silently drops the sessions the other one added — devices signed out with nobody
+// seeing an error. The deployment is one container per volume (compose.yaml), which is what makes
+// this safe; there is no lock enforcing it.
 export class SessionStore {
   private entries: Map<string, SessionEntry>
   // Tail of the write chain, so concurrent mutations queue instead of racing the same file.

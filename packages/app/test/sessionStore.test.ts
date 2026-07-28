@@ -164,11 +164,25 @@ describe('SessionStore', () => {
     expect(await readdir(dir)).toEqual(['sessions.enc'])
   })
 
-  it('ignores a temporary file left behind by a crash mid-write', async () => {
+  // A foreign temp file stands in for another process mid-write: touching it (unlinking it, or
+  // renaming it into place) is what would let one writer publish the other's unfinished file.
+  it('never touches a temporary file it did not create', async () => {
+    const foreign = `${path}.99999.tmp`
     const store = await open()
+    await writeFile(foreign, 'another process, mid-write')
     await store.create('token-phone', PHONE)
-    await writeFile(`${path}.tmp`, 'half-written garbage')
 
+    expect(await readFile(foreign, 'utf8')).toBe('another process, mid-write')
+    expect((await open()).find('token-phone')).toBeDefined()
+  })
+
+  it('cleans up its own temporary file left behind by a crash mid-write', async () => {
+    const own = `${path}.${process.pid}.tmp`
+    const store = await open()
+    await writeFile(own, 'half-written garbage')
+    await store.create('token-phone', PHONE)
+
+    expect(await readdir(dir)).toEqual(['sessions.enc'])
     expect((await open()).find('token-phone')).toBeDefined()
   })
 
