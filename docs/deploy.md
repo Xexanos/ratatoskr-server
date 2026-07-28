@@ -24,7 +24,7 @@ central E2E stack and **promotes** it to a release channel only after E2E passes
   exits non-zero at startup.
 - **Health:** the image's `HEALTHCHECK` is a raw TCP connect to `PORT` (liveness only — works
   for both HTTP and HTTPS). Application health, including ABS/Sonos reachability, is the
-  unauthenticated `GET /v1/health` endpoint.
+  unauthenticated `GET /v2/health` endpoint.
 - **Shutdown:** `SIGTERM` (what `docker stop` sends) triggers the graceful drain (SPEC section 5)
   — the active session's reached position is written back to ABS before exit.
 
