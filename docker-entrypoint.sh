@@ -20,6 +20,15 @@ TLS_DIR="${TLS_AUTO_DIR:-/tls}"
 CERT="$TLS_DIR/cert.pem"
 KEY="$TLS_DIR/key.pem"
 
+# Where the encrypted session store goes (SPEC section 8), decided here rather than in the
+# application, which has no default for it: which directory outlives a container recreation is a
+# property of the deployment, and a wrong guess would silently sign every device out on the next
+# `docker compose up`. /data is this image's volume for the server's own persistent state —
+# deliberately not the certificate's /tls, which is regenerable while this is not.
+if [ -z "$SESSION_STORE_PATH" ]; then
+  export SESSION_STORE_PATH="/data/sessions.enc"
+fi
+
 if [ -z "$TLS_CERT_PATH" ] && [ -z "$TLS_KEY_PATH" ] && [ "$ALLOW_PLAIN_HTTP" != "true" ]; then
   if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
     # Fail with an actionable message rather than a raw openssl/permission error. A bind-mounted

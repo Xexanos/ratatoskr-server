@@ -28,6 +28,10 @@ Runner: **Vitest** (TypeScript/ESM-native).
 - config / environment validation
 - log redaction (no secret ever reaches a log line)
 - token-rotation bookkeeping (the frozen `/v1` handover; no `/v2` request arms it)
+- the encrypted session store (`test/sessionStore.test.ts`, against a temp directory — like the
+  config tests it needs real files): the AES-256-GCM envelope, atomic replacement of the file,
+  detection of a second writer via the payload revision, and its refusal to continue on a wrong
+  key or unreadable content rather than starting from an empty store
 - seek tolerance / settle math
 
 ### Component — one subsystem against a simulated neighbor
@@ -49,8 +53,10 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
 
 - **Security:** HTTPS enforced unless `ALLOW_PLAIN_HTTP=true`; the streamer API key
   appears only in the media URLs handed to speakers; secrets never appear in logs
-  (redaction); bearer auth, and — on the `/v2` surface — that no Audiobookshelf token
-  reaches a client at all (SPEC §8).
+  (redaction); bearer auth; that no Audiobookshelf token reaches a client on the `/v2` surface
+  at all, and that the rotation handover which used to deliver one is reachable only from the
+  frozen `/v1` contract (SPEC §8); the session store persists only the Ratatoskr token's hash,
+  never the token.
 - **Contract runtime-conformance:** the running server's responses are validated
   against `contract/openapi.yaml` (Ajv / response validation), and CI runs
   `oasdiff` between a PR's base and head to fail on breaking changes that do not bump

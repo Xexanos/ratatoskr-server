@@ -70,10 +70,10 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     if (server) await stopServer(server)
   })
 
-  // No /auth/login test: contract 2.0.0 declares it, but issuing the opaque token it returns needs the
-  // session store (#134), so nothing ABS-facing runs behind that route yet. AbsClient.login therefore
-  // has no live coverage in this window — it returns with the endpoint, and this is the file the drift
-  // it once caught (SPEC §15, the ABS 2.26 token nesting) would surface in again.
+  // No /auth/login test: contract 2.0.0 declares it, but nothing is wired behind it yet (#134), so no
+  // ABS-facing code runs on that route. AbsClient.login therefore has no live coverage in this window
+  // — it returns with the endpoint, and this is the file where the drift it once caught (SPEC §15, the
+  // ABS 2.26 token nesting) would surface again.
 
   it('GET /v2/library/items lists the seeded book', async () => {
     const res = await fetch(`${serverBase}/v2/library/items`, {

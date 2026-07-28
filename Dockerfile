@@ -59,7 +59,13 @@ ENV PORT=8080
 # openssl: the entrypoint generates a self-signed certificate when no transport is configured
 # (see docker-entrypoint.sh / SPEC section 14). /tls is its default output dir; pre-create it
 # owned by the runtime user so a fresh named volume inherits writable ownership.
-RUN apk add --no-cache openssl && mkdir -p /tls && chown node:node /tls
+#
+# /data is the volume for the server's own persistent state — currently just the encrypted
+# session store (SPEC section 8), a general mount point rather than one named after that single
+# file so future additions have somewhere to go without another volume/rename. Separate from /tls
+# because the two share no lifecycle: the certificate is regenerable, so wiping its directory
+# forces a fresh one, while /data holds things that are not. Same pre-creation for the same reason.
+RUN apk add --no-cache openssl && mkdir -p /tls /data && chown node:node /tls /data
 # Strip the package managers the base image bundles (npm + its node_modules, corepack, yarn):
 # nothing installs packages at runtime (the entrypoint is openssl + node only), and npm's bundled
 # deps are a recurring CVE source that trips the Trivy gate (e.g. picomatch/sigstore) for code the

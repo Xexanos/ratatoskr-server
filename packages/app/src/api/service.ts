@@ -75,12 +75,12 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  // No login and no logout here on purpose. Both are declared by contract 2.0.0, and both hinge on a
-  // credential this server cannot yet issue: an opaque Ratatoskr token that outlives the process and
-  // dies on sign-out needs the persisted session store (SPEC section 8). Handing out an Audiobookshelf
-  // access token under that name instead would put an upstream credential on the device, which is the
-  // one property the model exists to remove — so until the store lands, glue's not-implemented stub
-  // answers both routes (#134) rather than something that only looks right.
+  // No login and no logout here on purpose. Both are declared by contract 2.0.0 and both hand out or
+  // revoke the opaque Ratatoskr token, which means writing session entries: the store exists
+  // (auth/sessionStore.ts) but nothing wires it to these routes yet (#134). Handing out an
+  // Audiobookshelf access token under that name in the meantime would put an upstream credential on
+  // the device, which is the one property the model exists to remove (SPEC section 8) — so glue's
+  // not-implemented stub answers both routes rather than something that only looks right.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }

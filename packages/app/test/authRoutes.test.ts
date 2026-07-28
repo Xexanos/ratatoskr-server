@@ -7,10 +7,11 @@ function appWith(abs: Partial<AbsClient>) {
   return buildApp(testConfig(), { absClient: abs as AbsClient })
 }
 
-// The 2.0.0 auth surface is declared by the contract but not yet served: both operations need the
-// persisted session store to have a token to mint and revoke (SPEC section 8, issue #134), so glue's
-// not-implemented stub answers them. Asserted rather than left to chance — a 404 on a documented
-// route is a gap someone has to close, and these tests are what fail when it is closed by halves.
+// The 2.0.0 auth surface is declared by the contract but not yet served: minting and revoking the
+// opaque token means writing session entries, and nothing wires the store to these routes yet
+// (SPEC section 8, issue #134), so glue's not-implemented stub answers them. Asserted rather than
+// left to chance — a 404 on a documented route is a gap someone has to close, and these tests are
+// what fail when it is closed by halves.
 describe('POST /v2/auth/login', () => {
   it('is declared but not implemented yet', async () => {
     const login = vi.fn()

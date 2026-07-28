@@ -50,6 +50,12 @@ client stores the password; all force a re-login once the refresh window lapses
   (`SESSION_STORE_KEY`, Docker-secret-compatible via `SESSION_STORE_KEY_FILE`); no key →
   the server refuses to boot. This consciously relaxes the former "no database" constraint
   (SPEC section 11) — persistence is what closes the restart hole.
+  *Revised during implementation ([#133](https://github.com/Xexanos/ratatoskr-server/issues/133)):
+  the store gets its **own** volume (`/data`, the server's own persistent state) rather than
+  sharing the certificate's. Reusing the existing mount was meant to spare operators a second
+  one, but the two files share no lifecycle — a certificate is regenerable, the store is not —
+  and one directory holding both makes "wipe it to get a fresh cert" destroy every device's
+  session. The current wording is in SPEC section 8.*
 - **Keep-alive** so chains outlive any pause: daily jittered refresh of every stored chain,
   refresh-on-boot for stale chains, on-demand refresh mid-use. A chain now dies only if
   server↔ABS contact is lost for the entire refresh window (≥ 7 days by default) or on an
