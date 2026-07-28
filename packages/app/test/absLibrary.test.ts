@@ -71,9 +71,11 @@ describe('AbsClient library projection', () => {
       ])
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
 
-      expect(page.items).toEqual([
-        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
-        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v1/library/items/li_2/cover' },
+      // The domain projection reports whether cover art EXISTS; the URL is minted at the edge from
+      // the requesting major's mount prefix (api/contractMapping.ts and its own test).
+      expect(page.books).toEqual([
+        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, hasCover: true },
+        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, hasCover: true },
       ])
       // 2 of 5 shown → more in this library.
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 0, page: 1 })
@@ -120,14 +122,14 @@ describe('AbsClient library projection', () => {
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 1, page: 0 })
     })
 
-    it('projects coverUrl as null when Audiobookshelf reports no cover for the item', async () => {
+    it('reports hasCover false when Audiobookshelf reports no cover for the item', async () => {
       const coverless = { id: 'li_nc', mediaType: 'book', media: { duration: 5, coverPath: null, metadata: { title: 'Bare' } } }
       stubRoutes([
         TWO_BOOK_LIBS,
         { match: '/api/libraries/lib1/items', body: { results: [coverless], total: 1 } },
       ])
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
-      expect(page.items[0]?.coverUrl).toBeNull()
+      expect(page.books[0]?.hasCover).toBe(false)
     })
 
     it('joins the user progress into the page: started and finished books carry it, unheard books do not', async () => {
@@ -144,16 +146,18 @@ describe('AbsClient library projection', () => {
       ])
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 3, cursor: undefined })
 
-      expect(page.items[0]?.progress).toEqual({ positionSeconds: 123.5, isFinished: false })
-      expect(page.items[1]?.progress).toEqual({ positionSeconds: 60, isFinished: true })
-      expect(page.items[2]).not.toHaveProperty('progress')
+      expect(page.books[0]?.progress).toEqual({ positionSeconds: 123.5, isFinished: false })
+      expect(page.books[1]?.progress).toEqual({ positionSeconds: 60, isFinished: true })
+      // The domain says "no listening history" with an explicit undefined; the contract's absent
+      // field is the mapper's doing.
+      expect(page.books[2]?.progress).toBeUndefined()
     })
 
     it('returns an empty page when the cursor points past the last library', async () => {
       stubRoutes([TWO_BOOK_LIBS])
       const cursor = Buffer.from(JSON.stringify({ libraryIndex: 5, page: 0 }), 'utf8').toString('base64url')
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor })
-      expect(page).toEqual({ items: [], nextCursor: null })
+      expect(page).toEqual({ books: [], nextCursor: null })
     })
   })
 
@@ -165,7 +169,7 @@ describe('AbsClient library projection', () => {
         { match: '/api/libraries/lib3/search', body: { book: [{ libraryItem: absBook('li_2', 'Match Two', 'B', 20) }] } },
       ])
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: 'match', limit: 50, cursor: undefined })
-      expect(page.items.map((item) => item.id)).toEqual(['li_1', 'li_2'])
+      expect(page.books.map((book) => book.id)).toEqual(['li_1', 'li_2'])
       expect(page.nextCursor).toBeNull()
     })
 
@@ -178,8 +182,8 @@ describe('AbsClient library projection', () => {
       ])
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: 'match', limit: 50, cursor: undefined })
 
-      expect(page.items[0]?.progress).toEqual({ positionSeconds: 60, isFinished: true })
-      expect(page.items[1]).not.toHaveProperty('progress')
+      expect(page.books[0]?.progress).toEqual({ positionSeconds: 60, isFinished: true })
+      expect(page.books[1]?.progress).toBeUndefined()
     })
   })
 
@@ -195,7 +199,7 @@ describe('AbsClient library projection', () => {
         title: 'Alpha',
         author: 'Author A',
         durationSeconds: 3600,
-        coverUrl: '/v1/library/items/li_1/cover',
+        hasCover: true,
         description: 'Desc',
         narrator: 'Nar',
         progress: { positionSeconds: 123.5, isFinished: false },
@@ -212,12 +216,12 @@ describe('AbsClient library projection', () => {
         id: 'li_min',
         title: '(unknown title)',
         durationSeconds: 0,
-        coverUrl: null, // no media at all implies no cover art either
+        hasCover: false, // no media at all implies no cover art either
         progress: { positionSeconds: 0, isFinished: false },
       })
-      expect(item).not.toHaveProperty('author')
-      expect(item).not.toHaveProperty('description')
-      expect(item).not.toHaveProperty('narrator')
+      expect(item.author).toBeUndefined()
+      expect(item.description).toBeUndefined()
+      expect(item.narrator).toBeUndefined()
     })
 
     it('maps a missing item to AbsNotFoundError', async () => {
@@ -237,7 +241,7 @@ describe('AbsClient library projection', () => {
   })
 
   describe('listInProgressItems', () => {
-    it('projects the in-progress books via the summary shape, filtering non-books and honoring the limit', async () => {
+    it('projects the in-progress books via the same book shape, filtering non-books and honoring the limit', async () => {
       stubRoutes([
         {
           match: '/api/me/items-in-progress',
@@ -250,14 +254,13 @@ describe('AbsClient library projection', () => {
           },
         },
       ])
-      const list = await new AbsClient(BASE).listInProgressItems('tok', 25)
+      const books = await new AbsClient(BASE).listInProgressItems('tok', 25)
 
-      expect(list).toEqual({
-        items: [
-          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
-          { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v1/library/items/li_2/cover' },
-        ],
-      })
+      // A bare list of books: the shelf's contract wrapper ({ items: [...] }) is added at the edge.
+      expect(books).toEqual([
+        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, hasCover: true },
+        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, hasCover: true },
+      ])
     })
 
     it('caps the shelf at the limit', async () => {
@@ -267,13 +270,13 @@ describe('AbsClient library projection', () => {
           body: { libraryItems: [absBook('li_1', 'A', 'x', 1), absBook('li_2', 'B', 'y', 2), absBook('li_3', 'C', 'z', 3)] },
         },
       ])
-      const list = await new AbsClient(BASE).listInProgressItems('tok', 2)
-      expect(list.items.map((item) => item.id)).toEqual(['li_1', 'li_2'])
+      const books = await new AbsClient(BASE).listInProgressItems('tok', 2)
+      expect(books.map((book) => book.id)).toEqual(['li_1', 'li_2'])
     })
 
     it('returns an empty shelf when ABS reports nothing in progress', async () => {
       stubRoutes([{ match: '/api/me/items-in-progress', body: {} }])
-      expect(await new AbsClient(BASE).listInProgressItems('tok', 25)).toEqual({ items: [] })
+      expect(await new AbsClient(BASE).listInProgressItems('tok', 25)).toEqual([])
     })
 
     it('joins the user progress into the shelf', async () => {
@@ -281,8 +284,8 @@ describe('AbsClient library projection', () => {
         ME_WITH_PROGRESS,
         { match: '/api/me/items-in-progress', body: { libraryItems: [absBook('li_1', 'Alpha', 'A', 3600)] } },
       ])
-      const list = await new AbsClient(BASE).listInProgressItems('tok', 25)
-      expect(list.items[0]?.progress).toEqual({ positionSeconds: 123.5, isFinished: false })
+      const books = await new AbsClient(BASE).listInProgressItems('tok', 25)
+      expect(books[0]?.progress).toEqual({ positionSeconds: 123.5, isFinished: false })
     })
 
     it('over-fetches a buffer upstream so book-filtering does not truncate below the caller limit', async () => {
@@ -346,8 +349,8 @@ describe('AbsClient library projection', () => {
         cursor: undefined,
       })
 
-      expect(page.items.map((item) => item.id)).toEqual(['li_1'])
-      expect(page.items[0]).not.toHaveProperty('progress')
+      expect(page.books.map((book) => book.id)).toEqual(['li_1'])
+      expect(page.books[0]?.progress).toBeUndefined()
       expect(logger.warn).toHaveBeenCalledOnce()
     })
 
@@ -365,8 +368,8 @@ describe('AbsClient library projection', () => {
         cursor: undefined,
       })
 
-      expect(page.items.map((item) => item.id)).toEqual(['li_1'])
-      expect(page.items[0]).not.toHaveProperty('progress')
+      expect(page.books.map((book) => book.id)).toEqual(['li_1'])
+      expect(page.books[0]?.progress).toBeUndefined()
       expect(logger.warn).toHaveBeenCalledOnce()
     })
 
@@ -376,10 +379,10 @@ describe('AbsClient library projection', () => {
         { match: '/api/me/items-in-progress', body: { libraryItems: [absBook('li_1', 'Alpha', 'A', 3600)] } },
       ])
       const logger = { warn: vi.fn() }
-      const list = await new AbsClient(BASE, undefined, undefined, logger).listInProgressItems('tok', 25)
+      const books = await new AbsClient(BASE, undefined, undefined, logger).listInProgressItems('tok', 25)
 
-      expect(list.items.map((item) => item.id)).toEqual(['li_1'])
-      expect(list.items[0]).not.toHaveProperty('progress')
+      expect(books.map((book) => book.id)).toEqual(['li_1'])
+      expect(books[0]?.progress).toBeUndefined()
       expect(logger.warn).toHaveBeenCalledOnce()
     })
   })

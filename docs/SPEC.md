@@ -446,8 +446,12 @@ ratatoskr-server/
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
-│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount,
-│   │   │                       #   and mapping between the domain and the contract types
+│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount
+│   │   │                       #   (apiPrefix.ts), and mapping between the domain and the
+│   │   │                       #   contract types: contractMapping.ts is the one place
+│   │   │                       #   contract-shaped library and session values are built, and
+│   │   │                       #   the only place a cover URL is minted; contractShapeAssertion.ts
+│   │   │                       #   makes skipping that step a build error rather than a wrong URL
 │   │   └── main.ts             #   startup wiring
 │   │
 │   ├── fake-sonos/           # @ratatoskr/fake-sonos — the UPnP/SOAP speaker double (test-only):

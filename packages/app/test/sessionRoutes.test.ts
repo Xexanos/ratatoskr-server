@@ -8,8 +8,25 @@ import type { SonosClient } from '../src/sonos/client.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
+// The playing book as the manager holds it (domain) and as it must appear on the wire (contract).
+// Session.item goes through the same mapping step as the library endpoints, so the cover URL is
+// minted per response under the serving mount rather than frozen into the session at start().
+const BOOK = { id: 'li_1', title: 'Alpha', author: undefined, durationSeconds: 300, hasCover: true, progress: undefined }
+const SUMMARY = { id: 'li_1', title: 'Alpha', durationSeconds: 300, coverUrl: '/v1/library/items/li_1/cover' }
+// DOMAIN_SESSION is what the SessionManager returns; SESSION is the body the route must produce.
+const DOMAIN_SESSION = {
+  itemId: 'li_1',
+  item: BOOK,
+  speakerId: 'RINCON_1',
+  state: 'playing',
+  positionSeconds: 150,
+  durationSeconds: 300,
+  updatedAt: '2026-07-11T00:00:00.000Z',
+  rotatedTokens: undefined,
+}
 const SESSION = {
   itemId: 'li_1',
+  item: SUMMARY,
   speakerId: 'RINCON_1',
   state: 'playing',
   positionSeconds: 150,
@@ -30,7 +47,7 @@ describe('PUT /v1/sessions/current', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('starts a session and returns it, forwarding the token and body', async () => {
-    const start = vi.fn().mockResolvedValue(SESSION)
+    const start = vi.fn().mockResolvedValue(DOMAIN_SESSION)
     const app = await appWith({ start })
     const res = await app.inject({
       method: 'PUT',
@@ -75,7 +92,7 @@ describe('GET /v1/sessions/current', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the active session', async () => {
-    const app = await appWith({ current: vi.fn().mockResolvedValue(SESSION) })
+    const app = await appWith({ current: vi.fn().mockResolvedValue(DOMAIN_SESSION) })
     const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SESSION)
@@ -92,7 +109,7 @@ describe('GET /v1/sessions/current', () => {
 
   it('passes a pending rotated token pair through on the session (contract-valid)', async () => {
     const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-    const current = vi.fn().mockResolvedValue({ ...SESSION, rotatedTokens })
+    const current = vi.fn().mockResolvedValue({ ...DOMAIN_SESSION, rotatedTokens })
     const app = await appWith({ current })
     const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -133,7 +150,7 @@ describe('DELETE /v1/sessions/current', () => {
 
   it('returns 200 with the final Session when a rotated token pair was pending at stop', async () => {
     const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-    const stop = vi.fn().mockResolvedValue({ ...SESSION, state: 'stopped', rotatedTokens })
+    const stop = vi.fn().mockResolvedValue({ ...DOMAIN_SESSION, state: 'stopped', rotatedTokens })
     const app = await appWith({ stop })
     const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -156,7 +173,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('pauses and returns the session', async () => {
-    const pause = vi.fn().mockResolvedValue({ ...SESSION, state: 'paused' })
+    const pause = vi.fn().mockResolvedValue({ ...DOMAIN_SESSION, state: 'paused' })
     const app = await appWith({ pause })
     const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -166,7 +183,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
   })
 
   it('resumes and returns the session', async () => {
-    const resume = vi.fn().mockResolvedValue(SESSION)
+    const resume = vi.fn().mockResolvedValue(DOMAIN_SESSION)
     const app = await appWith({ resume })
     const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/resume', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -175,7 +192,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
   })
 
   it('seeks to the requested position and returns the session', async () => {
-    const seek = vi.fn().mockResolvedValue({ ...SESSION, positionSeconds: 42 })
+    const seek = vi.fn().mockResolvedValue({ ...DOMAIN_SESSION, positionSeconds: 42 })
     const app = await appWith({ seek })
     const res = await app.inject({
       method: 'POST',
