@@ -115,6 +115,13 @@ SHA-256 fingerprint — compare it with the one printed in `docker compose logs`
 (trust-on-first-use). You can instead bring your own certificate (`TLS_CERT_PATH`/`TLS_KEY_PATH`)
 or serve plain HTTP (`ALLOW_PLAIN_HTTP=true`, e.g. behind a TLS-terminating reverse proxy).
 
+**Back up `./data`.** The second volume `compose.yaml` mounts is the server's own persistent
+state — currently the encrypted session store: who is signed in, and the Audiobookshelf
+credentials the server holds on their behalf (SPEC section 8). Losing it signs every device out;
+keep the `SESSION_STORE_KEY` with it, since one is useless without the other. `./tls` needs no
+backup: delete it and the container generates a new certificate, at the cost of re-confirming the
+fingerprint in the app.
+
 ## Development
 
 This is a pnpm workspace of three packages: `position` (pure position-mapping logic),

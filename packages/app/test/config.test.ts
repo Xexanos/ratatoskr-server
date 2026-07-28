@@ -4,6 +4,10 @@ import { ConfigError, loadConfig } from '../src/config/index.js'
 
 const CERT = fileURLToPath(new URL('./fixtures/tls/cert.pem', import.meta.url))
 const KEY = fileURLToPath(new URL('./fixtures/tls/key.pem', import.meta.url))
+// The fixture carries a trailing newline on purpose (see EnvReader.sessionStoreKey).
+const SESSION_KEY_FILE = fileURLToPath(new URL('./fixtures/session-store.key', import.meta.url))
+const SESSION_KEY = Buffer.alloc(32, 0x2a)
+const SESSION_KEY_B64 = SESSION_KEY.toString('base64')
 
 const REQUIRED = {
   ABS_URL: 'http://abs.invalid',
@@ -168,5 +172,40 @@ describe('loadConfig', () => {
       },
       'no TLS configured',
     )
+  })
+
+  it('reads the session store key from a value or a Docker-secret file, trimming the trailing newline', () => {
+    expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY_B64 }).sessionStoreKey).toEqual(SESSION_KEY)
+    expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY_FILE: SESSION_KEY_FILE }).sessionStoreKey).toEqual(SESSION_KEY)
+  })
+
+  it('accepts a hex-encoded session store key as well as base64', () => {
+    expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY.toString('hex') }).sessionStoreKey).toEqual(
+      SESSION_KEY,
+    )
+  })
+
+  it('rejects SESSION_STORE_KEY and SESSION_STORE_KEY_FILE set together', () => {
+    expectConfigError(
+      { ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY_B64, SESSION_STORE_KEY_FILE: SESSION_KEY_FILE },
+      'mutually exclusive',
+    )
+  })
+
+  it('rejects an unreadable SESSION_STORE_KEY_FILE', () => {
+    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY_FILE: '/nonexistent/session.key' }, 'is not readable')
+  })
+
+  it('rejects a key that is not 256 bits, and says how to generate one', () => {
+    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: 'too-short' }, 'SESSION_STORE_KEY must be a 256-bit key')
+    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: 'too-short' }, 'openssl rand -base64 32')
+    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: Buffer.alloc(16).toString('base64') }, 'must be a 256-bit key')
+  })
+
+  // No default on purpose — the container entrypoint decides the location (see SPEC section 7),
+  // because guessing a directory that does not outlive a restart would silently sign devices out.
+  it('leaves the store path unset unless it is configured', () => {
+    expect(loadConfig(REQUIRED).sessionStorePath).toBeUndefined()
+    expect(loadConfig({ ...REQUIRED, SESSION_STORE_PATH: '/data/s.enc' }).sessionStorePath).toBe('/data/s.enc')
   })
 })

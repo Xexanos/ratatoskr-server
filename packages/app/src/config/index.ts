@@ -37,6 +37,12 @@ export interface Config {
   // Position write backoff (SPEC section 5): subtract this from the position written to ABS, since
   // Sonos's reported RelTime runs slightly ahead of the audible output (buffering). 0 disables it.
   writePositionBackoffSeconds: number
+  // Where the encrypted session store lives (SPEC section 8) and the operator-supplied key that
+  // encrypts it (decoded by EnvReader's sessionStoreKey). No default for the path: which directory
+  // survives a container recreation is a deployment fact, not something this process can guess, so
+  // the container entrypoint supplies it the same way it supplies TLS_CERT_PATH/TLS_KEY_PATH.
+  sessionStorePath: string | undefined
+  sessionStoreKey: Buffer | undefined
   tls: TlsConfig | undefined
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
   // production; the tests turn it on. See src/api/responseValidation.ts.
@@ -124,31 +130,61 @@ class EnvReader {
     return value
   }
 
+  // A secret that may be given inline or as a path to read it from — the file form is what makes
+  // it mountable as a Docker/Compose secret. The two are mutually exclusive, and an unreadable
+  // file is reported rather than passed over, so a typo'd or unmounted secret cannot look like
+  // "not configured". The reported name comes back with the value, so the caller's own error
+  // messages name the variable the operator actually set.
+  private inlineOrFile(inlineName: string, fileName: string): { name: string; value: string } | undefined {
+    const inline = this.env[inlineName]
+    const path = this.env[fileName]
+    if (inline && path) {
+      this.problems.push(`${inlineName} and ${fileName} are mutually exclusive; set only one`)
+      return undefined
+    }
+    if (inline) return { name: inlineName, value: inline }
+    if (!path) return undefined
+    try {
+      return { name: fileName, value: readFileSync(path, 'utf8') }
+    } catch {
+      this.problems.push(`${fileName} is not readable (${path})`)
+      return undefined
+    }
+  }
+
   // TLS trust for the ABS connection. Self-signed / private-CA setups pin a PEM via
   // ABS_CA_CERT (inline) or ABS_CA_CERT_PATH (file); ABS_TLS_INSECURE=true disables verification
   // as an explicit last resort. These are mutually exclusive.
   absTls(): { caCert: string | undefined; insecure: boolean } {
-    const inlineCert = this.env.ABS_CA_CERT
-    const certPath = this.env.ABS_CA_CERT_PATH
+    const pinned = this.inlineOrFile('ABS_CA_CERT', 'ABS_CA_CERT_PATH')
     const insecure = this.boolean('ABS_TLS_INSECURE')
-
-    let caCert: string | undefined
-    if (inlineCert && certPath) {
-      this.problems.push('ABS_CA_CERT and ABS_CA_CERT_PATH are mutually exclusive; set only one')
-    } else if (inlineCert) {
-      caCert = inlineCert
-    } else if (certPath) {
-      try {
-        caCert = readFileSync(certPath, 'utf8')
-      } catch {
-        this.problems.push(`ABS_CA_CERT_PATH is not readable (${certPath})`)
-      }
-    }
-
-    if ((caCert !== undefined || inlineCert || certPath) && insecure) {
+    // Keyed off the raw env, not off `pinned`: an unreadable PEM path is still an attempt to pin,
+    // and reporting the contradiction with ABS_TLS_INSECURE too spares a second restart.
+    if ((this.env.ABS_CA_CERT || this.env.ABS_CA_CERT_PATH) && insecure) {
       this.problems.push('ABS_TLS_INSECURE cannot be combined with ABS_CA_CERT/ABS_CA_CERT_PATH')
     }
-    return { caCert, insecure }
+    return { caCert: pinned?.value, insecure }
+  }
+
+  // Key for the encrypted session store (SPEC sections 7 and 8). Undefined means unconfigured —
+  // the store cannot be opened without a key, so whoever opens it is what fails loud.
+  //
+  // AES-256-GCM needs exactly 32 bytes; both common encodings of a random key are accepted. The
+  // value is trimmed because a key file written by `docker secret` or a shell redirect normally
+  // ends in a newline, which would otherwise decode to a wrong-length key.
+  sessionStoreKey(): Buffer | undefined {
+    const configured = this.inlineOrFile('SESSION_STORE_KEY', 'SESSION_STORE_KEY_FILE')
+    if (configured === undefined) return undefined
+    const value = configured.value.trim()
+    if (/^[0-9a-fA-F]{64}$/.test(value)) return Buffer.from(value, 'hex')
+    if (/^[A-Za-z0-9+/\-_]{43}=?$/.test(value)) {
+      const decoded = Buffer.from(value, 'base64')
+      if (decoded.length === 32) return decoded
+    }
+    this.problems.push(
+      `${configured.name} must be a 256-bit key, base64- or hex-encoded (generate one with: openssl rand -base64 32)`,
+    )
+    return undefined
   }
 
   port(): number {
@@ -220,6 +256,8 @@ export function loadConfig(env: Env = process.env): Config {
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),
     writePositionBackoffSeconds: reader.nonNegativeNumber('WRITE_POSITION_BACKOFF_SECONDS', 2),
+    sessionStorePath: env.SESSION_STORE_PATH?.trim() || undefined,
+    sessionStoreKey: reader.sessionStoreKey(),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),
     absCaCert: absTls.caCert,
