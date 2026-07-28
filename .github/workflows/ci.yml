@@ -98,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: git fetch --depth=1 origin ${{ github.base_ref }}
-      - uses: oasdiff/oasdiff-action/breaking@024f6c399f9a21ada1addb0f9a36ce1bfac995f1 # v0.1.6
+      - uses: oasdiff/oasdiff-action/breaking@35b32248b144707e94e72a8d0a1456da9d6618c2 # v0.1.7
         with:
           base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
           revision: "HEAD:contract/openapi.yaml"
