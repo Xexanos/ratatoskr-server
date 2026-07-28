@@ -16,8 +16,9 @@ export type SecurityHandlers = Record<string, (request: FastifyRequest, reply: F
 
 // Security handlers for fastify-openapi-glue: one method per OpenAPI security scheme name.
 // glue runs the matching handler as a preHandler for every operation that requires it, and
-// turns a thrown error into a 401 (SecurityError). Operations declaring `security: []`
-// (getHealth, login, listSpeakers) are exempt automatically.
+// turns a thrown error into a 401 (SecurityError). Operations declaring `security: []` are exempt
+// automatically — getHealth, login and listSpeakers in both served majors, plus refresh in the
+// frozen /v1 one, since this same handler set serves both.
 export const securityHandlers: SecurityHandlers = {
   // Presence check only — ABS remains the authority on validity (SPEC section 8). On success
   // the extracted token is stashed for the service methods that forward it upstream.

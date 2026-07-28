@@ -22,6 +22,13 @@ export type GuardOperation = (operationId: string, handler: OperationHandler) =>
 // The operations whose handlers present the caller's token to ABS themselves. An entry must
 // name a bearer-protected operationId in the contract — createTokenGuard throws at startup
 // otherwise, so a renamed or re-secured operation cannot leave a stale exemption behind.
+//
+// Both served majors happen to want the same set today, so they share this one — but the
+// exemptions are checked against the document they are used with, and a served major's document
+// can be frozen (the 1.4.0 one under /v1 can never gain an operationId). An entry that exists in
+// only one major therefore belongs in that major's own set, passed to createTokenGuard as the
+// third argument, not here: added here it would fail the *other* major's startup check and take
+// the whole process down with it.
 export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
   'listLibraryItems', // forwards the token via abs.listItems
   'getLibraryItem', // forwards the token via abs.getItem
@@ -32,7 +39,7 @@ export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
 
 // Walk the contract for the operationIds that carry a bearer requirement: the global
 // `security` applies unless an operation overrides it (`security: []` opts out — getHealth,
-// login, listSpeakers).
+// login, listSpeakers, and on the frozen /v1 document refresh as well).
 //
 // Only requirements naming this scheme count: the guard reads request.absToken, which the
 // bearerAuth security handler alone sets (security.ts), so an operation secured by any other

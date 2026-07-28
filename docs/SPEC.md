@@ -264,10 +264,21 @@ tag, not here.
 `/v1` therefore keeps machinery this section does not describe, and it keeps it unchanged: the
 login/refresh proxying of Audiobookshelf tokens, the refresh token on `startSession`, the
 rotation handover (including the `stopSession` 200-with-final-Session case), and a token guard
-that asks Audiobookshelf on every request. All of it is confined to that mount — its own service
-implementation, its own guard instance, its own document — so nothing of it reaches `/v2`, and the
-whole set disappears with the sunset, together with
+that asks Audiobookshelf on every request. Its surface is confined to that mount — its own
+service implementation, its own guard instance, its own document — and the handover in
+particular can only be *armed* by a `/v1` `startSession` (no other route accepts a refresh
+token) and only *delivered* on a `/v1` response (the 2.0.0 `Session` has no field to carry it,
+so the serializer drops it). The whole set disappears at the sunset, together with
 `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (section 7).
+
+What the two majors do share is the one active playback session, because there is exactly one
+(this section, above) and either mount's authenticated caller may stop it. So a `/v2` request
+presenting the same Audiobookshelf access token a `/v1` client is listening with can end that
+session, dropping a rotated pair that had not been delivered yet — the `/v1` client is then left
+with a refresh token Audiobookshelf has already rotated away, and re-authenticates. Reachable
+only while `/v2` still accepts Audiobookshelf tokens as bearers, and only for a caller holding
+the very same token, which is one device speaking both majors; it closes for good once `/v2`
+tokens are Ratatoskr-issued.
 
 The hard requirement this model exists to meet: **the user stays signed in until an
 explicit sign-out.** Server restarts and arbitrarily long usage pauses must never force a

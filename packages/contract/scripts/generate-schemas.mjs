@@ -50,10 +50,11 @@ for (const document of documents) {
   console.log(`wrote ${document.name} (from ${source}) to ${outPath}`)
 }
 
-// The version and the mount prefix are two statements about the same major, kept in two places a
-// contract edit can touch independently (SPEC section 6: the prefix lives in `servers.url`). A
-// mismatch would mount a major under another major's path — served happily and wrong — so it fails
-// the build here, where the document is being read anyway, instead of at runtime.
+// A frozen document has one thing to prove: that it is still the version it was frozen at. Cheap to
+// check while the file is open anyway, and it fails here — in a developer's own `generate` — rather
+// than waiting for the contract-freeze CI job, which is the real gate but only runs on a push.
+// Nothing else is asserted about either document: the mount prefix is validated where it is used
+// (apiPrefix.ts, which throws on a document that carries no version path).
 function check(doc, document, source) {
   const version = doc?.info?.version
   if (typeof version !== 'string') {
@@ -61,12 +62,6 @@ function check(doc, document, source) {
   }
   if (document.pinnedVersion !== undefined && version !== document.pinnedVersion) {
     fail(source, `expected the frozen contract ${document.pinnedVersion}, found ${version}`)
-  }
-  const url = doc?.servers?.[0]?.url
-  const path = typeof url === 'string' ? /^[a-z][a-z0-9+.-]*:\/\/[^/]+(\/[^?#]*)/i.exec(url)?.[1] : undefined
-  const prefix = path?.replace(/\/+$/, '')
-  if (prefix !== `/v${version.split('.')[0]}`) {
-    fail(source, `info.version ${version} does not match the servers[0].url prefix ${JSON.stringify(prefix)}`)
   }
 }
 

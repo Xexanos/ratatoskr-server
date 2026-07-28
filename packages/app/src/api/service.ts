@@ -58,9 +58,16 @@ export interface ApiServiceDeps {
 // clients are available via constructor injection. Methods return the payload or throw a domain
 // error; the central error handler (errorHandler.ts) maps thrown errors to contract responses.
 //
-// This is the /v2 surface. The frozen /v1 one extends it (v1/service.ts) with the operations 2.0.0
-// dropped, so the shared operations are implemented once and cannot drift between majors — the
-// members below are protected for that subclass, not for open extension.
+// This is the /v2 surface, and — until the sunset in ADR-0001 — also the body of the /v1 one, which
+// extends it (v1/service.ts) with the operations 2.0.0 dropped. Both majors implement the shared
+// operations here exactly once, so they cannot drift apart by accident; the members below are
+// protected for that subclass, not for open extension.
+//
+// The load-bearing consequence: **a change to a method here changes /v1 too**, and /v1 is frozen
+// because installed app versions run on it. The /v2 auth model (#134) resolves the upstream token
+// from a session entry instead of from `request.absToken`, which touches these methods — that
+// belongs in an override on the /v2 side, not in the shared body. What catches it either way is
+// test/v1Routes.test.ts, which pins /v1 to forwarding the caller's own bearer.
 export class ApiService {
   protected readonly abs: AbsClient
   protected readonly sonos: SonosClient
@@ -144,7 +151,12 @@ export class ApiService {
   }
 
   // Always 204: nothing is handed back at stop any more, now that no token pair travels to the
-  // client (SPEC section 8). The final Session the manager returns is discarded here.
+  // client (SPEC section 8). The final Session the manager returns is discarded here — including, in
+  // the one case where the shared manager still produces one, a rotated pair a /v1 listener was owed.
+  // That needs a /v2 caller presenting the same Audiobookshelf access token as that listener, i.e. one
+  // device speaking both majors, and it stops being expressible once /v2 bearers are Ratatoskr tokens
+  // (#134); the /v1 client re-authenticates in the meantime. Answering with it here is not the fix —
+  // that would put an upstream credential on a /v2 device, under a field 2.0.0 does not have.
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     await this.sessions.stop(request.absToken as string)
     await reply.code(204).send()
