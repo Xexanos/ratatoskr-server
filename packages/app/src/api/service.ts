@@ -10,20 +10,31 @@ import {
   toLibraryItemPage,
   toSessionResponse,
   toSpeaker,
+  type V1AuthTokens,
 } from './contractMapping.js'
 
 type Health = components['schemas']['Health']
 type DependencyStatus = components['schemas']['DependencyStatus']
-type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
 type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItem = components['schemas']['LibraryItem']
 type Speaker = components['schemas']['Speaker']
 type LoginRequest = components['schemas']['LoginRequest']
-type RefreshRequest = components['schemas']['RefreshRequest']
 type Session = components['schemas']['Session']
-type StartSessionRequest = components['schemas']['StartSessionRequest']
 type SeekRequest = components['schemas']['SeekRequest']
+
+// The request bodies contract 1.4.0 has and 2.0.0 dropped — the refresh operation, and the refresh
+// token on startSession that arms the rotation handover. Declared here for the same reason as
+// V1AuthTokens: the served /v1 document is generated without types, and these shapes are frozen.
+interface V1RefreshRequest {
+  refreshToken: string
+}
+
+interface V1StartSessionRequest {
+  itemId: string
+  speakerId: string
+  refreshToken?: string
+}
 
 async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
   // probe() verifies the host is genuinely Audiobookshelf (GET /ping) rather than accepting any
@@ -91,13 +102,13 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  async login(request: FastifyRequest): Promise<AuthTokens> {
+  async login(request: FastifyRequest): Promise<V1AuthTokens> {
     const { username, password } = request.body as LoginRequest
     return toAuthTokens(await this.abs.login(username, password))
   }
 
-  async refresh(request: FastifyRequest): Promise<AuthTokens> {
-    const { refreshToken } = request.body as RefreshRequest
+  async refresh(request: FastifyRequest): Promise<V1AuthTokens> {
+    const { refreshToken } = request.body as V1RefreshRequest
     return toAuthTokens(await this.abs.refresh(refreshToken))
   }
 
@@ -149,7 +160,7 @@ export class ApiService {
   }
 
   async startSession(request: FastifyRequest): Promise<Session> {
-    const { itemId, speakerId, refreshToken } = request.body as StartSessionRequest
+    const { itemId, speakerId, refreshToken } = request.body as V1StartSessionRequest
     const session = await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
     return toSessionResponse(session, this.apiPrefix)
   }

@@ -4,7 +4,6 @@ import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/lib
 import type { PlaybackSession, RotatedTokenPair } from '../playback/sessionManager.js'
 import type { SonosSpeaker } from '../sonos/client.js'
 
-type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 type LibraryItem = components['schemas']['LibraryItem']
 type LibraryItemList = components['schemas']['LibraryItemList']
@@ -78,11 +77,20 @@ export function toSpeaker(speaker: SonosSpeaker): Speaker {
   }
 }
 
+// Contract 1.4.0's AuthTokens, spelled out rather than derived: 2.0.0 dropped the schema, and the
+// frozen /v1 document is generated without types (see the contract package's index), so the shapes
+// that major alone needs are declared where they are used. Frozen, like the surface it belongs to.
+export interface V1AuthTokens {
+  accessToken: string
+  refreshToken: string
+  user: { id: string; username: string }
+}
+
 // ABS's own token pair, which /v1 hands to the client as-is. The shapes coincide today; they are
-// mapped rather than passed through because they are not the same thing — the contract's AuthTokens
-// is what this major promises, AbsTokenPair is what upstream issued, and a later major replaces the
-// former without ABS changing at all.
-export function toAuthTokens(pair: AbsTokenPair): AuthTokens {
+// mapped rather than passed through because they are not the same thing — what this major promises
+// is V1AuthTokens, AbsTokenPair is what upstream issued, and a later major replaces the former
+// without ABS changing at all.
+export function toAuthTokens(pair: AbsTokenPair): V1AuthTokens {
   return {
     accessToken: pair.accessToken,
     refreshToken: pair.refreshToken,
