@@ -138,16 +138,21 @@ must build on:
 
 - `contract/openapi.yaml` is the single source of truth. Implement it exactly.
 - Everything is mounted under the version prefix, kept in one place (`servers.url`), so two
-  majors can be served side by side. The pending **contract 2.0.0 cut under `/v2`** — the
-  new auth surface, with `/v1` served in parallel frozen at the 1.4.0 tag until its sunset
-  (then an unauthenticated 410 `UPGRADE_REQUIRED` stub) — is decided and recorded in
-  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md).
+  majors can be served side by side. The contract is **2.0.0 under `/v2`** — the auth surface
+  of [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step
+  with no deprecation markers, since `/v1` clients read the frozen 1.4.0 tag. `/v1` is served
+  in parallel from that tag until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED`
+  stub). The server-side implementation of both — the session store, the `/v2` auth
+  endpoints, the parallel `/v1` mount — follows the contract in tracked issues, so for a
+  window the served surface lags this document.
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
-  practice for the server: never remove or repurpose a field within `/v1`, only add
-  optional ones; introduce breaking changes only under a new major version and path.
-- A CI job runs oasdiff against the previous tagged contract and fails the build on an
-  unflagged breaking change.
+  practice for the server: never remove or repurpose a field within a served major, only
+  add optional ones; introduce breaking changes only under a new major version and path.
+- A CI job runs oasdiff between the PR's base and head and fails the build on a breaking
+  change. It reads `info.version` on both sides and skips itself when the major differs,
+  which is exactly the case this rule allows — so a major cut needs no manual flag, and
+  everything else stays gated.
 - Any operation whose request is validated — a bounded or typed query param, a required body, a
   path param — must declare `400: BadRequest` in the contract. Fastify rejects an invalid request
   with a 400 before the handler runs (mapped to the contract's error shape, section 12), so an
@@ -190,7 +195,7 @@ if something required is missing:
 - `SONOS_REQUEST_TIMEOUT_MS` (optional, default 4000) — per-request cap on Sonos SOAP/discovery
   I/O. A speaker that vanishes mid-session (powered off / off the network) drops packets rather
   than refusing the connection, so an unbounded read would hang the live topology/transport reads
-  — and with them `GET /v1/sessions/current` — indefinitely. This bounds each call so a dead
+  — and with them `GET /v2/sessions/current` — indefinitely. This bounds each call so a dead
   speaker surfaces promptly as a 502 (section 4) instead of a hung request.
 - `SONOS_LISTENER_HOST`, `SONOS_LISTENER_INTERFACE`, `SONOS_LISTENER_PORT` (optional,
   pass-through) — read directly by the embedded Sonos library, not validated by Ratatoskr's
@@ -235,8 +240,9 @@ Authentication is per-user and backed by Audiobookshelf, so that progress is att
 to the person who is actually listening. The client credential, however, is
 **Ratatoskr-issued**: the server is the sole holder of ABS token pairs
 ([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), decided in
-[#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes
-the target model for contract 2.0.0 under `/v2`; the previous shared-token model and its
+[#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes the
+model of contract 2.0.0 under `/v2` — cut in the contract, with the server-side pieces
+landing in follow-up issues (section 6). The previous shared-token model and its
 rotation-handover protocol stay served under `/v1`, frozen at the 1.4.0 contract tag,
 until the sunset described in the ADR — the old protocol's specification lives in that
 tag, not here.
@@ -446,7 +452,7 @@ ratatoskr-server/
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
-│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount
+│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the version mount
 │   │   │                       #   (apiPrefix.ts), and mapping between the domain and the
 │   │   │                       #   contract types: contractMapping.ts is the one place
 │   │   │                       #   contract-shaped library and session values are built, and
@@ -491,8 +497,10 @@ tuning knobs from section 7). All of the finicky logic is therefore unit-testabl
 hardware. The sync loop in `playback/` stays thin: poll, convert to absolute seconds via
 `position`, apply the write-back threshold, and write to ABS when warranted.
 
-The single API version prefix (`/v1`) is defined in one place in `api/`, so a future
-`/v2` can be mounted alongside it (section 6).
+The API version prefix is not written down in the server at all: `apiPrefix.ts` derives it from
+the contract's `servers.url`, the one place section 6 puts it, so the mounted routes and the URLs
+the API hands out cannot drift from the contract that documents them. A second major is mounted by
+serving a second document, not by adding a second constant.
 
 ## 14. Security
 
@@ -615,7 +623,7 @@ own change with its own tests.
   the request/response shapes match a live ABS. Added a Docker-gated integration test
   (now `packages/integration-tests/test/absLive.integration.test.ts`) that boots a real,
   digest-pinned Audiobookshelf in a container, seeds it, spawns the compiled server against
-  it, and drives login/refresh and the library projection over `/v1`. It skips cleanly where
+  it, and drives the library projection over the contract's version prefix. It skips cleanly where
   no container runtime is available and runs in CI. This closed the phase-3a open item — a
   smoke test against a live ABS before phase 4 builds playback on top of the projection —
   and on its first run surfaced a real drift bug: the client read the ABS token pair from the

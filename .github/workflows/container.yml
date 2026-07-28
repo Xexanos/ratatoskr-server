@@ -116,8 +116,17 @@ jobs:
           provenance: false
           sbom: false
 
-      - name: Boot the image and assert /v1/health responds
+      - name: Boot the image and assert the health endpoint responds
         run: |
+          # The health path carries the version prefix of the major the image actually serves, which
+          # lives in that document's servers.url and nowhere else (SPEC section 6) — read it from there
+          # rather than pinning a major here. Today the served document is the frozen /v1 one
+          # (api/app.ts); contract/openapi.yaml is the one under development and is not mounted yet, so
+          # reading it would smoke-test a surface the image does not answer on. When /v2 joins the
+          # mount, this step checks both.
+          served=contract/v1/openapi.yaml
+          prefix=$(sed -n 's#^  - url: [a-z]*://[^/]*\(/[^ ]*\)$#\1#p' "$served" | head -1)
+          [ -n "$prefix" ] || { echo "::error title=smoke failed::could not read the version prefix from $served"; exit 1; }
           # Plain HTTP (no cert to manage) + an unreachable ABS (connection refused is a network
           # error, which the server tolerates at startup — it degrades and /health reports it). If a
           # dependency is broken on this arch, Node fails to load it and the listener never comes up.
@@ -128,12 +137,12 @@ jobs:
             -e PORT=8080 -p 8080:8080 ratatoskr-server:smoke
           ok=
           for _ in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            if curl -fsS "http://localhost:8080$prefix/health" >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
           echo "--- container logs ---"; docker logs smoke || true
           docker rm -f smoke >/dev/null 2>&1 || true
-          [ -n "$ok" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not serve /v1/health"; exit 1; }
+          [ -n "$ok" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not serve $prefix/health"; exit 1; }
 
       # Vulnerability gate: scan the freshly built image (this arch, on its native runner) BEFORE it
       # is pushed. A fixable HIGH/CRITICAL fails the matrix leg, which blocks merge -> E2E -> promote,

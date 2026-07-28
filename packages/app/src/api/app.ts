@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
-import { openapiDocument } from '@ratatoskr/contract'
+import { frozenV1Document } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
 import { API_PREFIX } from './apiPrefix.js'
@@ -102,9 +102,9 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // either its handler forwards the token itself (self-validating), or the guard runs
   // validateToken first. Derived from the contract, so a new operation is guarded by default;
   // throws at startup on a stale exemption (tokenGuard.ts).
-  const guardOperation = createTokenGuard(openapiDocument, (token) => abs.validateToken(token))
+  const guardOperation = createTokenGuard(frozenV1Document, (token) => abs.validateToken(token))
   await app.register(openapiGlue, {
-    specification: openapiDocument,
+    specification: frozenV1Document,
     // glue registers every contract path. Resolve each operationId to its ApiService method;
     // operations without one get a stub that throws NotImplementedError → 404, rather than
     // glue's default notImplemented stub → 500.

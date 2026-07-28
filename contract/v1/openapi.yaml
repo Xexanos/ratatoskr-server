@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 2.0.0
+  version: 1.4.0
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -13,25 +13,19 @@ info:
     Server and clients are versioned and released independently, and must remain
     compatible across a range of versions. Therefore:
 
-      - The API is versioned in the URL path, kept in one place (servers.url).
-        Breaking changes go into a new major version and a new path, served alongside
-        the old one during a transition window.
-      - Backwards-compatible additions (new optional fields, new endpoints) are minor
-        version bumps within the current major. Clients must ignore unknown fields.
+      - The API is versioned in the URL path (/v1). Breaking changes go into a new
+        major version and a new path (/v2), served alongside the old one during a
+        deprecation window.
+      - Backwards-compatible additions (new optional fields, new endpoints) are
+        minor version bumps within /v1. Clients must ignore unknown fields.
       - A CI check (oasdiff) fails any change that breaks compatibility without a
         major version bump.
-
-    This document is the /v2 surface: Ratatoskr-native sessions, where the server is the
-    sole holder of Audiobookshelf tokens and the client holds one opaque Ratatoskr token
-    (ADR-0001). Its predecessor /v1 — a shared Audiobookshelf token pair with a
-    refresh-token handover protocol — is served in parallel until its sunset and is
-    specified by the frozen contract 1.4.0 git tag, not by this file.
   license:
     name: GPL-3.0-or-later
     url: https://www.gnu.org/licenses/gpl-3.0.html
 
 servers:
-  - url: http://{host}:{port}/v2
+  - url: http://{host}:{port}/v1
     description: Ratatoskr service on the local network
     variables:
       host:
@@ -66,17 +60,12 @@ paths:
   /auth/login:
     post:
       operationId: login
-      summary: Sign in with Audiobookshelf credentials and receive a Ratatoskr token
+      summary: Authenticate against Audiobookshelf via Ratatoskr
       description: |
-        Ratatoskr validates the credentials against Audiobookshelf, opens its own private
-        Audiobookshelf session for this device login, and returns an opaque Ratatoskr token
-        plus the identified user. Clients send that token as the bearer token on all other
-        endpoints. The password is stored nowhere, and Audiobookshelf tokens never reach the
-        client — Ratatoskr is their sole holder, so the library view and progress stay
-        per-user without the client ever holding an upstream credential.
-
-        Each sign-in creates an independent session with its own token: signing in on one
-        device never signs another out, and each device is revoked on its own.
+        Ratatoskr forwards the credentials to Audiobookshelf and returns the resulting
+        access and refresh tokens plus the identified user. Clients then send the access
+        token as the bearer token on all other endpoints; Ratatoskr uses it upstream so
+        that the library view and progress are per-user.
       security: []
       tags: [system]
       requestBody:
@@ -89,28 +78,34 @@ paths:
           description: Authenticated.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AuthSession" }
+              schema: { $ref: "#/components/schemas/AuthTokens" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "502": { $ref: "#/components/responses/UpstreamError" }
 
-  /auth/logout:
+  /auth/refresh:
     post:
-      operationId: logout
-      summary: Sign out this device
+      operationId: refresh
+      summary: Exchange a refresh token for a new token pair
       description: |
-        Invalidates the bearer token immediately and releases the Audiobookshelf session
-        Ratatoskr held for this device; other devices and other Audiobookshelf clients keep
-        theirs.
-
-        Idempotent and best-effort, so a client can always complete a sign-out locally: an
-        unknown or already-invalidated token and an unreachable Audiobookshelf both still
-        answer 204. Only a missing or malformed Authorization header is a 401.
+        Audiobookshelf access tokens are short-lived. Clients exchange their refresh
+        token for a new access/refresh pair. Ratatoskr proxies this to Audiobookshelf.
+      security: []
       tags: [system]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
       responses:
-        "204":
-          description: Signed out. The token is no longer valid.
+        "200":
+          description: A new token pair.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthTokens" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
 
   /speakers:
     get:
@@ -179,7 +174,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LibraryItem"
-        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { $ref: "#/components/responses/UpstreamError" }
@@ -253,7 +247,8 @@ paths:
       operationId: getCurrentSession
       summary: Get the active playback session
       description: |
-        Ratatoskr plays one audiobook at a time. Returns 404 when nothing is playing.
+        Ratatoskr plays one audiobook at a time in v1. Returns 404 when nothing is
+        playing.
       tags: [playback]
       responses:
         "200":
@@ -291,9 +286,21 @@ paths:
       operationId: stopSession
       summary: Stop playback
       description: |
-        Stops playback and writes the final position back to Audiobookshelf.
+        Stops playback and writes the final position back to Audiobookshelf. Normally
+        returns 204. If a rotated Audiobookshelf token pair is still pending delivery at
+        stop time, returns 200 with a final Session whose rotatedTokens carries that pair,
+        so it is not lost when the session ends (the server discards its in-memory tokens
+        on stop). Clients must treat any 2xx as a successful stop and, on 200, adopt
+        rotatedTokens if present.
       tags: [playback]
       responses:
+        "200":
+          description: |
+            Stopped, and a rotated token pair was pending: the final Session carries it in
+            rotatedTokens. No active session remains.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
         "204":
           description: Stopped. No active session remains.
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -356,11 +363,10 @@ components:
       type: http
       scheme: bearer
       description: |
-        The caller's Ratatoskr token, obtained from POST /auth/login. It is opaque, does not
-        expire and is never rotated: a client stores it once and sends it unchanged until
-        POST /auth/logout. Ratatoskr resolves it to the Audiobookshelf session it holds for
-        this device, so the library view and progress stay scoped to the user who signed in.
-        Required on every endpoint except /health, /auth/login, and GET /speakers.
+        The caller's Audiobookshelf access token, obtained from POST /auth/login and
+        renewed via POST /auth/refresh. Ratatoskr uses it for its upstream calls to
+        Audiobookshelf, so the library view and progress are scoped to that user.
+        Required on every endpoint except /health, /auth/login, and /auth/refresh.
 
   parameters:
     ItemId:
@@ -377,12 +383,10 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
-      description: |
-        The request carried no usable credential. The body's `code` separates the two cases a
-        client must handle differently — see UnauthorizedError.
+      description: Missing or invalid token.
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/UnauthorizedError" }
+          schema: { $ref: "#/components/schemas/Error" }
     NotFound:
       description: The resource was not found.
       content:
@@ -462,7 +466,7 @@ components:
           nullable: true
           description: >-
             Path to the item's cover image on this API (the cover-proxy route, e.g.
-            /v2/library/items/{id}/cover), relative to the server origin the client is already
+            /v1/library/items/{id}/cover), relative to the server origin the client is already
             talking to; requires the bearer token. Null when no cover is available.
         progress:
           $ref: "#/components/schemas/Progress"
@@ -520,6 +524,34 @@ components:
         updatedAt:
           type: string
           format: date-time
+        rotatedTokens:
+          $ref: "#/components/schemas/RotatedTokens"
+
+    RotatedTokens:
+      type: object
+      required: [accessToken, refreshToken]
+      description: |
+        A rotated Audiobookshelf token pair handed back to the client. Present on a
+        Session only when Ratatoskr has renewed the caller's tokens since the last
+        Session it returned to this client: Audiobookshelf rotates the refresh token on
+        every use, so a server-side renewal invalidates the pair the client holds, and
+        this is the channel through which the client learns the new one. The two members
+        always travel together (both or neither), which is why they are a nested object
+        rather than two independent optional fields.
+
+        The client must adopt this pair immediately, discard the previous one, and send
+        the new access token on its next request. Ratatoskr keeps including the pair in
+        Session responses until the client authenticates with the new access token
+        (delivery is confirmed by adoption, not by a single send, so a dropped response
+        cannot strand the client), and also includes it in the final Session returned by
+        stopSession. Never logged (server SPEC section 14). Added in 1.1.0.
+      properties:
+        accessToken:
+          type: string
+          description: Short-lived Audiobookshelf access token; send as the bearer token.
+        refreshToken:
+          type: string
+          description: The rotated longer-lived refresh token that replaces the client's stored one.
 
     LoginRequest:
       type: object
@@ -528,6 +560,12 @@ components:
         username: { type: string }
         password: { type: string, format: password }
 
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+
     User:
       type: object
       required: [id, username]
@@ -535,22 +573,18 @@ components:
         id: { type: string }
         username: { type: string }
 
-    AuthSession:
+    AuthTokens:
       type: object
-      required: [token, user]
-      description: |
-        A signed-in device as its client sees it: the credential to send, plus the
-        Audiobookshelf identity it was issued for. Unrelated to the playback Session — this
-        one is about who the caller is, that one about what is playing where.
+      required: [accessToken, refreshToken, user]
       properties:
-        token:
+        accessToken:
+          type: string
+          description: Short-lived Audiobookshelf access token; send as the bearer token.
+        refreshToken:
           type: string
           description: |
-            The opaque Ratatoskr token; send it as the bearer token on every other endpoint.
-            It carries no readable structure and no expiry to inspect — treat it as a string
-            to store and replay. It stays valid until POST /auth/logout, across server
-            restarts and arbitrarily long pauses, so a client never has to re-authenticate
-            on its own initiative. Never logged (server SPEC section 14).
+            Longer-lived token. Exchange it via /auth/refresh, and pass it to startSession
+            so the server can keep progress flowing during long unattended playback.
         user: { $ref: "#/components/schemas/User" }
 
     StartSessionRequest:
@@ -559,6 +593,13 @@ components:
       properties:
         itemId: { type: string }
         speakerId: { type: string }
+        refreshToken:
+          type: string
+          description: |
+            Optional but recommended. Lets Ratatoskr renew the caller's Audiobookshelf
+            access token on its own, so the server-side sync loop can keep writing progress
+            during long unattended playback. Held in memory for the active session only and
+            discarded on stop or restart.
 
     SeekRequest:
       type: object
@@ -579,27 +620,3 @@ components:
         message:
           type: string
           description: Human-readable explanation.
-
-    UnauthorizedError:
-      # The 401 body, narrowed to the codes a client branches on: the two failures look alike
-      # on the wire but call for opposite reactions, so the distinction has to be machine-
-      # readable rather than left to the message (server SPEC section 8).
-      # UPSTREAM_SESSION_LOST is spelled as ADR-0001 and SPEC section 8 spell it; the
-      # lowercase codes predate that convention and stay as they are within this major.
-      allOf:
-        - $ref: "#/components/schemas/Error"
-        - type: object
-          properties:
-            code:
-              type: string
-              enum: [unauthorized, UPSTREAM_SESSION_LOST]
-              description: |
-                `unauthorized` — no token, or one this server does not know (it was never
-                issued, or sign-out revoked it): the device is signed out, and the client
-                asks for credentials as a fresh sign-in.
-
-                `UPSTREAM_SESSION_LOST` — the token is valid, but the Audiobookshelf session
-                Ratatoskr held for it has died (server↔Audiobookshelf contact lost for longer
-                than Audiobookshelf's refresh window, or the username changed). Only the
-                password can restore it: the client shows a targeted re-authentication prompt
-                and keeps the rest of its state. Re-authenticating yields a new token.
