@@ -137,14 +137,27 @@ must build on:
 ## 6. API and versioning
 
 - `contract/openapi.yaml` is the single source of truth. Implement it exactly.
-- Everything is mounted under the version prefix, kept in one place (`servers.url`), so two
-  majors can be served side by side. The contract is **2.0.0 under `/v2`** — the auth surface
+- Everything is mounted under the version prefix, kept in one place *per major* (`servers.url`),
+  so two majors can be served side by side. The contract is **2.0.0 under `/v2`** — the auth surface
   of [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step
-  with no deprecation markers, since `/v1` clients read the frozen 1.4.0 tag. `/v1` is served
-  in parallel from that tag until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED`
-  stub). The server side follows the contract in tracked issues — the session store is in place,
-  the `/v2` auth endpoints and the parallel `/v1` mount are not — so for a window the served
-  surface lags this document.
+  with no deprecation markers, since `/v1` clients read the frozen 1.4.0 contract. The server side
+  follows the contract in tracked issues — the session store and the parallel `/v1` mount are in
+  place, the `/v2` auth endpoints are not — so for a window the served surface lags this document.
+- **One process serves both majors**, each mounted from its own contract document: a major's routes,
+  request/response schemas, per-operation auth and mount prefix all come from the document it was
+  built with (`api/app.ts` registers one openapi-glue instance per major). Nothing downstream
+  branches on a version. The two auth models stay per mount and must not reach into each other:
+  `/v1` proves every caller's token against Audiobookshelf on every request, `/v2` moves to the
+  in-process lookup as its login lands. Anything a projection hands back that points at this API —
+  today only `LibraryItemSummary.coverUrl` — carries the prefix of the request it answers, never a
+  build-wide constant, or a `/v1` client ends up holding a `/v2` URL.
+- **`/v1` is frozen at the `contract-1.4.0` git tag** — the tag is the freeze. What gets mounted is a
+  copy of that document at `contract/v1/openapi.yaml`, so generating the served artifacts needs no
+  git history and the container build stays hermetic; the `contract-freeze` CI job holds that copy
+  byte-identical to the tag, so no edit of any kind — not a typo fix, not a reformat — can reshape a
+  surface the installed app base depends on. It stays served until the sunset in ADR-0001, then
+  becomes an unauthenticated 410 `UPGRADE_REQUIRED` stub. Changes to the API under development go to
+  `contract/openapi.yaml`, which remains the only file at that level.
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
   practice for the server: never remove or repurpose a field within a served major, only
@@ -152,7 +165,8 @@ must build on:
 - A CI job runs oasdiff between the PR's base and head and fails the build on a breaking
   change. It reads `info.version` on both sides and skips itself when the major differs,
   which is exactly the case this rule allows — so a major cut needs no manual flag, and
-  everything else stays gated.
+  everything else stays gated. It grades the contract under development only; the frozen `/v1`
+  document is covered by `contract-freeze`, which is stricter than any breaking-change check.
 - Any operation whose request is validated — a bounded or typed query param, a required body, a
   path param — must declare `400: BadRequest` in the contract. Fastify rejects an invalid request
   with a 400 before the handler runs (mapped to the contract's error shape, section 12), so an
@@ -243,9 +257,17 @@ to the person who is actually listening. The client credential, however, is
 [#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes the
 model of contract 2.0.0 under `/v2` — cut in the contract, with the server-side pieces
 landing in follow-up issues (section 6). The previous shared-token model and its
-rotation-handover protocol stay served under `/v1`, frozen at the 1.4.0 contract tag,
+rotation-handover protocol stay served under `/v1`, frozen at the `contract-1.4.0` tag,
 until the sunset described in the ADR — the old protocol's specification lives in that
 tag, not here.
+
+`/v1` therefore keeps machinery this section does not describe, and it keeps it unchanged: the
+login/refresh proxying of Audiobookshelf tokens, the refresh token on `startSession`, the
+rotation handover (including the `stopSession` 200-with-final-Session case), and a token guard
+that asks Audiobookshelf on every request. All of it is confined to that mount — its own service
+implementation, its own guard instance, its own document — so nothing of it reaches `/v2`, and the
+whole set disappears with the sunset, together with
+`LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (section 7).
 
 The hard requirement this model exists to meet: **the user stays signed in until an
 explicit sign-out.** Server restarts and arbitrarily long usage pauses must never force a

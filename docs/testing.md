@@ -58,9 +58,13 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
   frozen `/v1` contract (SPEC §8); the session store persists only the Ratatoskr token's hash,
   never the token.
 - **Contract runtime-conformance:** the running server's responses are validated
-  against `contract/openapi.yaml` (Ajv / response validation), and CI runs
-  `oasdiff` between a PR's base and head to fail on breaking changes that do not bump
-  the contract's major version.
+  against the contract of the major they came from (Ajv / response validation) — one validator per
+  served major, since a schema name means different things in each (a `/v1` `Session` may carry the
+  rotation handover, a `/v2` one has no such field), and grading against the wrong document would
+  accept shapes that major never promised. `/v1` is graded against `contract/v1/openapi.yaml`, which
+  the `contract-freeze` CI job holds byte-identical to the `contract-1.4.0` tag — so conformance for
+  `/v1` is conformance to the tag. For the contract under development, CI additionally runs `oasdiff`
+  between a PR's base and head to fail on breaking changes that do not bump the major.
   There is deliberately **no separate contract-test level** — both sides generate
   from the shared spec, so the type contract holds by construction (see the
   central concept, §3).

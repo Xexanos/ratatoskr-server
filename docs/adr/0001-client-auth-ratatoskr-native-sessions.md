@@ -133,8 +133,13 @@ silent token exfiltration.
 
 - **Breaking cut: contract 2.0.0 under `/v2`.** The prefix lives in one place
   (`servers.url`). The oasdiff CI job takes its one-time breaking-change flag at the cut.
-- **`/v1` transition window**: `/v1` stays served in parallel, frozen at the **1.4.0 git
-  tag** (the tag *is* the freeze; no second contract file). It may be removed in the first
+- **`/v1` transition window**: `/v1` stays served in parallel, frozen at the **`contract-1.4.0`
+  git tag** — the tag *is* the freeze. What the server mounts is a copy of that document at
+  `contract/v1/openapi.yaml`, which the `contract-freeze` CI job holds byte-identical to the tag;
+  the copy exists so the image build needs no git history to generate its artifacts, and the gate is
+  what makes it a freeze rather than a second editable contract (the original wording ruled out any
+  second file; a gated copy meets the intent at a lower cost in build machinery). It may be removed
+  in the first
   release ≥ 1 month after the `/v2` app is published; the removal commit is `feat!:`, so
   the server major falls out automatically. After sunset, every `/v1` route answers from an
   unauthenticated catch-all **410 Gone** with the contract error shape, code
