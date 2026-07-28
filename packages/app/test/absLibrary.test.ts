@@ -416,9 +416,9 @@ describe('AbsClient library projection', () => {
       expect(cover.body).toBeInstanceOf(Buffer)
       expect(Uint8Array.from(cover.body)).toEqual(bytes)
       expect(cover).not.toHaveProperty('cacheHeaders')
-      const url = fetchMock.mock.calls[0][0] as string
+      const url = fetchMock.mock.calls[0][0] as unknown as string
       expect(url).toBe(`${BASE}/api/items/li_1/cover?height=240`)
-      const init = fetchMock.mock.calls[0][1] as RequestInit
+      const init = fetchMock.mock.calls[0][1] as unknown as RequestInit
       expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok')
     })
 
