@@ -1,18 +1,19 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
-import { openapiDocument } from '@ratatoskr/contract'
+import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
-import { API_PREFIX } from '../apiPrefix.js'
+import { versionPrefix } from '../apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
-import { securityHandlers } from './security.js'
-import { ApiService } from './service.js'
-import { createTokenGuard } from './tokenGuard.js'
+import { securityHandlers, type SecurityHandlers } from './security.js'
+import { ApiService, type ApiServiceDeps } from './service.js'
+import { createTokenGuard, type GuardOperation } from './tokenGuard.js'
+import { V1ApiService } from './v1/service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -91,33 +92,76 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     enableResponseValidation(app)
   }
 
-  // Routes, request/response schemas and per-operation auth are all derived from the contract
-  // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
-  // securityHandler as a preHandler. Mounted under the contract's own version prefix, which the
-  // contract's paths omit (apiPrefix.ts).
-  const service = new ApiService({ abs, sonos, sessions })
-  const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
-  // Every bearer-protected operation proves the caller's token against ABS before acting —
-  // either its handler forwards the token itself (self-validating), or the guard runs
-  // validateToken first. Derived from the contract, so a new operation is guarded by default;
-  // throws at startup on a stale exemption (tokenGuard.ts).
-  const guardOperation = createTokenGuard(openapiDocument, (token) => abs.validateToken(token))
+  // Both served majors, each mounted from its own contract (SPEC section 6). /v1 is contract 1.4.0
+  // frozen at the contract-1.4.0 tag, kept alive for installed app versions until the sunset in
+  // ADR-0001; /v2 is the contract under development.
+  for (const major of servedMajors({ abs, sonos, sessions })) {
+    await mountMajor(app, major)
+  }
+
+  return app
+}
+
+// One served major: its contract document plus everything version-specific behind it. Assembling the
+// list is the only place that knows two majors exist — mountMajor treats them identically, so nothing
+// downstream has to branch on a version, and dropping /v1 at sunset is dropping one entry.
+interface ServedMajor {
+  document: Record<string, unknown>
+  // The object glue resolves operationIds against, one method per operation of *this* document.
+  service: object
+  // Per major on purpose: the two auth models must not reach each other's surface. /v1 proves the
+  // caller's token against Audiobookshelf on every request (the shared-token model its contract
+  // describes), while /v2 is to move to the in-process hash lookup over the session store as its
+  // login lands (#134) — at which point only this entry changes.
+  securityHandlers: SecurityHandlers
+  guardOperation: GuardOperation
+}
+
+function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
+  // Every bearer-protected operation proves the caller's token against ABS before acting — either its
+  // handler forwards the token itself (self-validating), or the guard runs validateToken first.
+  // Derived from the major's own document, so a new operation is guarded by default and a stale
+  // exemption throws at startup (tokenGuard.ts).
+  const absTokenGuard = (document: Record<string, unknown>) =>
+    createTokenGuard(document, (token) => deps.abs.validateToken(token))
+
+  return [
+    {
+      document: frozenV1Document,
+      service: new V1ApiService({ ...deps, apiPrefix: versionPrefix(frozenV1Document) }),
+      securityHandlers,
+      guardOperation: absTokenGuard(frozenV1Document),
+    },
+    {
+      document: openapiDocument,
+      service: new ApiService({ ...deps, apiPrefix: versionPrefix(openapiDocument) }),
+      securityHandlers,
+      guardOperation: absTokenGuard(openapiDocument),
+    },
+  ]
+}
+
+// Routes, request/response schemas and per-operation auth are all derived from the major's contract
+// (SPEC section 12): glue maps each operationId to a service method and runs the matching
+// securityHandler as a preHandler. Mounted under the prefix that contract itself declares, which its
+// paths omit (apiPrefix.ts). Each register() is its own Fastify plugin scope, so the schemas and
+// preHandlers of one major stay out of the other's routes.
+async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<void> {
+  const methods = major.service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   await app.register(openapiGlue, {
-    specification: openapiDocument,
-    // glue registers every contract path. Resolve each operationId to its ApiService method;
-    // operations without one get a stub that throws NotImplementedError → 404, rather than
+    specification: major.document,
+    // glue registers every path of this document. Resolve each operationId to the major's service
+    // method; operations without one get a stub that throws NotImplementedError → 404, rather than
     // glue's default notImplemented stub → 500.
-    operationResolver: (operationId) => {
+    operationResolver: (operationId: string) => {
       const method = methods[operationId]
       return typeof method === 'function'
-        ? guardOperation(operationId, method.bind(service))
+        ? major.guardOperation(operationId, method.bind(major.service))
         : () => {
             throw new NotImplementedError()
           }
     },
-    securityHandlers,
-    prefix: API_PREFIX,
+    securityHandlers: major.securityHandlers,
+    prefix: versionPrefix(major.document),
   })
-
-  return app
 }

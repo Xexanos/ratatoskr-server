@@ -44,7 +44,7 @@ describe('PUT /v2/sessions/current', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SESSION)
-    expect(start).toHaveBeenCalledWith('user-token', undefined, 'li_1', 'RINCON_1')
+    expect(start).toHaveBeenCalledWith('user-token', undefined, 'li_1', 'RINCON_1', '/v2')
     await app.close()
   })
 

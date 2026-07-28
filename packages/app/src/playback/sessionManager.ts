@@ -76,14 +76,25 @@ export class SessionManager {
   // Start (or replace) playback: build the queue from ABS track metadata + the streamer token, play
   // it, and resume from the position stored in ABS. Throws ItemNotPlayableError (400) / AbsAuthError
   // (401) for a bad book or an invalid token — validated BEFORE any active session is touched.
-  async start(userToken: string, refreshToken: string | undefined, itemId: string, speakerId: string): Promise<Session> {
+  //
+  // `apiPrefix` is the major the starting request arrived on. It reaches the library summary this
+  // session then echoes on every Session response (the `item` field), which carries a URL back into
+  // this API — so a session speaks the prefix of whoever started it for its whole life. That is one
+  // client: there is a single active session owned by one authenticated user (SPEC section 8).
+  async start(
+    userToken: string,
+    refreshToken: string | undefined,
+    itemId: string,
+    speakerId: string,
+    apiPrefix: string,
+  ): Promise<Session> {
     return this.serialize(async () => {
       // Validate the token and confirm the book is playable first: getPlaybackManifest presents the
       // token to ABS (401s an invalid one) and rejects an unplayable book. Only after this is known
       // viable do we tear down any active session — so a bad/unauthenticated request, or an
       // unplayable itemId, no longer kills what is currently playing.
       const [manifest, progress] = await Promise.all([
-        this.deps.abs.getPlaybackManifest(userToken, itemId),
+        this.deps.abs.getPlaybackManifest(userToken, itemId, apiPrefix),
         this.deps.abs.getProgress(userToken, itemId),
       ])
 

@@ -3,6 +3,9 @@ import { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from '../src/abs/errors.js'
 
 const BASE = 'http://abs.invalid'
+// The mount prefix the manifest's library summary builds its cover URL for — the requesting major's,
+// so a /v1 session echoes /v1 cover URLs (absLibrary.test.ts pins the per-major behavior itself).
+const PREFIX = '/v2'
 
 function stubFetch(impl: (url: string, init: RequestInit) => Response | Promise<Response>) {
   const mock = vi.fn(impl as never)
@@ -30,7 +33,7 @@ describe('AbsClient.getPlaybackManifest', () => {
         },
       }),
     )
-    const manifest = await new AbsClient(BASE).getPlaybackManifest('user-token', 'li_1')
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('user-token', 'li_1', PREFIX)
 
     const [url, init] = mock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe(`${BASE}/api/items/li_1`)
@@ -48,7 +51,7 @@ describe('AbsClient.getPlaybackManifest', () => {
     stubFetch(() =>
       jsonResponse({ media: { audioFiles: [{ ino: '1', index: 1, duration: 100, mimeType: 'audio/mpeg' }] } }),
     )
-    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1', PREFIX)
     expect(manifest.title).toBe('(unknown title)')
     expect(manifest.author).toBe('')
   })
@@ -65,7 +68,7 @@ describe('AbsClient.getPlaybackManifest', () => {
         },
       }),
     )
-    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1', PREFIX)
     // The whole-book duration (999), not the track-sum (100), and the cover-proxy path — exactly what
     // GET /v2/library/items/li_1 projects for the same book.
     expect(manifest.item).toEqual({
@@ -89,23 +92,23 @@ describe('AbsClient.getPlaybackManifest', () => {
         },
       }),
     )
-    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
+    const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1', PREFIX)
     expect(manifest.item.coverUrl).toBeNull()
   })
 
   it('rejects a book with no audio files', async () => {
     stubFetch(() => jsonResponse({ media: { audioFiles: [] } }))
-    await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1')).rejects.toBeInstanceOf(ItemNotPlayableError)
+    await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1', PREFIX)).rejects.toBeInstanceOf(ItemNotPlayableError)
   })
 
   it('rejects a track with a non-positive duration', async () => {
     stubFetch(() => jsonResponse({ media: { audioFiles: [{ ino: '1', index: 1, duration: 0, mimeType: 'audio/mpeg' }] } }))
-    await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1')).rejects.toBeInstanceOf(ItemNotPlayableError)
+    await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1', PREFIX)).rejects.toBeInstanceOf(ItemNotPlayableError)
   })
 
   it('rejects a track missing its mime type', async () => {
     stubFetch(() => jsonResponse({ media: { audioFiles: [{ ino: '1', index: 1, duration: 100 }] } }))
-    await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1')).rejects.toBeInstanceOf(ItemNotPlayableError)
+    await expect(new AbsClient(BASE).getPlaybackManifest('t', 'li_1', PREFIX)).rejects.toBeInstanceOf(ItemNotPlayableError)
   })
 })
 

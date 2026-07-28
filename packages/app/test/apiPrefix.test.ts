@@ -1,6 +1,6 @@
-import { openapiDocument } from '@ratatoskr/contract'
+import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import { describe, expect, it } from 'vitest'
-import { API_PREFIX, versionPrefix } from '../src/apiPrefix.js'
+import { versionPrefix } from '../src/apiPrefix.js'
 
 // The mount prefix is derived from the contract rather than declared next to it (SPEC section 6), so
 // these tests are about the derivation holding for the shapes `servers.url` can take — and failing
@@ -11,9 +11,11 @@ describe('versionPrefix', () => {
     expect(versionPrefix({ servers: [{ url: 'http://{host}:{port}/v2' }] })).toBe('/v2')
   })
 
-  it('reads the live contract (the prefix the server actually mounts)', () => {
-    expect(API_PREFIX).toBe(versionPrefix(openapiDocument))
-    expect(API_PREFIX).toMatch(/^\/v\d+$/)
+  // Both served documents, read the way the mount reads them: the two majors have to land on two
+  // different paths, or one of them is not reachable at all.
+  it('gives each served major its own prefix', () => {
+    expect(versionPrefix(frozenV1Document)).toBe('/v1')
+    expect(versionPrefix(openapiDocument)).toBe('/v2')
   })
 
   it('ignores a trailing slash', () => {

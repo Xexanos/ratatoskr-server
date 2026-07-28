@@ -23,7 +23,7 @@ describe('GET /v2/library/items', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ items: [SUMMARY], nextCursor: null })
-    expect(listItems).toHaveBeenCalledWith('user-token', { searchQuery: 'alpha', limit: 50, cursor: undefined })
+    expect(listItems).toHaveBeenCalledWith('user-token', { searchQuery: 'alpha', limit: 50, cursor: undefined }, '/v2')
     await app.close()
   })
 
@@ -70,7 +70,7 @@ describe('GET /v2/library/items/:itemId', () => {
     const res = await app.inject({ method: 'GET', url: '/v2/library/items/li_1', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(ITEM)
-    expect(getItem).toHaveBeenCalledWith('user-token', 'li_1')
+    expect(getItem).toHaveBeenCalledWith('user-token', 'li_1', '/v2')
     await app.close()
   })
 
@@ -160,7 +160,7 @@ describe('GET /v2/library/in-progress', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ items: [SUMMARY] })
-    expect(listInProgressItems).toHaveBeenCalledWith('user-token', 25)
+    expect(listInProgressItems).toHaveBeenCalledWith('user-token', 25, '/v2')
     await app.close()
   })
 
@@ -170,7 +170,7 @@ describe('GET /v2/library/in-progress', () => {
     const res = await app.inject({ method: 'GET', url: '/v2/library/in-progress?limit=10', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
-    expect(listInProgressItems).toHaveBeenCalledWith('user-token', 10)
+    expect(listInProgressItems).toHaveBeenCalledWith('user-token', 10, '/v2')
     await app.close()
   })
 

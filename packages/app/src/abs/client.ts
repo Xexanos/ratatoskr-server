@@ -1,5 +1,4 @@
 import type { components } from '@ratatoskr/contract'
-import { API_PREFIX } from '../apiPrefix.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from './errors.js'
 
@@ -159,26 +158,29 @@ export class AbsClient {
 
   // --- Library projection (SPEC section 2) ---
 
+  // Every projecting method takes the requesting major's mount prefix, because the projection
+  // contains one URL back into this API (see coverPathFor) and both majors serve these routes.
+  //
   // Browse (no query) paginates per book library behind the opaque cursor; search (query
   // set) merges each book library's top matches, capped at `limit`, with no cursor
   // (the ABS search endpoint returns bounded top matches and is not paginated).
-  async listItems(token: string, query: ListItemsQuery): Promise<LibraryItemPage> {
+  async listItems(token: string, query: ListItemsQuery, apiPrefix: string): Promise<LibraryItemPage> {
     const [libraries, progressByItemId] = await Promise.all([
       this.listBookLibraries(token),
       this.progressByItemIdOrEmpty(token),
     ])
     if (query.searchQuery !== undefined && query.searchQuery !== '') {
-      return this.search(token, libraries, query.searchQuery, query.limit, progressByItemId)
+      return this.search(token, libraries, query.searchQuery, query.limit, progressByItemId, apiPrefix)
     }
-    return this.browse(token, libraries, query.limit, query.cursor, progressByItemId)
+    return this.browse(token, libraries, query.limit, query.cursor, progressByItemId, apiPrefix)
   }
 
-  async getItem(token: string, itemId: string): Promise<LibraryItem> {
+  async getItem(token: string, itemId: string, apiPrefix: string): Promise<LibraryItem> {
     const [item, progress] = await Promise.all([
       this.getJson(`/api/items/${encodeURIComponent(itemId)}`, token),
       this.getProgress(token, itemId),
     ])
-    return toLibraryItem(item, progress)
+    return toLibraryItem(item, progress, apiPrefix)
   }
 
   // Proxy the item's cover image from ABS (GET /api/items/{id}/cover). Forwarding the caller's token
@@ -213,7 +215,7 @@ export class AbsClient {
   // asking upstream for exactly `limit` could return fewer than `limit` books when podcasts are
   // interleaved. The endpoint is not paginated and has no media-type filter, so over-fetch a generous
   // buffer (the in-progress list is per-user and inherently small) and then cap at `limit`.
-  async listInProgressItems(token: string, limit: number): Promise<LibraryItemList> {
+  async listInProgressItems(token: string, limit: number, apiPrefix: string): Promise<LibraryItemList> {
     const upstreamLimit = Math.max(limit, IN_PROGRESS_UPSTREAM_LIMIT)
     const [data, progressByItemId] = await Promise.all([
       this.getJson(`/api/me/items-in-progress?limit=${upstreamLimit}`, token) as Promise<{
@@ -225,7 +227,7 @@ export class AbsClient {
     const items = rawItems
       .filter((raw) => (raw as { mediaType?: unknown })?.mediaType === 'book')
       .slice(0, limit)
-      .map((raw) => toSummaryWithProgress(raw, progressByItemId))
+      .map((raw) => toSummaryWithProgress(raw, progressByItemId, apiPrefix))
     return { items }
   }
 
@@ -254,7 +256,7 @@ export class AbsClient {
   // Project ABS `media.audioFiles` into the ordered, validated track list needed to play a book.
   // Fails fast with ItemNotPlayableError on no audio files or malformed metadata (missing inode /
   // mime, or a non-positive/non-finite duration) so the position module never sees bad data.
-  async getPlaybackManifest(token: string, itemId: string): Promise<PlaybackManifest> {
+  async getPlaybackManifest(token: string, itemId: string, apiPrefix: string): Promise<PlaybackManifest> {
     const data = await this.getJson(`/api/items/${encodeURIComponent(itemId)}`, token)
     const media = (data as { media?: { audioFiles?: unknown; metadata?: { title?: unknown; authorName?: unknown } } }).media
     const rawFiles = Array.isArray(media?.audioFiles) ? media.audioFiles : []
@@ -283,7 +285,7 @@ export class AbsClient {
     const meta = media?.metadata ?? {}
     const title = typeof meta.title === 'string' && meta.title !== '' ? meta.title : '(unknown title)'
     const author = typeof meta.authorName === 'string' ? meta.authorName : ''
-    return { itemId, tracks, totalDurationSeconds, title, author, item: toSummary(data) }
+    return { itemId, tracks, totalDurationSeconds, title, author, item: toSummary(data, apiPrefix) }
   }
 
   // Write listening progress back to ABS (SPEC section 5). PATCH /api/me/progress/{id} upserts.
@@ -351,6 +353,7 @@ export class AbsClient {
     limit: number,
     cursor: string | undefined,
     progressByItemId: Map<string, Progress>,
+    apiPrefix: string,
   ): Promise<LibraryItemPage> {
     const { libraryIndex, page } = decodeCursor(cursor)
     const library = libraries[libraryIndex]
@@ -374,7 +377,7 @@ export class AbsClient {
     } else if (libraryIndex + 1 < libraries.length) {
       nextCursor = encodeCursor({ libraryIndex: libraryIndex + 1, page: 0 })
     }
-    return { items: results.map((raw) => toSummaryWithProgress(raw, progressByItemId)), nextCursor }
+    return { items: results.map((raw) => toSummaryWithProgress(raw, progressByItemId, apiPrefix)), nextCursor }
   }
 
   private async search(
@@ -383,6 +386,7 @@ export class AbsClient {
     searchQuery: string,
     limit: number,
     progressByItemId: Map<string, Progress>,
+    apiPrefix: string,
   ): Promise<LibraryItemPage> {
     const perLibrary = await Promise.all(
       libraries.map(async (library) => {
@@ -395,7 +399,7 @@ export class AbsClient {
     )
     const items = perLibrary
       .flat()
-      .map((match) => toSummaryWithProgress(match.libraryItem, progressByItemId))
+      .map((match) => toSummaryWithProgress(match.libraryItem, progressByItemId, apiPrefix))
       .slice(0, limit)
     return { items, nextCursor: null }
   }
@@ -491,17 +495,20 @@ interface AbsItem {
 }
 
 // The cover image is served by Ratatoskr's own cover-proxy route (getItemCover), so coverUrl points
-// there rather than at ABS. A path relative to the server origin (it includes the same version mount
-// prefix as the routes, from the shared API_PREFIX constant): the client resolves it against the
-// base it is already talking to, and it needs no request context, so it can be built here in the
-// pure projection.
-function coverPathFor(id: string): string {
-  return `${API_PREFIX}/library/items/${encodeURIComponent(id)}/cover`
+// there rather than at ABS. A path relative to the server origin, carrying the same version mount
+// prefix as the routes: the client resolves it against the base it is already talking to.
+//
+// Which prefix that is depends on the caller, not on the build — with /v1 and /v2 both served, the
+// contract of each promises its own path (`/v1/library/items/{id}/cover` in the frozen 1.4.0 one), so
+// handing a /v1 client a /v2 URL would point it at a surface its major does not know. Hence the
+// prefix is threaded in from the mount rather than read from a module constant.
+function coverPathFor(apiPrefix: string, id: string): string {
+  return `${apiPrefix}/library/items/${encodeURIComponent(id)}/cover`
 }
 
 // `progress` is present exactly when the user has recorded listening history for the item —
 // a book never listened to carries no progress field (contract: the field is optional).
-function toSummary(raw: unknown, progress?: Progress): LibraryItemSummary {
+function toSummary(raw: unknown, apiPrefix: string, progress?: Progress): LibraryItemSummary {
   const item = (raw ?? {}) as AbsItem
   const meta = item.media?.metadata ?? {}
   const id = String(item.id)
@@ -513,22 +520,26 @@ function toSummary(raw: unknown, progress?: Progress): LibraryItemSummary {
     id,
     title: typeof meta.title === 'string' ? meta.title : '(unknown title)',
     durationSeconds: typeof item.media?.duration === 'number' && item.media.duration >= 0 ? item.media.duration : 0,
-    coverUrl: hasCover ? coverPathFor(id) : null,
+    coverUrl: hasCover ? coverPathFor(apiPrefix, id) : null,
     ...(typeof meta.authorName === 'string' ? { author: meta.authorName } : {}),
     ...(progress !== undefined ? { progress } : {}),
   }
 }
 
 // Summary projection with the user's progress joined in from the per-list progress map.
-function toSummaryWithProgress(raw: unknown, progressByItemId: Map<string, Progress>): LibraryItemSummary {
+function toSummaryWithProgress(
+  raw: unknown,
+  progressByItemId: Map<string, Progress>,
+  apiPrefix: string,
+): LibraryItemSummary {
   const id = (raw as { id?: unknown } | null | undefined)?.id
-  return toSummary(raw, typeof id === 'string' ? progressByItemId.get(id) : undefined)
+  return toSummary(raw, apiPrefix, typeof id === 'string' ? progressByItemId.get(id) : undefined)
 }
 
-function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
+function toLibraryItem(raw: unknown, progress: Progress, apiPrefix: string): LibraryItem {
   const meta = ((raw ?? {}) as AbsItem).media?.metadata ?? {}
   return {
-    ...toSummary(raw),
+    ...toSummary(raw, apiPrefix),
     progress,
     ...(typeof meta.description === 'string' ? { description: meta.description } : {}),
     ...(typeof meta.narratorName === 'string' ? { narrator: meta.narratorName } : {}),

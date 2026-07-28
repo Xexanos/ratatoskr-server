@@ -47,21 +47,31 @@ export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
   sessions: SessionManager
+  // The mount prefix of the major this instance serves (apiPrefix.ts). One service instance belongs
+  // to exactly one major, which is what lets the projections it triggers hand out URLs on the same
+  // surface the request came in on.
+  apiPrefix: string
 }
 
 // Implements the contract operations, one method per operationId. fastify-openapi-glue resolves
 // each operationId to the matching method and binds `this` to this instance, so the abs/sonos
 // clients are available via constructor injection. Methods return the payload or throw a domain
 // error; the central error handler (errorHandler.ts) maps thrown errors to contract responses.
+//
+// This is the /v2 surface. The frozen /v1 one extends it (v1/service.ts) with the operations 2.0.0
+// dropped, so the shared operations are implemented once and cannot drift between majors — the
+// members below are protected for that subclass, not for open extension.
 export class ApiService {
-  private readonly abs: AbsClient
-  private readonly sonos: SonosClient
-  private readonly sessions: SessionManager
+  protected readonly abs: AbsClient
+  protected readonly sonos: SonosClient
+  protected readonly sessions: SessionManager
+  protected readonly apiPrefix: string
 
   constructor(deps: ApiServiceDeps) {
     this.abs = deps.abs
     this.sonos = deps.sonos
     this.sessions = deps.sessions
+    this.apiPrefix = deps.apiPrefix
   }
 
   async getHealth(): Promise<Health> {
@@ -84,12 +94,12 @@ export class ApiService {
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
-    return this.abs.listItems(request.absToken as string, { searchQuery, limit, cursor })
+    return this.abs.listItems(request.absToken as string, { searchQuery, limit, cursor }, this.apiPrefix)
   }
 
   async getLibraryItem(request: FastifyRequest): Promise<LibraryItem> {
     const { itemId } = request.params as { itemId: string }
-    return this.abs.getItem(request.absToken as string, itemId)
+    return this.abs.getItem(request.absToken as string, itemId, this.apiPrefix)
   }
 
   // Cover proxy (SPEC section 2 / section 8). Forwards the caller's token to ABS, which both fetches
@@ -109,7 +119,7 @@ export class ApiService {
   // caller's token (which ABS validates), and Fastify applies the querystring `default` for `limit`.
   async listInProgressItems(request: FastifyRequest): Promise<LibraryItemList> {
     const { limit } = request.query as { limit: number }
-    return this.abs.listInProgressItems(request.absToken as string, limit)
+    return this.abs.listInProgressItems(request.absToken as string, limit, this.apiPrefix)
   }
 
   async listSpeakers(): Promise<Speaker[]> {
@@ -130,7 +140,7 @@ export class ApiService {
   // caller's access token alone until the server holds ABS chains of its own.
   async startSession(request: FastifyRequest): Promise<Session> {
     const { itemId, speakerId } = request.body as StartSessionRequest
-    return this.sessions.start(request.absToken as string, undefined, itemId, speakerId)
+    return this.sessions.start(request.absToken as string, undefined, itemId, speakerId, this.apiPrefix)
   }
 
   // Always 204: nothing is handed back at stop any more, now that no token pair travels to the

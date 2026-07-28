@@ -13,7 +13,11 @@ import type { FastifyReply, FastifyRequest } from 'fastify'
 //     handler, wired in buildApp's operationResolver.
 // A new contract operation is guarded by default — forgetting this module fails closed.
 
-type OperationHandler = (request: FastifyRequest, reply: FastifyReply) => unknown
+export type OperationHandler = (request: FastifyRequest, reply: FastifyReply) => unknown
+
+// The wrap createTokenGuard hands back: every one of a major's handlers goes through it, so a served
+// major can be described by the guard it was built with (api/app.ts).
+export type GuardOperation = (operationId: string, handler: OperationHandler) => OperationHandler
 
 // The operations whose handlers present the caller's token to ABS themselves. An entry must
 // name a bearer-protected operationId in the contract — createTokenGuard throws at startup
@@ -67,7 +71,7 @@ export function createTokenGuard(
   document: Record<string, unknown>,
   validate: (token: string) => Promise<void>,
   selfValidating: ReadonlySet<string> = SELF_VALIDATING_OPERATIONS,
-): (operationId: string, handler: OperationHandler) => OperationHandler {
+): GuardOperation {
   const protectedIds = bearerProtectedOperationIds(document)
   for (const operationId of selfValidating) {
     if (!protectedIds.has(operationId)) {
