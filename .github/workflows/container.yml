@@ -118,11 +118,15 @@ jobs:
 
       - name: Boot the image and assert the health endpoint responds
         run: |
-          # The health path carries the API's version prefix, which lives in the contract's
-          # servers.url and nowhere else (SPEC section 6) — read it from there rather than pinning a
-          # major here, so the next cut cannot turn this smoke test red for the wrong reason.
-          prefix=$(sed -n 's#^  - url: [a-z]*://[^/]*\(/[^ ]*\)$#\1#p' contract/openapi.yaml | head -1)
-          [ -n "$prefix" ] || { echo "::error title=smoke failed::could not read the version prefix from contract/openapi.yaml"; exit 1; }
+          # The health path carries the version prefix of the major the image actually serves, which
+          # lives in that document's servers.url and nowhere else (SPEC section 6) — read it from there
+          # rather than pinning a major here. Today the served document is the frozen /v1 one
+          # (api/app.ts); contract/openapi.yaml is the one under development and is not mounted yet, so
+          # reading it would smoke-test a surface the image does not answer on. When /v2 joins the
+          # mount, this step checks both.
+          served=contract/v1/openapi.yaml
+          prefix=$(sed -n 's#^  - url: [a-z]*://[^/]*\(/[^ ]*\)$#\1#p' "$served" | head -1)
+          [ -n "$prefix" ] || { echo "::error title=smoke failed::could not read the version prefix from $served"; exit 1; }
           # Plain HTTP (no cert to manage) + an unreachable ABS (connection refused is a network
           # error, which the server tolerates at startup — it degrades and /health reports it). If a
           # dependency is broken on this arch, Node fails to load it and the listener never comes up.
