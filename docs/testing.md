@@ -27,12 +27,13 @@ Runner: **Vitest** (TypeScript/ESM-native).
 - DIDL-Lite metadata building for the transport URI
 - config / environment validation
 - log redaction (no secret ever reaches a log line)
-- token-rotation bookkeeping
+- token-rotation bookkeeping (the frozen `/v1` handover; no `/v2` request arms it)
 - seek tolerance / settle math
 
 ### Component — one subsystem against a simulated neighbor
-- **ABS client** against a **fake ABS** HTTP server: login / refresh, library
-  projection, progress read/write.
+- **ABS client** against a **fake ABS** HTTP server: login / refresh (both still used
+  upstream, though only login has a route on `/v2`), library projection, progress
+  read/write.
 - **Sonos control** against the **fake Sonos** (see [Fakes](#the-fakes)):
   `SetAVTransportURI`, `Play`/`Pause`/`Seek`, `GetPositionInfo`/`GetTransportInfo`;
   asserts the DIDL-Lite requirement and that `RelTime` is trusted while the
@@ -41,17 +42,19 @@ Runner: **Vitest** (TypeScript/ESM-native).
   mapping, error mapping, status codes.
 
 ### Integration — the whole server against fakes
-Spawn the built server and drive its `/v1` API end to end against the fake ABS and
+Spawn the built server and drive its API end to end against the fake ABS and
 fake Sonos, including the sync loop (poll position → write progress back to ABS).
 
 ## Cross-cutting types
 
 - **Security:** HTTPS enforced unless `ALLOW_PLAIN_HTTP=true`; the streamer API key
   appears only in the media URLs handed to speakers; secrets never appear in logs
-  (redaction); bearer auth + refresh-token rotation.
+  (redaction); bearer auth, and — on the `/v2` surface — that no Audiobookshelf token
+  reaches a client at all (SPEC §8).
 - **Contract runtime-conformance:** the running server's responses are validated
   against `contract/openapi.yaml` (Ajv / response validation), and CI runs
-  `oasdiff` against the previous contract to fail on unflagged breaking changes.
+  `oasdiff` between a PR's base and head to fail on breaking changes that do not bump
+  the contract's major version.
   There is deliberately **no separate contract-test level** — both sides generate
   from the shared spec, so the type contract holds by construction (see the
   central concept, §3).
@@ -92,8 +95,9 @@ The strategy above is the target. Current state:
   the connection info reaches the test files via `provide()`/`inject()`. **Isolation on the
   shared container is per-file ABS users**: root is seeding-only, and every test file
   creates its own end user + a stream-only streamer account whose ABS API key it embeds in the
-  media URLs (progress in ABS is per-user) and spawns its own compiled server. `absLive.integration.test.ts` drives the ABS-backed `/v1` endpoints
-  (auth login/refresh, library list/detail) with Ajv contract-conformance. **Version
+  media URLs (progress in ABS is per-user) and spawns its own compiled server. `absLive.integration.test.ts` drives the ABS-backed endpoints
+  (library list/detail) with Ajv contract-conformance, authenticating straight against ABS
+  while `/auth/login` is still unimplemented. **Version
   coverage lives in CI:** the `integration` job is a two-leg blocking matrix — the pinned
   2.26.0 minimum and the deliberately **unpinned `:latest`** tag as a drift canary for new
   ABS releases — selected via `ABS_IT_IMAGE`; locally the default is the pinned current
@@ -112,7 +116,7 @@ The strategy above is the target. Current state:
   (`test/sessionManager.test.ts`) covering the sync loop's write-back threshold, finished
   detection, and device-side stop/pause reactions with fake timers, and a **playback
   session-flow integration test** (`packages/integration-tests/test/sessionFlow.integration.test.ts`)
-  that drives `PUT/GET/POST(pause|resume|seek)/DELETE /v1/sessions/current` through the compiled
+  that drives `PUT/GET/POST(pause|resume|seek)/DELETE /sessions/current` through the compiled
   server against the shared live ABS **and** the fake Sonos — starting a book, resuming from
   the ABS position, pausing/resuming/seeking, observing the background sync loop write a
   **device-side** pause's position back to ABS, and writing progress back on stop. Its tests
@@ -122,7 +126,8 @@ The strategy above is the target. Current state:
   `SONOS_DISABLE_EVENTS=1`.
 - **Phase 4, playback slice 3 (token rotation / shutdown / streamer identity) — present:** the
   **token-rotation handover** (§8) — unit-tested with fake timers + fake JWTs (renew-before-expiry,
-  owner-gated redelivery until adoption, the `stopSession` 200/204 split); **graceful shutdown**
+  owner-gated redelivery until adoption); its client-facing half went with contract 2.0.0,
+  so only the frozen `/v1` surface can deliver a pair; **graceful shutdown**
   (§5) — an integration test SIGTERMs the spawned server and asserts the reached position was
   written (Linux-only, so CI exercises it); and the **stream-only ABS API key** in media URLs (§14)
   — the session-flow integration test fetches the enqueued media URL from real ABS to prove the key
