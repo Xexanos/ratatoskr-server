@@ -72,8 +72,8 @@ describe('AbsClient library projection', () => {
       const page = await new AbsClient(BASE).listItems('tok', { searchQuery: undefined, limit: 2, cursor: undefined })
 
       expect(page.items).toEqual([
-        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
-        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v1/library/items/li_2/cover' },
+        { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v2/library/items/li_1/cover' },
+        { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v2/library/items/li_2/cover' },
       ])
       // 2 of 5 shown → more in this library.
       expect(decodeCursor(page.nextCursor ?? undefined)).toEqual({ libraryIndex: 0, page: 1 })
@@ -195,7 +195,7 @@ describe('AbsClient library projection', () => {
         title: 'Alpha',
         author: 'Author A',
         durationSeconds: 3600,
-        coverUrl: '/v1/library/items/li_1/cover',
+        coverUrl: '/v2/library/items/li_1/cover',
         description: 'Desc',
         narrator: 'Nar',
         progress: { positionSeconds: 123.5, isFinished: false },
@@ -254,8 +254,8 @@ describe('AbsClient library projection', () => {
 
       expect(list).toEqual({
         items: [
-          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
-          { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v1/library/items/li_2/cover' },
+          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v2/library/items/li_1/cover' },
+          { id: 'li_2', title: 'Beta', author: 'Author B', durationSeconds: 60, coverUrl: '/v2/library/items/li_2/cover' },
         ],
       })
     })

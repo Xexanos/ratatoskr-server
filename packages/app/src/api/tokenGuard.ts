@@ -28,7 +28,7 @@ export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
 
 // Walk the contract for the operationIds that carry a bearer requirement: the global
 // `security` applies unless an operation overrides it (`security: []` opts out — getHealth,
-// login, refresh, listSpeakers).
+// login, listSpeakers).
 //
 // Only requirements naming this scheme count: the guard reads request.absToken, which the
 // bearerAuth security handler alone sets (security.ts), so an operation secured by any other

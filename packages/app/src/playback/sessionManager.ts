@@ -1,13 +1,16 @@
 import type { components } from '@ratatoskr/contract'
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
-import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
+import type { AbsClient, AbsTokenPair, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
 import { NoActiveSessionError } from './errors.js'
 
 type Session = components['schemas']['Session']
 type PlaybackState = components['schemas']['PlaybackState']
-type RotatedTokens = components['schemas']['RotatedTokens']
+// A rotated Audiobookshelf pair to hand back to a client. Contract 2.0.0 has no channel for it, and
+// no /v2 request can arm this path since startSession no longer accepts a refresh token; the
+// machinery stays for the parallel /v1 mount, whose surface is the frozen 1.4.0 contract.
+type RotatedTokens = AbsTokenPair
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 
 // How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds

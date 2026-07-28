@@ -15,16 +15,16 @@ import {
 
 // Process-level smoke tests: the real compiled server, spawned as a child process,
 // spoken to over real HTTP — no inject(), no fetch stubbing. This is the automated
-// version of the manual "boot it and curl /v1/health" verification, and it pins down
+// version of the manual "boot it and curl /v2/health" verification, and it pins down
 // the one file no unit test executes: main.ts. The shared harness lives in helpers.ts.
 
-// Poll /v1/health until Sonos is no longer reported as probing (its `detail` moves on from
+// Poll /v2/health until Sonos is no longer reported as probing (its `detail` moves on from
 // "probing, retry shortly"), so the test can assert the eventual, settled state rather than
 // only the immediate post-boot one.
 async function pollUntilSettled(port: number, deadlineMs = 15_000): Promise<Record<string, unknown>> {
   const deadline = Date.now() + deadlineMs
   while (Date.now() < deadline) {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    const res = await fetch(`http://127.0.0.1:${port}/v2/health`)
     const body = (await res.json()) as { sonos?: { detail?: string } }
     if (body.sonos?.detail !== 'probing, retry shortly') return body as Record<string, unknown>
     await new Promise((resolve) => setTimeout(resolve, 200))
@@ -51,7 +51,7 @@ describe('server process smoke test', () => {
     }
   })
 
-  it('boots, serves /v1/health over real HTTP, and conforms to the contract', async () => {
+  it('boots, serves /v2/health over real HTTP, and conforms to the contract', async () => {
     // A real HTTP upstream standing in for Audiobookshelf: answer /ping like ABS so the startup
     // probe and the health check treat it as a genuine, reachable ABS. No streamer login happens at
     // startup anymore — the media path uses a static API key — so only /ping needs answering.
@@ -71,7 +71,7 @@ describe('server process smoke test', () => {
     )
     await waitUntilReady(running, port)
 
-    const res = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    const res = await fetch(`http://127.0.0.1:${port}/v2/health`)
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 

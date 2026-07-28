@@ -26,7 +26,7 @@ function appWith(sessions: Partial<SessionManager>, abs: Partial<AbsClient> = {}
   })
 }
 
-describe('PUT /v1/sessions/current', () => {
+describe('PUT /v2/sessions/current', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('starts a session and returns it, forwarding the token and body', async () => {
@@ -34,14 +34,17 @@ describe('PUT /v1/sessions/current', () => {
     const app = await appWith({ start })
     const res = await app.inject({
       method: 'PUT',
-      url: '/v1/sessions/current',
+      url: '/v2/sessions/current',
       headers: AUTH,
+      // A client that still sends the 1.4.0 `refreshToken` is not rejected (the request schema does
+      // not forbid extra fields), but the field is gone from the contract and is not read: no ABS
+      // refresh token reaches the server through this route any more (ADR-0001).
       payload: { itemId: 'li_1', speakerId: 'RINCON_1', refreshToken: 'refresh-1' },
     })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SESSION)
-    expect(start).toHaveBeenCalledWith('user-token', 'refresh-1', 'li_1', 'RINCON_1')
+    expect(start).toHaveBeenCalledWith('user-token', undefined, 'li_1', 'RINCON_1')
     await app.close()
   })
 
@@ -50,7 +53,7 @@ describe('PUT /v1/sessions/current', () => {
     const app = await appWith({ start })
     const res = await app.inject({
       method: 'PUT',
-      url: '/v1/sessions/current',
+      url: '/v2/sessions/current',
       headers: AUTH,
       payload: { itemId: 'li_1', speakerId: 'RINCON_1' },
     })
@@ -63,7 +66,7 @@ describe('PUT /v1/sessions/current', () => {
     const app = await appWith({ start: vi.fn() })
     const res = await app.inject({
       method: 'PUT',
-      url: '/v1/sessions/current',
+      url: '/v2/sessions/current',
       payload: { itemId: 'li_1', speakerId: 'RINCON_1' },
     })
     expect(res.statusCode).toBe(401)
@@ -71,12 +74,12 @@ describe('PUT /v1/sessions/current', () => {
   })
 })
 
-describe('GET /v1/sessions/current', () => {
+describe('GET /v2/sessions/current', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the active session', async () => {
     const app = await appWith({ current: vi.fn().mockResolvedValue(SESSION) })
-    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SESSION)
     await app.close()
@@ -84,19 +87,23 @@ describe('GET /v1/sessions/current', () => {
 
   it('returns 404 when nothing is playing', async () => {
     const app = await appWith({ current: vi.fn().mockRejectedValue(new NoActiveSessionError()) })
-    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json().code).toBe('not_found')
     await app.close()
   })
 
-  it('passes a pending rotated token pair through on the session (contract-valid)', async () => {
-    const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-    const current = vi.fn().mockResolvedValue({ ...SESSION, rotatedTokens })
+  // The rotation handover was the channel through which ABS tokens reached the client; the contract
+  // closed it at 2.0.0 (ADR-0001). The manager may still hold a pending pair — it serves the parallel
+  // /v1 mount — so the boundary is what has to keep it in: the response schema carries no such field,
+  // so the serializer drops it even when the payload has one.
+  it('never puts a pending rotated token pair on the wire', async () => {
+    const current = vi.fn().mockResolvedValue({ ...SESSION, rotatedTokens: { accessToken: 'a', refreshToken: 'r' } })
     const app = await appWith({ current })
-    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(200)
-    expect(res.json().rotatedTokens).toEqual(rotatedTokens)
+    expect(res.json()).toEqual(SESSION)
+    expect(res.body).not.toContain('rotatedTokens')
     expect(current).toHaveBeenCalledWith('user-token')
     await app.close()
   })
@@ -104,20 +111,20 @@ describe('GET /v1/sessions/current', () => {
   it('returns 401 for a non-empty but invalid bearer, without reading the session', async () => {
     const current = vi.fn()
     const app = await appWith({ current }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
-    const res = await app.inject({ method: 'GET', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(401)
     expect(current).not.toHaveBeenCalled()
     await app.close()
   })
 })
 
-describe('DELETE /v1/sessions/current', () => {
+describe('DELETE /v2/sessions/current', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('stops the session and returns 204', async () => {
     const stop = vi.fn().mockResolvedValue(undefined)
     const app = await appWith({ stop })
-    const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'DELETE', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(204)
     expect(res.body).toBe('')
     expect(stop).toHaveBeenCalled()
@@ -126,39 +133,40 @@ describe('DELETE /v1/sessions/current', () => {
 
   it('returns 404 when nothing is playing', async () => {
     const app = await appWith({ stop: vi.fn().mockRejectedValue(new NoActiveSessionError()) })
-    const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'DELETE', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(404)
     await app.close()
   })
 
-  it('returns 200 with the final Session when a rotated token pair was pending at stop', async () => {
-    const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-    const stop = vi.fn().mockResolvedValue({ ...SESSION, state: 'stopped', rotatedTokens })
+  // stopSession is 204 always since 2.0.0: the 200-with-final-Session case existed only to deliver a
+  // last rotated pair, so a final Session from the manager is now dropped rather than answered with.
+  it('returns 204 even when the manager hands back a final Session', async () => {
+    const stop = vi.fn().mockResolvedValue({ ...SESSION, state: 'stopped', rotatedTokens: { accessToken: 'a', refreshToken: 'r' } })
     const app = await appWith({ stop })
-    const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
-    expect(res.statusCode).toBe(200)
-    expect(res.json().rotatedTokens).toEqual(rotatedTokens)
-    expect(stop).toHaveBeenCalledWith('user-token') // caller token forwarded for adoption
+    const res = await app.inject({ method: 'DELETE', url: '/v2/sessions/current', headers: AUTH })
+    expect(res.statusCode).toBe(204)
+    expect(res.body).toBe('')
+    expect(stop).toHaveBeenCalledWith('user-token')
     await app.close()
   })
 
   it('returns 401 for a non-empty but invalid bearer, without stopping', async () => {
     const stop = vi.fn()
     const app = await appWith({ stop }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
-    const res = await app.inject({ method: 'DELETE', url: '/v1/sessions/current', headers: AUTH })
+    const res = await app.inject({ method: 'DELETE', url: '/v2/sessions/current', headers: AUTH })
     expect(res.statusCode).toBe(401)
     expect(stop).not.toHaveBeenCalled()
     await app.close()
   })
 })
 
-describe('POST /v1/sessions/current/pause | resume | seek', () => {
+describe('POST /v2/sessions/current/pause | resume | seek', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('pauses and returns the session', async () => {
     const pause = vi.fn().mockResolvedValue({ ...SESSION, state: 'paused' })
     const app = await appWith({ pause })
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
+    const res = await app.inject({ method: 'POST', url: '/v2/sessions/current/pause', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json().state).toBe('paused')
     expect(pause).toHaveBeenCalled()
@@ -168,7 +176,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
   it('resumes and returns the session', async () => {
     const resume = vi.fn().mockResolvedValue(SESSION)
     const app = await appWith({ resume })
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/resume', headers: AUTH })
+    const res = await app.inject({ method: 'POST', url: '/v2/sessions/current/resume', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json().state).toBe('playing')
     await app.close()
@@ -179,7 +187,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
     const app = await appWith({ seek })
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/sessions/current/seek',
+      url: '/v2/sessions/current/seek',
       headers: AUTH,
       payload: { positionSeconds: 42 },
     })
@@ -190,14 +198,14 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
 
   it('rejects a seek without positionSeconds as 400', async () => {
     const app = await appWith({ seek: vi.fn() })
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/seek', headers: AUTH, payload: {} })
+    const res = await app.inject({ method: 'POST', url: '/v2/sessions/current/seek', headers: AUTH, payload: {} })
     expect(res.statusCode).toBe(400)
     await app.close()
   })
 
   it('returns 404 when nothing is playing', async () => {
     const app = await appWith({ pause: vi.fn().mockRejectedValue(new NoActiveSessionError()) })
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
+    const res = await app.inject({ method: 'POST', url: '/v2/sessions/current/pause', headers: AUTH })
     expect(res.statusCode).toBe(404)
     await app.close()
   })
@@ -205,7 +213,7 @@ describe('POST /v1/sessions/current/pause | resume | seek', () => {
   it('returns 401 for a non-empty but invalid bearer, without touching the session', async () => {
     const pause = vi.fn()
     const app = await appWith({ pause }, { validateToken: vi.fn().mockRejectedValue(new AbsAuthError()) })
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause', headers: AUTH })
+    const res = await app.inject({ method: 'POST', url: '/v2/sessions/current/pause', headers: AUTH })
     expect(res.statusCode).toBe(401)
     expect(pause).not.toHaveBeenCalled()
     await app.close()

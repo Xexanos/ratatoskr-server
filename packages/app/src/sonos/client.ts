@@ -43,7 +43,7 @@ export class SonosClient {
     private readonly createManager: SonosManagerFactory = () => new SonosManager(),
     // Per-request cap on node-sonos-ts SOAP/discovery I/O. The library sets no timeout, so a
     // speaker that vanishes mid-session (powered off / off the network) would otherwise hang
-    // GetZoneGroupState and the transport reads forever — wedging GET /v1/sessions/current, which
+    // GetZoneGroupState and the transport reads forever — wedging GET /v2/sessions/current, which
     // deliberately propagates a dead-speaker read (SPEC §4). Racing each call against this turns a
     // dead speaker into a prompt SonosUpstreamError (→ 502 "Sonos is unavailable").
     private readonly requestTimeoutMs = 4000,

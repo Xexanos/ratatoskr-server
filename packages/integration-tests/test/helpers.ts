@@ -76,7 +76,7 @@ export function spawnServer(env: NodeJS.ProcessEnv): SpawnedServer {
   return { child, stdout: () => out, stderr: () => err }
 }
 
-// Poll /v1/health until the server answers. Races against the child's exit so a
+// Poll /v2/health until the server answers. Races against the child's exit so a
 // misconfigured server surfaces its stderr instead of an opaque timeout.
 export async function waitUntilReady(server: SpawnedServer, port: number, deadlineMs = 15_000): Promise<void> {
   let exited = false
@@ -88,7 +88,7 @@ export async function waitUntilReady(server: SpawnedServer, port: number, deadli
       throw new Error(`server process exited before becoming ready.\nstderr:\n${server.stderr()}`)
     }
     try {
-      await fetch(`http://127.0.0.1:${port}/v1/health`, { signal: AbortSignal.timeout(1000) })
+      await fetch(`http://127.0.0.1:${port}/v2/health`, { signal: AbortSignal.timeout(1000) })
       return
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 100))

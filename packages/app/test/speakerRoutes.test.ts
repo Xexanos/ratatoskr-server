@@ -14,13 +14,13 @@ function appWith(sonos: Partial<SonosClient>) {
   return buildApp(testConfig(), { sonosClient: sonos as SonosClient })
 }
 
-describe('GET /v1/speakers', () => {
+describe('GET /v2/speakers', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('returns the projected speakers for an authorized request', async () => {
     const listSpeakers = vi.fn().mockResolvedValue(SPEAKERS)
     const app = await appWith({ listSpeakers })
-    const res = await app.inject({ method: 'GET', url: '/v1/speakers', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/speakers', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SPEAKERS)
@@ -32,7 +32,7 @@ describe('GET /v1/speakers', () => {
   it('serves the speakers without any bearer token', async () => {
     const listSpeakers = vi.fn().mockResolvedValue(SPEAKERS)
     const app = await appWith({ listSpeakers })
-    const res = await app.inject({ method: 'GET', url: '/v1/speakers' })
+    const res = await app.inject({ method: 'GET', url: '/v2/speakers' })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SPEAKERS)
@@ -41,7 +41,7 @@ describe('GET /v1/speakers', () => {
 
   it('maps a Sonos failure to 502', async () => {
     const app = await appWith({ listSpeakers: vi.fn().mockRejectedValue(new SonosUpstreamError()) })
-    const res = await app.inject({ method: 'GET', url: '/v1/speakers', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/speakers', headers: AUTH })
 
     expect(res.statusCode).toBe(502)
     expect(res.json().code).toBe('upstream_error')

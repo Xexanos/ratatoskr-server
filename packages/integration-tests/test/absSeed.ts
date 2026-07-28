@@ -81,19 +81,26 @@ export async function seedFetch(label: string, url: string, init: RequestInit, t
   throw new Error(`${label} did not succeed within ${timeoutMs}ms (last: ${String(last)})`)
 }
 
-// Log in as root (seeding only), tolerant of small shape differences across versions, to obtain the
-// admin access token for the seeding API calls.
-async function adminToken(absBase: string): Promise<string> {
-  const res = await seedFetch('ABS admin login', `${absBase}/login`, {
+// Log a user in against ABS directly, tolerant of small shape differences across versions, and
+// return the access token. Used for the seeding API calls (as root) and, by the test files, to get
+// a bearer for the server's own protected endpoints: the server's /auth/login mints nothing of its
+// own yet, and its token guard validates any bearer against ABS, so an ABS access token is exactly
+// what a caller presents.
+export async function absAccessToken(absBase: string, username: string, password: string): Promise<string> {
+  const res = await seedFetch(`ABS login ${username}`, `${absBase}/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-return-tokens': 'true' },
-    body: JSON.stringify({ username: ROOT_USER, password: ROOT_PASS }),
+    body: JSON.stringify({ username, password }),
   })
-  if (!res.ok) throw new Error(`ABS admin login failed: ${res.status} ${await res.text()}`)
+  if (!res.ok) throw new Error(`ABS login ${username} failed: ${res.status} ${await res.text()}`)
   const body = (await res.json()) as { accessToken?: unknown; user?: { accessToken?: unknown; token?: unknown } }
   const token = [body.accessToken, body.user?.accessToken, body.user?.token].find((t) => typeof t === 'string')
-  if (typeof token !== 'string') throw new Error('ABS admin login returned no access token')
+  if (typeof token !== 'string') throw new Error(`ABS login ${username} returned no access token`)
   return token
+}
+
+function adminToken(absBase: string): Promise<string> {
+  return absAccessToken(absBase, ROOT_USER, ROOT_PASS)
 }
 
 // Create an (active) ABS user. Each test file creates its OWN end user and streamer user so

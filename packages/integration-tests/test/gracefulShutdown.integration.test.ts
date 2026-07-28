@@ -2,7 +2,7 @@ import { once } from 'node:events'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { FakeSonos } from '@ratatoskr/fake-sonos'
 import { assertServerBuilt, cleanEnv, freePort, spawnServer, stopServer, waitUntilReady, type SpawnedServer } from './helpers.js'
-import { createAbsUser, createStreamerApiKey } from './absSeed.js'
+import { absAccessToken, createAbsUser, createStreamerApiKey } from './absSeed.js'
 
 // Graceful shutdown (SPEC §5): on SIGTERM the compiled server must stop the active session — writing
 // the reached position back to the real ABS — before exiting cleanly. Skipped on Windows, where Node
@@ -69,9 +69,7 @@ describe.skipIf(abs === null || process.platform === 'win32')('graceful shutdown
     )
     await waitUntilReady(server, port)
 
-    const loginRes = await api('POST', '/v1/auth/login', { username: USER, password: PASS }, '')
-    if (!loginRes.ok) throw new Error(`server login failed: ${loginRes.status} ${await loginRes.text()}`)
-    userToken = ((await loginRes.json()) as { accessToken: string }).accessToken
+    userToken = await absAccessToken(absBase, USER, PASS)
 
     // Seed a non-zero resume position so start() has somewhere to resume from.
     const patchRes = await fetch(`${absBase}/api/me/progress/${itemId}`, {
@@ -88,7 +86,7 @@ describe.skipIf(abs === null || process.platform === 'win32')('graceful shutdown
   })
 
   it('writes the reached position back to ABS on SIGTERM, then exits cleanly (0)', async () => {
-    const startRes = await api('PUT', '/v1/sessions/current', { itemId, speakerId: SPEAKER_UUID })
+    const startRes = await api('PUT', '/v2/sessions/current', { itemId, speakerId: SPEAKER_UUID })
     expect(startRes.status).toBe(200)
 
     // The listener has advanced to 25s on the speaker (mid-book on the 60s fixture).

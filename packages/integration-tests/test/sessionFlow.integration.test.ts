@@ -10,7 +10,7 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import { createAbsUser, createStreamerApiKey, poll } from './absSeed.js'
+import { absAccessToken, createAbsUser, createStreamerApiKey, poll } from './absSeed.js'
 
 // End-to-end playback flow (SPEC §4/§5): the compiled server against the shared live Audiobookshelf
 // (globalSetup) and the REAL fake-Sonos UPnP/SOAP double, driving the full session lifecycle —
@@ -85,10 +85,10 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     )
     await waitUntilReady(server, port)
 
-    // The server proxies ABS's own tokens, so this accessToken is also a valid ABS bearer.
-    const loginRes = await api('POST', '/v1/auth/login', { username: SESSION_USER, password: SESSION_PASS }, '')
-    if (!loginRes.ok) throw new Error(`server login failed: ${loginRes.status} ${await loginRes.text()}`)
-    userToken = ((await loginRes.json()) as { accessToken: string }).accessToken
+    // Straight from ABS, not through the server's /auth/login — that route is declared by contract
+    // 2.0.0 but not implemented yet (see ApiService), and the token guard accepts any bearer ABS
+    // accepts, which is exactly what this is.
+    userToken = await absAccessToken(absBase, SESSION_USER, SESSION_PASS)
 
     // Pre-seed this user's progress so start() has a non-zero position to resume from. The user is
     // freshly created, so this creates a fresh record that stores exactly what it is given.
@@ -103,7 +103,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   afterAll(async () => {
     // Best effort: don't leave a dangling playback session behind if a test above failed mid-chain.
     if (server) {
-      await api('DELETE', '/v1/sessions/current').catch(() => undefined)
+      await api('DELETE', '/v2/sessions/current').catch(() => undefined)
       await stopServer(server)
     }
     await fake?.stop()
@@ -111,7 +111,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   })
 
   it('starts playback, resuming from the ABS position, with a DIDL queue on the speaker', async () => {
-    const res = await api('PUT', '/v1/sessions/current', { itemId, speakerId: SPEAKER_UUID })
+    const res = await api('PUT', '/v2/sessions/current', { itemId, speakerId: SPEAKER_UUID })
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
 
@@ -140,7 +140,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   })
 
   it('reports the active session with a live position', async () => {
-    const res = await api('GET', '/v1/sessions/current')
+    const res = await api('GET', '/v2/sessions/current')
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
     expect(contractValidator('Session')(session)).toBe(true)
@@ -148,19 +148,19 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   })
 
   it('rejects a non-empty but invalid bearer with 401 (validated upstream, not presence-only)', async () => {
-    const res = await api('GET', '/v1/sessions/current', undefined, 'not-a-real-abs-token')
+    const res = await api('GET', '/v2/sessions/current', undefined, 'not-a-real-abs-token')
     expect(res.status).toBe(401)
   })
 
   // The reached position ABS currently has stored for the book (via the read projection).
   async function storedProgress(): Promise<{ positionSeconds: number; isFinished: boolean }> {
-    const res = await api('GET', `/v1/library/items/${itemId}`)
+    const res = await api('GET', `/v2/library/items/${itemId}`)
     const item = (await res.json()) as { progress?: { positionSeconds?: number; isFinished?: boolean } }
     return { positionSeconds: item.progress?.positionSeconds ?? 0, isFinished: item.progress?.isFinished ?? false }
   }
 
   it('pauses on the coordinator and reflects the paused state', async () => {
-    const res = await api('POST', '/v1/sessions/current/pause')
+    const res = await api('POST', '/v2/sessions/current/pause')
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
     expect(contractValidator('Session')(session)).toBe(true)
@@ -169,14 +169,14 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
   })
 
   it('resumes on the coordinator and reflects the playing state', async () => {
-    const res = await api('POST', '/v1/sessions/current/resume')
+    const res = await api('POST', '/v2/sessions/current/resume')
     expect(res.status).toBe(200)
     expect(((await res.json()) as Record<string, unknown>).state).toBe('playing')
     expect(fake?.transportState).toBe('PLAYING')
   })
 
   it('seeks to a mid-book target and writes the (unfinished) position back to ABS', async () => {
-    const res = await api('POST', '/v1/sessions/current/seek', { positionSeconds: 30 })
+    const res = await api('POST', '/v2/sessions/current/seek', { positionSeconds: 30 })
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
     expect(session.positionSeconds).toBe(30)
@@ -201,19 +201,19 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     )
 
     // And an explicit GET reflects the device-side pause as paused.
-    const res = await api('GET', '/v1/sessions/current')
+    const res = await api('GET', '/v2/sessions/current')
     expect(res.status).toBe(200)
     expect(((await res.json()) as Record<string, unknown>).state).toBe('paused')
   })
 
   it('stops with 204 and writes the reached position back to ABS', async () => {
-    const res = await api('DELETE', '/v1/sessions/current')
+    const res = await api('DELETE', '/v2/sessions/current')
     expect(res.status).toBe(204)
 
     // The reached position (40s, mid-book) is persisted, not marked finished.
     expect(await storedProgress()).toEqual({ positionSeconds: 40, isFinished: false })
 
     // And the session is gone.
-    expect((await api('GET', '/v1/sessions/current')).status).toBe(404)
+    expect((await api('GET', '/v2/sessions/current')).status).toBe(404)
   })
 })

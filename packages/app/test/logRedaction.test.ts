@@ -5,15 +5,15 @@ import { redactedReqSerializer } from '../src/api/app.js'
 // serializer must strip the query string — a path-based redact would be inert here.
 describe('redactedReqSerializer', () => {
   it('strips the query string, so a token in the URL is never logged', () => {
-    const out = redactedReqSerializer({ method: 'GET', url: '/v1/health?token=SUPERSECRET' })
-    expect(out).toEqual({ method: 'GET', url: '/v1/health' })
+    const out = redactedReqSerializer({ method: 'GET', url: '/v2/health?token=SUPERSECRET' })
+    expect(out).toEqual({ method: 'GET', url: '/v2/health' })
     expect(JSON.stringify(out)).not.toContain('SUPERSECRET')
   })
 
   it('passes through a URL that has no query string unchanged', () => {
-    expect(redactedReqSerializer({ method: 'GET', url: '/v1/speakers' })).toEqual({
+    expect(redactedReqSerializer({ method: 'GET', url: '/v2/speakers' })).toEqual({
       method: 'GET',
-      url: '/v1/speakers',
+      url: '/v2/speakers',
     })
   })
 })

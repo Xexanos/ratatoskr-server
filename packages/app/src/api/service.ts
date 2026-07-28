@@ -6,13 +6,10 @@ import type { SonosClient } from '../sonos/client.js'
 
 type Health = components['schemas']['Health']
 type DependencyStatus = components['schemas']['DependencyStatus']
-type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
 type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItem = components['schemas']['LibraryItem']
 type Speaker = components['schemas']['Speaker']
-type LoginRequest = components['schemas']['LoginRequest']
-type RefreshRequest = components['schemas']['RefreshRequest']
 type Session = components['schemas']['Session']
 type StartSessionRequest = components['schemas']['StartSessionRequest']
 type SeekRequest = components['schemas']['SeekRequest']
@@ -78,15 +75,12 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  async login(request: FastifyRequest): Promise<AuthTokens> {
-    const { username, password } = request.body as LoginRequest
-    return this.abs.login(username, password)
-  }
-
-  async refresh(request: FastifyRequest): Promise<AuthTokens> {
-    const { refreshToken } = request.body as RefreshRequest
-    return this.abs.refresh(refreshToken)
-  }
+  // No login and no logout here on purpose. Both are declared by contract 2.0.0, and both hinge on a
+  // credential this server cannot yet issue: an opaque Ratatoskr token that outlives the process and
+  // dies on sign-out needs the persisted session store (SPEC section 8). Handing out an Audiobookshelf
+  // access token under that name instead would put an upstream credential on the device, which is the
+  // one property the model exists to remove — so until the store lands, glue's not-implemented stub
+  // answers both routes (#134) rather than something that only looks right.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
@@ -132,23 +126,21 @@ export class ApiService {
     return this.sessions.current(request.absToken as string)
   }
 
+  // No refresh token comes in any more (the contract dropped the field), so the sync loop runs on the
+  // caller's access token alone until the server holds ABS chains of its own.
   async startSession(request: FastifyRequest): Promise<Session> {
-    const { itemId, speakerId, refreshToken } = request.body as StartSessionRequest
-    return this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
+    const { itemId, speakerId } = request.body as StartSessionRequest
+    return this.sessions.start(request.absToken as string, undefined, itemId, speakerId)
   }
 
-  // 204 normally; 200 + a final Session when a rotated token pair was still pending at stop, so the
-  // client can adopt it (SPEC section 8) — stop discards the in-memory tokens, so this is the last
-  // chance to deliver the pair.
+  // Always 204: nothing is handed back at stop any more, now that no token pair travels to the
+  // client (SPEC section 8). The final Session the manager returns is discarded here.
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const final = await this.sessions.stop(request.absToken as string)
-    if (final !== undefined) await reply.code(200).send(final)
-    else await reply.code(204).send()
+    await this.sessions.stop(request.absToken as string)
+    await reply.code(204).send()
   }
 
   // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).
-  // The caller's token is forwarded so an adopted rotated pair stops being redelivered (SPEC
-  // section 8).
   async pauseSession(request: FastifyRequest): Promise<Session> {
     return this.sessions.pause(request.absToken as string)
   }

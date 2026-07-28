@@ -15,7 +15,7 @@ const ITEM_SUMMARY = {
   title: 'The Test Book',
   author: 'Jane Doe',
   durationSeconds: 301,
-  coverUrl: '/v1/library/items/li_1/cover',
+  coverUrl: '/v2/library/items/li_1/cover',
 }
 
 const MANIFEST: PlaybackManifest = {

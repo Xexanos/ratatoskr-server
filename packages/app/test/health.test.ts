@@ -13,7 +13,7 @@ function pingResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-describe('GET /v1/health', () => {
+describe('GET /v2/health', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
   })
@@ -21,7 +21,7 @@ describe('GET /v1/health', () => {
   it('reports ok when both Audiobookshelf and Sonos are reachable', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(true) })
-    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+    const res = await app.inject({ method: 'GET', url: '/v2/health' })
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -40,7 +40,7 @@ describe('GET /v1/health', () => {
     // not read as a Sonos outage, so it is excluded from the overall status too (only abs.reachable
     // decides while Sonos is still probing) - otherwise every boot would briefly report degraded.
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(undefined) })
-    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+    const res = await app.inject({ method: 'GET', url: '/v2/health' })
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -53,7 +53,7 @@ describe('GET /v1/health', () => {
   it('reports degraded when Audiobookshelf is unreachable even while Sonos is still probing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(undefined) })
-    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+    const res = await app.inject({ method: 'GET', url: '/v2/health' })
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -67,7 +67,7 @@ describe('GET /v1/health', () => {
   it('reports degraded when Sonos is unreachable even though Audiobookshelf is up', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ success: true })))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(false) })
-    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+    const res = await app.inject({ method: 'GET', url: '/v2/health' })
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -81,7 +81,7 @@ describe('GET /v1/health', () => {
   it('reports degraded and abs.reachable=false when Audiobookshelf is unreachable', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(true) })
-    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+    const res = await app.inject({ method: 'GET', url: '/v2/health' })
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
@@ -95,7 +95,7 @@ describe('GET /v1/health', () => {
   it('reports abs.reachable=false when the host responds but is not Audiobookshelf', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(pingResponse({ nope: true })))
     const app = await appWith({ isReachable: vi.fn().mockResolvedValue(true) })
-    const res = await app.inject({ method: 'GET', url: '/v1/health' })
+    const res = await app.inject({ method: 'GET', url: '/v2/health' })
 
     const body = res.json()
     expect(body.status).toBe('degraded')

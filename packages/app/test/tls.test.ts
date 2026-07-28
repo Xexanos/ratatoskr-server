@@ -46,7 +46,7 @@ describe('buildApp TLS wiring', () => {
         {
           host: '127.0.0.1',
           port: address.port,
-          path: '/v1/health',
+          path: '/v2/health',
           // The fixture cert is self-signed; that's expected and fine for this test.
           rejectUnauthorized: false,
         },

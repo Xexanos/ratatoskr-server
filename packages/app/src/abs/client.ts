@@ -3,7 +3,7 @@ import { API_PREFIX } from '../apiPrefix.js'
 import { decodeCursor, encodeCursor } from './cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from './errors.js'
 
-type AuthTokens = components['schemas']['AuthTokens']
+type User = components['schemas']['User']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 type LibraryItem = components['schemas']['LibraryItem']
 type LibraryItemList = components['schemas']['LibraryItemList']
@@ -24,6 +24,20 @@ const IN_PROGRESS_UPSTREAM_LIMIT = 100
 // Outcome of probing ABS_URL: a genuine ABS server, a host that answered but isn't ABS
 // (misconfiguration), or no answer at all (down / wrong host / TLS failure).
 export type AbsProbeResult = 'ok' | 'not-audiobookshelf' | 'unreachable'
+
+// An Audiobookshelf access/refresh pair. Declared here rather than derived from the contract:
+// since contract 2.0.0 these tokens never leave the server (ADR-0001 — Ratatoskr is their sole
+// holder), so they are an upstream detail with no client-facing schema to derive from.
+export interface AbsTokenPair {
+  accessToken: string
+  refreshToken: string
+}
+
+// What one Audiobookshelf login yields: the pair, plus the user it identifies. Only the `user` is
+// client-facing, which is why it alone stays contract-typed.
+export interface AbsTokens extends AbsTokenPair {
+  user: User
+}
 
 // The slice of a logger the client needs (structurally satisfied by Fastify's pino logger).
 export interface AbsClientLogger {
@@ -124,17 +138,21 @@ export class AbsClient {
     }
   }
 
-  // --- Authentication (proxied; SPEC section 8) ---
+  // --- Authentication (SPEC section 8) ---
 
   // POST /login with `x-return-tokens: true` so a non-browser client gets the refresh
   // token in the body rather than only as an httpOnly cookie (ABS 2.26+).
-  async login(username: string, password: string): Promise<AuthTokens> {
+  //
+  // Nothing in the server calls this while /auth/login is unimplemented (#134). It stays because it
+  // is where the knowledge of ABS's login response shape lives — including that the pair is nested
+  // under `user` since 2.26, which cost a live-drift bug to learn (SPEC section 15).
+  async login(username: string, password: string): Promise<AbsTokens> {
     const data = await this.postJson('/login', { 'x-return-tokens': 'true' }, { username, password })
     return toAuthTokens(data)
   }
 
   // POST /auth/refresh with the refresh token in the `x-refresh-token` header (ABS 2.26+).
-  async refresh(refreshToken: string): Promise<AuthTokens> {
+  async refresh(refreshToken: string): Promise<AbsTokens> {
     const data = await this.postJson('/auth/refresh', { 'x-refresh-token': refreshToken }, {})
     return toAuthTokens(data)
   }
@@ -517,7 +535,7 @@ function toLibraryItem(raw: unknown, progress: Progress): LibraryItem {
   }
 }
 
-function toAuthTokens(data: unknown): AuthTokens {
+function toAuthTokens(data: unknown): AbsTokens {
   const user = (data as { user?: { id?: unknown; username?: unknown; accessToken?: unknown; refreshToken?: unknown } })?.user
   const accessToken = user?.accessToken
   const refreshToken = user?.refreshToken

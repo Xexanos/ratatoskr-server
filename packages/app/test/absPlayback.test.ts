@@ -67,13 +67,13 @@ describe('AbsClient.getPlaybackManifest', () => {
     )
     const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
     // The whole-book duration (999), not the track-sum (100), and the cover-proxy path — exactly what
-    // GET /v1/library/items/li_1 projects for the same book.
+    // GET /v2/library/items/li_1 projects for the same book.
     expect(manifest.item).toEqual({
       id: 'li_1',
       title: 'A Book',
       author: 'Jane Doe',
       durationSeconds: 999,
-      coverUrl: '/v1/library/items/li_1/cover',
+      coverUrl: '/v2/library/items/li_1/cover',
     })
   })
 
