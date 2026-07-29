@@ -1,7 +1,7 @@
 import type { components } from '@ratatoskr/contract'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
-import type { PlaybackSession, SessionManager } from '../playback/sessionManager.js'
+import type { ListeningToken, PlaybackSession, SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 import {
   type MappedSession,
@@ -49,6 +49,14 @@ async function checkSonos(sonos: SonosClient): Promise<{ status: DependencyStatu
     status: reachable ? { reachable: true } : { reachable: false, detail: 'Sonos did not respond' },
     reachable,
   }
+}
+
+// Where a playback session started by this request reads its Audiobookshelf access token. A major
+// whose guard resolved a re-readable session supplies the live source; one whose bearer *is* the
+// upstream token has nothing behind it to re-read, so its session holds what the request carried —
+// which is exactly the /v1 semantics the frozen major is entitled to (security.ts).
+export function listeningToken(request: FastifyRequest): ListeningToken {
+  return request.absTokenSource ?? (() => Promise.resolve(request.absToken as string))
 }
 
 export interface ApiServiceDeps {
@@ -151,14 +159,14 @@ export class ApiService {
     return this.mapSession(await this.sessions.current(request.absToken as string))
   }
 
-  // No refresh token is passed on, so the sync loop runs on whatever access token this request
-  // carried and playback outlives it only as long as that token does. On /v1 that is the caller's own
-  // bearer, since 1.4.0 declares no refresh token on this request; on /v2 it is the device session's
-  // chain, and renewing it mid-session belongs to the keep-alive loop, which does not exist yet —
-  // until it does, a session started on /v2 holds the access token it started with (SPEC section 8).
+  // No refresh token is passed on: rotating one is the /v1 handover's business (v1/service.ts), and
+  // on /v2 renewing the chain belongs to the keep-alive loop instead. What the session is given is
+  // where to *read* the access token, not the token itself — so the chain that loop renews under it
+  // reaches a session that is already running, and long unattended playback keeps writing progress
+  // past the access token it started with (SPEC section 8).
   async startSession(request: FastifyRequest): Promise<Session> {
     const { itemId, speakerId } = request.body as StartSessionRequest
-    const session = await this.sessions.start(request.absToken as string, undefined, itemId, speakerId)
+    const session = await this.sessions.start(listeningToken(request), undefined, itemId, speakerId)
     return this.mapSession(session)
   }
 

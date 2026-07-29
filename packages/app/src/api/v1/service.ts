@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { PlaybackSession } from '../../playback/sessionManager.js'
 import { toAuthTokens, toV1SessionResponse, type MappedV1Session, type V1AuthTokens } from '../contractMapping.js'
-import { ApiService } from '../service.js'
+import { ApiService, listeningToken } from '../service.js'
 
 // The request bodies this surface alone accepts. Declared here rather than derived: the frozen
 // document is generated as data only, with no types (see the contract package's index), and these
@@ -63,7 +63,7 @@ export class V1ApiService extends ApiService {
   // serves this route alone).
   override async startSession(request: FastifyRequest): Promise<MappedV1Session> {
     const { itemId, speakerId, refreshToken } = request.body as V1StartSessionRequest
-    return this.mapSession(await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId))
+    return this.mapSession(await this.sessions.start(listeningToken(request), refreshToken, itemId, speakerId))
   }
 
   // 204 normally; 200 + a final Session when a rotated token pair was still pending at stop, so the

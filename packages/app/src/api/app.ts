@@ -7,6 +7,7 @@ import { versionPrefix, type ContractDocument } from './apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import { AuthService } from '../auth/authService.js'
+import { ChainKeepAlive } from '../auth/keepAlive.js'
 import { SessionStore } from '../auth/sessionStore.js'
 import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
@@ -91,9 +92,16 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // main.ts turns the resulting SessionStoreError into one actionable line.
   const store = options.sessionStore ?? (await SessionStore.open({ path: config.sessionStorePath, key: config.sessionStoreKey }))
   const auth = new AuthService(abs, store)
+  // Armed as part of startup wiring, like the store it maintains: from here on every stored chain is
+  // renewed daily, the ones that went stale while this server was down are renewed now, and the
+  // request path renews an access token that has run out (SPEC section 8). Non-blocking — a slow or
+  // unreachable Audiobookshelf may delay the first request, never the boot.
+  const keepAlive = new ChainKeepAlive(abs, store, { logger: app.log })
+  keepAlive.start()
   // On shutdown, stop any active session (writes the final position back to ABS) before releasing
   // the Sonos subscription. Best-effort and optional-chained so injected Partial fakes are fine.
   app.addHook('onClose', async () => {
+    keepAlive.stop()
     try {
       if (sessions.hasSession?.()) await sessions.stop()
     } catch {
@@ -109,7 +117,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     enableResponseValidation(app)
   }
 
-  const majors = servedMajors({ abs, sonos, sessions, auth })
+  const majors = servedMajors({ abs, sonos, sessions, auth }, keepAlive)
   // Before the mounts: the limit attaches as a per-route hook, so it has to be in place by the time
   // openapi-glue registers the routes it applies to (rateLimit.ts).
   await enableCredentialRateLimit(
@@ -144,7 +152,7 @@ interface ServedMajor {
 // Every entry is fully built before any of them is mounted, so a stale token-guard exemption fails
 // startup rather than the first request that happens to hit that major (tokenGuard.ts). Order between
 // the entries carries no meaning.
-function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
+function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>, keepAlive: ChainKeepAlive): ServedMajor[] {
   const v1Prefix = versionPrefix(frozenV1Document)
   const v2Prefix = versionPrefix(openapiDocument)
 
@@ -174,7 +182,7 @@ function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>): ServedMajor[] 
       securityHandlers: ratatoskrBearerHandlers,
       guardOperation: createTokenGuard(
         openapiDocument,
-        resolveDeviceSession(deps.auth),
+        resolveDeviceSession(deps.auth, keepAlive),
         UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
       ),
     },
@@ -185,9 +193,21 @@ function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>): ServedMajor[] 
 // session's Audiobookshelf access token where every shared handler already looks for one. That
 // single assignment is what makes "upstream calls run on the session entry's chain" true for the
 // whole surface at once (SPEC section 8), without any shared handler knowing which major it serves.
-function resolveDeviceSession(auth: AuthService): (request: FastifyRequest) => void {
-  return (request) => {
-    request.absToken = auth.resolve(request.ratatoskrToken as string).chain.accessToken
+//
+// The chain goes through the keep-alive loop on the way, so an access token that expired during a
+// pause is renewed before the handler behind this uses it, and a chain that has died answers 401
+// `UPSTREAM_SESSION_LOST` rather than letting the handler fail upstream as a generic 401.
+//
+// `absTokenSource` is the same lookup left behind as a function, for the one handler whose work
+// outlives its request: a playback session reads it again on every write-back, so a chain renewed
+// mid-playback reaches the running sync loop (security.ts). It re-resolves from the token rather
+// than closing over this request's entry, because that entry is a snapshot — which is the whole
+// problem it exists to solve.
+function resolveDeviceSession(auth: AuthService, keepAlive: ChainKeepAlive): (request: FastifyRequest) => Promise<void> {
+  return async (request) => {
+    const token = request.ratatoskrToken as string
+    request.absToken = (await keepAlive.usableChain(auth.resolve(token))).accessToken
+    request.absTokenSource = async () => (await keepAlive.usableChain(auth.resolve(token))).accessToken
   }
 }
 

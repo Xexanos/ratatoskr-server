@@ -60,7 +60,11 @@ describe('PUT /v1/sessions/current', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SESSION)
-    expect(start).toHaveBeenCalledWith('user-token', 'refresh-1', 'li_1', 'RINCON_1')
+    // The listening token reaches the manager as a supplier, not a value (sessionManager.ts): on
+    // /v1 it is a constant, because the caller's bearer *is* the upstream token and nothing behind
+    // this route renews it.
+    expect(start).toHaveBeenCalledWith(expect.any(Function), 'refresh-1', 'li_1', 'RINCON_1')
+    await expect((start.mock.calls[0] as [() => Promise<string>])[0]()).resolves.toBe('user-token')
     await app.close()
   })
 

@@ -1,7 +1,7 @@
 import type { FastifyError } from 'fastify'
 import { InvalidCursorError } from '../abs/cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from '../abs/errors.js'
-import { UnknownTokenError } from '../auth/errors.js'
+import { UnknownTokenError, UpstreamSessionLostError } from '../auth/errors.js'
 import { NoActiveSessionError } from '../playback/errors.js'
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
@@ -56,6 +56,17 @@ export function mapError(error: unknown): MappedError {
   // them one code deliberately (see UnknownTokenError) — hence one arm.
   if (error instanceof MissingBearerError || error instanceof UnknownTokenError) {
     return { statusCode: 401, code: 'unauthorized', message: 'A valid bearer token is required' }
+  }
+  // The one 401 a client must not read as "signed out": the token is fine, the upstream chain is
+  // gone, and only a password can rebuild it. Spelled as the contract declares it (SPEC section 8),
+  // and placed above the AbsAuthError arm below, which is the generic upstream rejection this
+  // deliberately displaces on the /v2 session path.
+  if (error instanceof UpstreamSessionLostError) {
+    return {
+      statusCode: 401,
+      code: 'UPSTREAM_SESSION_LOST',
+      message: 'The Audiobookshelf session for this device has been lost; sign in again',
+    }
   }
   if (error instanceof AbsAuthError) {
     return { statusCode: 401, code: 'unauthorized', message: 'Audiobookshelf rejected the credentials' }

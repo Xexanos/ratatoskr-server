@@ -12,6 +12,12 @@ declare module 'fastify' {
     // two are different credentials in different namespaces — conflating them is exactly how an
     // upstream token would end up accepted as a bearer, or a Ratatoskr token forwarded to ABS.
     ratatoskrToken?: string
+    // The same credential as absToken, but asked for again at each use rather than captured for
+    // this request — what a playback session outliving the request has to hold (SPEC section 8),
+    // so a chain the keep-alive loop renews mid-playback reaches the running sync loop. Set by the
+    // majors whose token guard resolves a session it can re-read; absent on /v1, where the bearer
+    // is the caller's own ABS token and there is nothing behind it to re-read.
+    absTokenSource?: () => Promise<string>
   }
 }
 
