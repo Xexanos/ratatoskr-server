@@ -346,7 +346,13 @@ re-login.
   unauthenticated. Marking the chain dead is what closes that too — a sign-in retires the
   *dead* entries of the same ABS user, who has just proved the password, while their other
   devices' live chains are untouched. Nothing goes upstream for those: the chain being retired
-  is gone, which is what "dead" records.
+  is gone, which is what "dead" records. What this cannot do is tell one dead entry of a user
+  from another, and the dominant death cause — an outage past the window — kills all of that
+  user's chains at once. So the first device back retires its siblings' entries too, and those
+  siblings then get the ordinary "signed out" 401 instead of the targeted prompt. Accepted
+  deliberately: both answers end with the same person typing the same password, while keeping
+  dead entries until each device happens to return would leave the store accumulating
+  credentials that can never work again.
 - **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
   immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
   killing exactly this device's ABS session; other devices and other ABS clients are
