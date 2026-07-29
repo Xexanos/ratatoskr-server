@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, AbsUpstreamError } from '../src/abs/errors.js'
-import { UpstreamSessionLostError } from '../src/auth/errors.js'
+import { UnknownTokenError, UpstreamSessionLostError } from '../src/auth/errors.js'
 import { CHAIN_SPACING_MS, ChainKeepAlive } from '../src/auth/keepAlive.js'
 import type { SessionEntry, SessionStore } from '../src/auth/sessionStore.js'
 import { tempSessionStore } from './helpers/tempSessionStore.js'
@@ -90,6 +90,7 @@ function build(abs: AbsClient = fakeAbs(), options: Record<string, unknown> = {}
 function memoryStore(entries: SessionEntry[]): SessionStore {
   return {
     list: () => entries,
+    current: (entry: SessionEntry) => entries.find((candidate) => candidate.tokenHash === entry.tokenHash),
     updateChain: async () => true,
     markDead: async () => true,
   } as unknown as SessionStore
@@ -132,6 +133,36 @@ describe('ChainKeepAlive.sweep', () => {
     expect(CHAIN_SPACING_MS).toBeGreaterThan(1000)
   })
 
+  // The collision is per ABS user, not per sweep, so the gap has to hold against a renewal the
+  // request path just made too — and it is the sweep that waits for it, never the request.
+  it('leaves the same gap after an on-demand renewal as after one of its own', async () => {
+    const abs = fakeAbs()
+    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    const keepAlive = build(abs)
+
+    await keepAlive.usableChain(entry)
+    await keepAlive.sweep()
+
+    expect(abs.refresh).toHaveBeenCalledTimes(3) // on demand, then both chains in the sweep
+    expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(TEST_SPACING_MS)
+  })
+
+  it('abandons a sweep in progress when it is stopped, so shutdown is not held up', async () => {
+    const abs = fakeAbs()
+    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    const keepAlive = build(abs)
+
+    const sweep = keepAlive.sweep()
+    keepAlive.stop()
+    await sweep
+
+    // The one already in flight finishes — abandoning it mid-rotation would leave the store naming
+    // a token ABS has replaced — but the sweep goes no further.
+    expect(abs.refresh).toHaveBeenCalledTimes(1)
+  })
+
   // The rare-and-loud failure (SPEC section 8): ABS refused the refresh token, so the chain is gone
   // for good — but the device's token is not, and keeping the entry is what lets its next request
   // say so.
@@ -170,6 +201,40 @@ describe('ChainKeepAlive.sweep', () => {
     await build(abs).sweep()
 
     expect(store.find('token-tablet')?.chain.refreshToken).toBe('rotated')
+  })
+
+  // The entries a sweep walks are frozen snapshots, and a paced sweep reaches the later ones long
+  // after listing them. If the request path renewed one in between, presenting the token ABS has
+  // since rotated away earns a 401 — and this loop would mark a live chain dead over its own
+  // bookkeeping. So the entry is re-read at the moment it is spent.
+  it('re-reads a chain before spending it, so a renewal it did not make cannot kill it', async () => {
+    const abs = fakeAbs()
+    const phone = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    const keepAlive = build(abs)
+
+    // Between listing and reaching it, the tablet's chain is renewed elsewhere.
+    const sweep = keepAlive.sweep()
+    await store.updateChain(store.find('token-tablet')!, { accessToken: 'a', refreshToken: 'refresh-tablet-elsewhere' })
+    await sweep
+
+    expect(abs.refresh).toHaveBeenCalledWith('refresh-tablet-elsewhere')
+    expect(abs.refresh).not.toHaveBeenCalledWith('refresh-tablet')
+    expect(store.find('token-tablet')?.deadSince).toBeUndefined()
+    expect(phone).toBeDefined()
+  })
+
+  it('skips a chain whose device signed out after the sweep listed it', async () => {
+    const abs = fakeAbs()
+    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    const keepAlive = build(abs)
+
+    const sweep = keepAlive.sweep()
+    await store.delete('token-tablet')
+    await sweep
+
+    expect(abs.refresh).not.toHaveBeenCalledWith('refresh-tablet')
   })
 
   // Death is terminal (SPEC section 8: no in-place repair). Refreshing a dead chain could only
@@ -358,6 +423,20 @@ describe('ChainKeepAlive.usableChain', () => {
       UpstreamSessionLostError,
     )
     expect(store.find('token-phone')?.deadSince).toEqual(expect.any(String))
+  })
+
+  // Signing out mid-request is not a lost upstream session, it is a token that no longer exists —
+  // and answering "your password, please" would send a device that just signed out to a prompt
+  // instead of the sign-in screen.
+  it('reports a device that signed out mid-request as an unknown token', async () => {
+    const abs = fakeAbs()
+    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    // The entry a guard resolved is a snapshot; the device can sign out before the renewal it
+    // triggered gets to spend anything.
+    await store.delete('token-phone')
+
+    await expect(build(abs).usableChain(entry)).rejects.toBeInstanceOf(UnknownTokenError)
+    expect(abs.refresh).not.toHaveBeenCalled()
   })
 
   // An outage is not a lost session: the caller gets the upstream error (502), and the chain is

@@ -206,8 +206,9 @@ function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>, keepAlive: Chai
 function resolveDeviceSession(auth: AuthService, keepAlive: ChainKeepAlive): (request: FastifyRequest) => Promise<void> {
   return async (request) => {
     const token = request.ratatoskrToken as string
-    request.absToken = (await keepAlive.usableChain(auth.resolve(token))).accessToken
-    request.absTokenSource = async () => (await keepAlive.usableChain(auth.resolve(token))).accessToken
+    const currentAccessToken = async (): Promise<string> => (await keepAlive.usableChain(auth.resolve(token))).accessToken
+    request.absTokenSource = currentAccessToken
+    request.absToken = await currentAccessToken()
   }
 }
 

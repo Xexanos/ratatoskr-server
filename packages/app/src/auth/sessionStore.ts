@@ -111,6 +111,15 @@ export class SessionStore {
     return [...this.entries.values()]
   }
 
+  // The entry as it stands now, for a caller holding one from an earlier list()/find(). Entries are
+  // frozen snapshots, so anything that acts on a *held* one — the keep-alive sweep, which may reach
+  // an entry minutes after listing it — has to re-read first: acting on a chain that has since been
+  // refreshed would spend a token Audiobookshelf already rotated away. Undefined means the device
+  // signed out in the meantime.
+  current(entry: SessionEntry): SessionEntry | undefined {
+    return this.entries.get(entry.tokenHash)
+  }
+
   async create(token: string, record: SessionRecord): Promise<SessionEntry> {
     const createdAt = new Date().toISOString()
     const entry = freezeEntry({
@@ -145,8 +154,10 @@ export class SessionStore {
     return this.mutate((entries) => {
       const current = entries.get(entry.tokenHash)
       if (current === undefined) return false
-      const chainRefreshedAt = new Date().toISOString()
-      entries.set(entry.tokenHash, freezeEntry({ ...current, chain: { ...chain }, chainRefreshedAt }))
+      entries.set(
+        entry.tokenHash,
+        freezeEntry({ ...current, chain: { ...chain }, chainRefreshedAt: new Date().toISOString() }),
+      )
       return true
     })
   }
