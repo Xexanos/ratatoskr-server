@@ -10,6 +10,7 @@ import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
+import { credentialPaths, enableCredentialRateLimit } from './rateLimit.js'
 import { securityHandlers, type SecurityHandlers } from './security.js'
 import { ApiService, type ApiServiceDeps } from './service.js'
 import { createTokenGuard, type GuardOperation } from './tokenGuard.js'
@@ -92,7 +93,14 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     enableResponseValidation(app)
   }
 
-  for (const major of servedMajors({ abs, sonos, sessions })) await mountMajor(app, major)
+  const majors = servedMajors({ abs, sonos, sessions })
+  // Before the mounts: the limit attaches as a per-route hook, so it has to be in place by the time
+  // openapi-glue registers the routes it applies to (rateLimit.ts).
+  await enableCredentialRateLimit(
+    app,
+    new Set(majors.flatMap((major) => credentialPaths(major.document, major.prefix))),
+  )
+  for (const major of majors) await mountMajor(app, major)
 
   return app
 }

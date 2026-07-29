@@ -14,6 +14,19 @@ export class NotImplementedError extends Error {
   }
 }
 
+// Handed to the error handler when a credential endpoint's rate limit is exhausted (rateLimit.ts).
+// An error rather than a ready-made body because @fastify/rate-limit passes what its
+// errorResponseBuilder returns into the error handler, and this API has exactly one place that turns
+// a thrown value into a response — bypassing it would give this one refusal a body shaped unlike
+// every other error. The message says nothing about counts or the window: a caller only needs to know
+// to wait, and `Retry-After` (set by the plugin) says how long.
+export class TooManyRequestsError extends Error {
+  constructor() {
+    super('Too many attempts. Please wait and try again.')
+    this.name = 'TooManyRequestsError'
+  }
+}
+
 export interface MappedError {
   statusCode: number
   code: string
@@ -64,6 +77,9 @@ export function mapError(error: unknown): MappedError {
   }
   if (error instanceof NotImplementedError) {
     return { statusCode: 404, code: 'not_found', message: 'This operation is not implemented yet' }
+  }
+  if (error instanceof TooManyRequestsError) {
+    return { statusCode: 429, code: 'too_many_requests', message: error.message }
   }
   // Fastify's own errors: schema validation and other client-side (4xx) failures.
   const fastifyError = error as FastifyError
