@@ -25,6 +25,14 @@ central E2E stack and **promotes** it to a release channel only after E2E passes
 - **Volumes:** `/tls` for the certificate and `/data` for the encrypted session store. `/data` must
   be a real mount — the entrypoint refuses to start otherwise, since the store would be writable in
   the container's own layer and then vanish on the next recreation, signing every device out.
+- **Upstream session lifetime:** the server keeps each signed-in device's Audiobookshelf session
+  alive by renewing it daily, and at start-up for any renewal it slept through, so a restart or a
+  long pause never costs a login. What still ends a session is Ratatoskr being unable to reach
+  Audiobookshelf for longer than Audiobookshelf's *whole* refresh window — `REFRESH_TOKEN_EXPIRY`,
+  **7 days** by default — after which the affected devices are prompted for their password.
+  Deployments that can be offline for longer (a NAS powered down over a holiday, a seasonal
+  server) should raise it on the **Audiobookshelf** side, e.g. `REFRESH_TOKEN_EXPIRY=90d`;
+  nothing on the Ratatoskr side has to match it.
 - **Health:** the image's `HEALTHCHECK` is a raw TCP connect to `PORT` (liveness only — works
   for both HTTP and HTTPS). Application health, including ABS/Sonos reachability, is the
   unauthenticated `GET /v2/health` endpoint.

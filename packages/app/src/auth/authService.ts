@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import type { AbsClient } from '../abs/client.js'
-import { UnknownTokenError } from './errors.js'
+import { UnknownTokenError, UpstreamSessionLostError } from './errors.js'
 import type { SessionEntry, SessionStore } from './sessionStore.js'
 
 // The Audiobookshelf identity a sign-in resolved to, and the credential minted to stand in for it.
@@ -56,7 +56,29 @@ export class AuthService {
         // is the better of the two outcomes.
       }
     }
+    await this.retireDeadSessions(upstream.user.id)
     return { token, user: upstream.user }
+  }
+
+  // The other half of "re-login deletes the old entry", and the half no client can do: a device
+  // whose chain died before it could offer the token it is replacing leaves an entry nobody can
+  // name — `POST /v2/auth/login` is unauthenticated, so the server cannot identify it either. Once
+  // the keep-alive loop has marked that entry dead, this is what closes it: the same ABS user has
+  // just proved the password, and a dead entry of theirs can only be the session they are replacing.
+  //
+  // Only the dead ones — another device of the same user is still listening on its own live chain.
+  // Nothing goes upstream: the chain is gone, which is what "dead" records, so an ABS sign-out would
+  // have nothing left to end. Best-effort, for the same reason retiring the offered token is: the
+  // new token is already live, and failing the sign-in over a stale entry would lose it.
+  private async retireDeadSessions(absUserId: string): Promise<void> {
+    for (const entry of this.store.list()) {
+      if (entry.absUserId !== absUserId || entry.deadSince === undefined) continue
+      try {
+        await this.store.remove(entry)
+      } catch {
+        // An entry that outlives this attempt stays dead, and the next sign-in tries again.
+      }
+    }
   }
 
   // Sign out: the entry goes first, so the token is dead the moment this returns even if the
@@ -77,9 +99,15 @@ export class AuthService {
 
   // The token guard's lookup: in-process, no Audiobookshelf roundtrip (SPEC section 8). The entry
   // it returns carries the chain every upstream call for this caller then runs on.
+  //
+  // The two ways this fails are deliberately different errors, because the client's reactions to
+  // them are opposite: an unknown token means signed out, while a token whose chain the keep-alive
+  // loop marked dead means "your password, please" — the entry is still here precisely so this can
+  // be told apart (SPEC section 8).
   resolve(token: string): SessionEntry {
     const entry = this.store.find(token)
     if (entry === undefined) throw new UnknownTokenError()
+    if (entry.deadSince !== undefined) throw new UpstreamSessionLostError()
     return entry
   }
 }

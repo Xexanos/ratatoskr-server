@@ -10,7 +10,7 @@ import {
   SessionStoreWriteError,
 } from '../src/auth/errors.js'
 import { decodeStoreFile, encodeStoreFile } from '../src/auth/sessionFile.js'
-import { SessionStore } from '../src/auth/sessionStore.js'
+import { chainRefreshedAt, SessionStore } from '../src/auth/sessionStore.js'
 
 const KEY = Buffer.alloc(32, 0xa1)
 const OTHER_KEY = Buffer.alloc(32, 0xb2)
@@ -139,6 +139,68 @@ describe('SessionStore', () => {
 
     expect(await store.updateChain(entry, { accessToken: 'a', refreshToken: 'r' })).toBe(false)
     expect((await open()).list()).toEqual([])
+  })
+
+  it('stamps a refreshed chain, so the boot sweep can tell how stale each one is', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    // The stamp a fresh sign-in leaves is its creation time: nothing about that chain is older.
+    expect(chainRefreshedAt(entry)).toBe(Date.parse(entry.createdAt))
+
+    await store.updateChain(entry, { accessToken: 'abs-access-2', refreshToken: 'abs-refresh-2' })
+
+    const refreshed = (await open()).find('token-phone')
+    expect(chainRefreshedAt(refreshed!)).toBeGreaterThanOrEqual(chainRefreshedAt(entry))
+  })
+
+  // An entry written before the field existed still has to say how stale its chain is; its creation
+  // time is when that chain was minted, so it is the honest answer.
+  it('dates a chain no earlier version stamped from the entry it belongs to', async () => {
+    await writePayload({ revision: 1, entries: [STORED] })
+
+    expect(chainRefreshedAt((await open()).list()[0]!)).toBe(Date.parse(STORED.createdAt))
+  })
+
+  // The keep-alive loop's rare-and-loud failure (SPEC section 8): the chain is gone, but the entry
+  // stays so the device's next request can be told *which* 401 this is.
+  it('marks a chain dead while keeping the entry, across a reopen', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+
+    expect(await store.markDead(entry)).toBe(true)
+
+    const dead = (await open()).find('token-phone')
+    expect(dead).toBeDefined()
+    expect(Date.parse(dead!.deadSince!)).not.toBeNaN()
+  })
+
+  it('does not resurrect an entry whose device signed out before it was marked dead', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    await store.delete('token-phone')
+
+    expect(await store.markDead(entry)).toBe(false)
+    expect((await open()).list()).toEqual([])
+  })
+
+  // Retiring the dead entries of a re-authenticating user (authService.ts): the caller holds the
+  // entry, not the raw token — only the device that signed in ever had that.
+  it('removes an entry the caller holds without knowing its token', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    await store.create('token-tablet', TABLET)
+
+    expect(await store.remove(entry)).toBe(true)
+    expect(store.find('token-phone')).toBeUndefined()
+    expect((await open()).list()).toHaveLength(1)
+  })
+
+  it('reports an entry that is already gone on remove', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    await store.delete('token-phone')
+
+    expect(await store.remove(entry)).toBe(false)
   })
 
   it('serializes concurrent writes so no login is lost to a racing write', async () => {

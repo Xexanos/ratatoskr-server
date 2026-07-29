@@ -53,6 +53,27 @@ sync. Multiroom grouping, chapter awareness, and podcasts are planned for later.
 - Sonos or IKEA SYMFONISK speakers on the same local network. Ratatoskr controls them
   directly over UPnP; no separate Sonos controller process is needed.
 
+### Staying signed in through a long outage
+
+You sign in once per device and stay signed in until you sign out — pauses and server
+restarts do not cost you a login. Ratatoskr manages that by holding one Audiobookshelf
+session per device and **renewing it daily**, plus once at start-up for any it missed while
+the server was off.
+
+That leaves one way for a session to lapse: if Ratatoskr cannot reach Audiobookshelf for
+longer than Audiobookshelf's entire refresh window, the session expires upstream and the
+affected devices are asked for their password again (they keep everything else). The window
+is Audiobookshelf's own `REFRESH_TOKEN_EXPIRY`, **7 days** by default. If your setup can be
+offline for longer than that — a server you only power up at weekends, a holiday with the NAS
+unplugged — raise it, for example:
+
+```sh
+REFRESH_TOKEN_EXPIRY=90d
+```
+
+Set that on the **Audiobookshelf** container, not on Ratatoskr. Nothing else changes: the
+daily renewal carries each session's expiry forward with it.
+
 ### Set up the streamer account in Audiobookshelf
 
 Individual listeners log in with their own Audiobookshelf accounts, so their progress is

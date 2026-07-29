@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, AbsUpstreamError } from '../src/abs/errors.js'
 import { AuthService } from '../src/auth/authService.js'
-import { UnknownTokenError } from '../src/auth/errors.js'
+import { UnknownTokenError, UpstreamSessionLostError } from '../src/auth/errors.js'
 import type { SessionStore } from '../src/auth/sessionStore.js'
 import { tempSessionStore } from './helpers/tempSessionStore.js'
 
@@ -137,6 +137,55 @@ describe('AuthService.signIn', () => {
     expect(store.find(fresh.token)).toBeDefined()
   })
 
+  // The half of "re-login deletes the old entry" no client can do (SPEC section 8): a device whose
+  // chain died before it could offer the token it is replacing leaves an entry nobody can name. Once
+  // the keep-alive loop has marked that entry dead, sign-in can retire it on the user's behalf.
+  it('retires the dead entries of the same ABS user, which no client can name', async () => {
+    const { auth, store } = await build()
+    const stranded = await auth.signIn('listener', 's3cret')
+    await store.markDead(store.find(stranded.token)!)
+
+    const fresh = await auth.signIn('listener', 's3cret')
+
+    expect(store.find(stranded.token)).toBeUndefined()
+    expect(store.find(fresh.token)).toBeDefined()
+  })
+
+  // Only the dead ones: another device of the same user is still listening on its own chain, and
+  // retiring that would be this model signing a working device out.
+  it('leaves the same user’s live sessions alone', async () => {
+    const { auth, store } = await build()
+    const tablet = await auth.signIn('listener', 's3cret')
+
+    await auth.signIn('listener', 's3cret')
+
+    expect(store.find(tablet.token)).toBeDefined()
+  })
+
+  it('leaves another ABS user’s dead session alone', async () => {
+    const { auth, store, abs } = await build()
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...CHAIN, user: { id: 'usr-2', username: 'other' } })
+    const other = await auth.signIn('other', 's3cret')
+    await store.markDead(store.find(other.token)!)
+
+    await auth.signIn('listener', 's3cret')
+
+    expect(store.find(other.token)).toBeDefined()
+  })
+
+  // Best-effort for the same reason retiring the offered token is: the new token is already live, so
+  // failing the sign-in over a stale entry would lose a credential that works.
+  it('still returns the new session when a dead entry cannot be retired', async () => {
+    const { auth, store } = await build()
+    const stranded = await auth.signIn('listener', 's3cret')
+    await store.markDead(store.find(stranded.token)!)
+    vi.spyOn(store, 'remove').mockRejectedValueOnce(new Error('disk full'))
+
+    const fresh = await auth.signIn('listener', 's3cret')
+
+    expect(store.find(fresh.token)).toBeDefined()
+  })
+
   it('ignores a replaced token it does not know', async () => {
     const { auth, abs } = await build()
 
@@ -222,6 +271,17 @@ describe('AuthService.resolve', () => {
     await auth.signOut(token)
 
     expect(() => auth.resolve(token)).toThrow(UnknownTokenError)
+  })
+
+  // The whole point of keeping a dead entry (SPEC section 8): this token is not unknown, and
+  // telling its device "signed out" would send it to a full sign-in when a password prompt is what
+  // the situation calls for.
+  it('reports a dead chain as a lost upstream session, not as an unknown token', async () => {
+    const { auth, store } = await build()
+    const { token } = await auth.signIn('listener', 's3cret')
+    await store.markDead(store.find(token)!)
+
+    expect(() => auth.resolve(token)).toThrow(UpstreamSessionLostError)
   })
 
   // An ABS access token is not a Ratatoskr token: the two namespaces are disjoint, which is what

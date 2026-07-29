@@ -1,4 +1,7 @@
 import { accessSync, constants, readFileSync } from 'node:fs'
+// The default lives with the loop that owns it (auth/keepAlive.ts), so the documented "daily" cannot
+// drift from what ships. Nothing in auth/ reads config, so this direction adds no cycle.
+import { REFRESH_INTERVAL_MS } from '../auth/keepAlive.js'
 import { ConfigError } from './errors.js'
 
 export interface TlsConfig {
@@ -28,6 +31,11 @@ export interface Config {
   // (SPEC section 8: renew proactively, before expiry, so the client's still-valid old token can
   // authenticate the request that fetches the rotated pair).
   listeningTokenRefreshMarginSeconds: number
+  // How often the keep-alive loop renews every stored Audiobookshelf chain (SPEC section 8). Also
+  // the boot pass's staleness cutoff — a chain is stale when it missed a sweep — which is what makes
+  // this one knob enough to provoke the dead-chain path in a test deployment by restarting the
+  // server instead of waiting out a day.
+  keepAliveRefreshIntervalMs: number
   // Upper bound on the graceful-shutdown drain (SPEC section 5): a hung final write can't hold the
   // process past this before it exits anyway.
   shutdownTimeoutMs: number
@@ -287,6 +295,7 @@ export function loadConfig(env: Env = process.env): Config {
     seekRetries: reader.positiveNumber('SEEK_RETRIES', 2),
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     listeningTokenRefreshMarginSeconds: reader.positiveNumber('LISTENING_TOKEN_REFRESH_MARGIN_SECONDS', 300),
+    keepAliveRefreshIntervalMs: reader.positiveNumber('KEEP_ALIVE_REFRESH_INTERVAL_MS', REFRESH_INTERVAL_MS),
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),
     writePositionBackoffSeconds: reader.nonNegativeNumber('WRITE_POSITION_BACKOFF_SECONDS', 2),

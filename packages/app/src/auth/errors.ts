@@ -10,6 +10,19 @@ export class UnknownTokenError extends Error {
   }
 }
 
+// The opposite case to UnknownTokenError, and the reason the two must not share a code: the token
+// is live and this server still holds its entry, but the Audiobookshelf chain behind it has died —
+// contact with ABS was lost for longer than its refresh window, or the account was renamed. Only
+// the password can restore it, so the client is told to re-authenticate (401
+// `UPSTREAM_SESSION_LOST`) rather than that it is signed out. Rare and loud, by design: the
+// keep-alive loop exists to make this the only remaining way a chain ends (SPEC section 8).
+export class UpstreamSessionLostError extends Error {
+  constructor() {
+    super('The Audiobookshelf session behind this token has been lost')
+    this.name = 'UpstreamSessionLostError'
+  }
+}
+
 // Errors from the encrypted session store (SPEC section 8). All of them are fatal by design:
 // the store holds every device's credentials, so the only safe reaction to a file it cannot
 // read is to refuse — never to start from an empty store, which would silently sign every

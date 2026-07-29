@@ -257,6 +257,15 @@ if something required is missing:
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
   1.4.0 contract, see section 8) and is removed together with `/v1`.
+- `KEEP_ALIVE_REFRESH_INTERVAL_MS` (optional, default 86400000 — a day) — how often the keep-alive
+  loop renews every stored Audiobookshelf chain (section 8), and with it the boot pass's staleness
+  cutoff, since a chain is stale exactly when it missed a sweep. The daily default is what ADR-0001
+  decided and what a deployment should run; the knob exists because it is also the only lever that
+  makes the dead-chain path reachable on demand — a test deployment sets it low, restarts, and the
+  chains it holds count as stale immediately, instead of waiting out a day or pinning Audiobookshelf's
+  own token lifetimes short. Lowering it in production only adds upstream traffic: it buys no
+  resilience, since a chain already survives six missed sweeps. The jitter is not separately
+  configurable — it is a fraction of this interval, so the two cannot drift apart.
 - `SHUTDOWN_TIMEOUT_MS` (optional, default 5000) — upper bound on the graceful-shutdown drain
   (section 5); the process exits after this even if the final write is still hung.
 - `RESUME_REWIND_SECONDS` (optional, default 10) — resume this many seconds before the stored
@@ -304,11 +313,28 @@ re-login.
   that cannot be written all stop the boot while the operator is watching rather than
   surfacing later as one user's failed sign-in — opening it creates the file when absent,
   which is what makes the last of those visible at all.
-- **Keep-alive**: the server refreshes every stored ABS chain daily (jittered), refreshes
-  stale chains on boot, and refreshes on demand when an access token expires mid-use. A
-  chain now dies only if server↔ABS contact is lost for the entire ABS refresh window
-  (≥ 7 days by default) or on an ABS username change. Operator guidance: raise ABS's
-  `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days) if longer outages are expected.
+- **Keep-alive**: the server renews every stored ABS chain on three schedules, which between
+  them answer three different ways of losing one.
+  - **Daily, jittered**: one sweep a day, at a jittered offset, renewing every stored chain.
+    Within a sweep the chains are **spaced by over a second** each — below ABS 2.35.1 two
+    refreshes of the same user inside one second come back with the identical token (see the
+    sign-out note below), so a sweep that renewed the whole store at once would be the most
+    reliable way to collide the very chains it is keeping alive.
+  - **On boot**: the chains that missed a sweep because the server was down, stalest first —
+    those are the ones nearest the refresh window's edge, and the order is what decides which
+    survive a recovery that only gets halfway. Never blocking: a slow or unreachable ABS may
+    delay the first request, never the boot.
+  - **On demand**: the request path renews an access token that is at or past its own, much
+    shorter expiry, before the upstream call behind it runs. The daily sweep is about the
+    refresh token and says nothing about the access one, so without this a device returning
+    after a pause would meet a 401 the server could have avoided.
+
+  Renewals are serialized, and the one for a given entry is shared by everyone waiting on it:
+  ABS rotates the refresh token on use, so two concurrent renewals of one chain would spend
+  the same token twice and kill the chain they were renewing. A chain now dies only if
+  server↔ABS contact is lost for the entire ABS refresh window (≥ 7 days by default) or on an
+  ABS username change. Operator guidance: raise ABS's `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days)
+  if longer outages are expected.
 - **Dead chain, valid token**: the keep-alive loop marks a dead chain but keeps the entry,
   so the user's next request answers **401 with the machine-readable
   `code: "UPSTREAM_SESSION_LOST"`** in the error body instead of a generic "unknown
@@ -324,6 +350,18 @@ re-login.
   sign-in over a stale entry would lose a credential that does work. An offered token this
   server does not know is ignored — the route must never turn a valid sign-in into a 401 —
   and only the holder of a token can retire it this way, so no device can sign another out.
+  The half no client can do is the server's: a device whose chain died before it could offer
+  the token it is replacing leaves an entry **nobody can name**, since the login route is
+  unauthenticated. Marking the chain dead is what closes that too — a sign-in retires the
+  *dead* entries of the same ABS user, who has just proved the password, while their other
+  devices' live chains are untouched. Nothing goes upstream for those: the chain being retired
+  is gone, which is what "dead" records. What this cannot do is tell one dead entry of a user
+  from another, and the dominant death cause — an outage past the window — kills all of that
+  user's chains at once. So the first device back retires its siblings' entries too, and those
+  siblings then get the ordinary "signed out" 401 instead of the targeted prompt. Accepted
+  deliberately: both answers end with the same person typing the same password, while keeping
+  dead entries until each device happens to return would leave the store accumulating
+  credentials that can never work again.
 - **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
   immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
   killing exactly this device's ABS session; other devices and other ABS clients are
@@ -352,7 +390,11 @@ re-login.
   membership; the id is only usable through the authenticated playback endpoints.
 - **Upstream calls** use the session entry's ABS chain — so the library view and playback
   progress remain scoped to the ABS user who signed in, and the sync loop keeps writing
-  progress during long unattended playback without any client involvement. The media URLs
+  progress during long unattended playback without any client involvement. A playback session
+  is bound to the **entry**, not to the chain as it stood when playback started: it reads the
+  access token again on every write-back, so a chain the keep-alive loop renews mid-book
+  reaches a session that is already running. `/v1` keeps the opposite binding, and is entitled
+  to it — there the bearer *is* the upstream token and the sync loop rotates the pair itself. The media URLs
   handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).
 
@@ -365,10 +407,12 @@ serves this route alone), and the rotation handover, including the
 still owed. Everything else is implemented once and inherited by both majors, so the shared
 operations cannot drift apart by accident — with the consequence that **a change to a shared
 method changes `/v1` too**. `/v2`'s move from the caller's bearer to a session-resolved
-upstream token is exactly such a change, and belongs in an override on the `/v2` side rather
-than in the shared body. Until it lands, `/v2` still validates the bearer against ABS per
-request; what exists today is the seam that lets one major's auth model be replaced without
-touching the other's.
+upstream token is exactly such a change, and it is kept out of the shared body by living in
+the **token guard each mount is built with**: `/v2`'s resolves the bearer to a device session,
+renews its chain when the access token is due, and leaves the resulting upstream token — plus
+a way to read it again later, for a playback session that outlives the request — where every
+shared handler already looks. One major's auth model can therefore be replaced without
+touching the other's, and without either appearing in the operations they share.
 
 **The one thing the two majors share.** Not the handover — it cannot be armed or delivered
 under `/v2`, which has no field for it — but the single active playback session, of which there

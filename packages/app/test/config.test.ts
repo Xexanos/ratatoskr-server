@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { REFRESH_INTERVAL_MS } from '../src/auth/keepAlive.js'
 import { ConfigError, loadConfig } from '../src/config/index.js'
 
 const CERT = fileURLToPath(new URL('./fixtures/tls/cert.pem', import.meta.url))
@@ -45,11 +46,25 @@ describe('loadConfig', () => {
     expect(config.writePositionBackoffSeconds).toBe(2)
     expect(config.sonosRequestTimeoutMs).toBe(4000)
     expect(config.absRequestTimeoutMs).toBe(10000)
+    // A day, and read off the loop that owns it rather than restated here — the point of the
+    // assertion is that an unset variable leaves the shipped cadence alone.
+    expect(config.keepAliveRefreshIntervalMs).toBe(REFRESH_INTERVAL_MS)
     expect(config.tls).toBeUndefined()
     expect(config.sonosSeedHost).toBeUndefined()
     expect(config.validateResponses).toBe(false)
     expect(config.absCaCert).toBeUndefined()
     expect(config.absTlsInsecure).toBe(false)
+  })
+
+  // The one keep-alive knob (SPEC section 7): a test deployment shortens the interval so the chains
+  // it holds count as stale on the next boot, instead of waiting out a day to reach the dead-chain
+  // path. Validated like every other interval, so a typo cannot silently mean "never".
+  it('takes a keep-alive interval from the environment, and refuses a nonsensical one', () => {
+    expect(loadConfig({ ...REQUIRED, KEEP_ALIVE_REFRESH_INTERVAL_MS: '5000' }).keepAliveRefreshIntervalMs).toBe(5000)
+    expectConfigError(
+      { ...REQUIRED, KEEP_ALIVE_REFRESH_INTERVAL_MS: '0' },
+      'KEEP_ALIVE_REFRESH_INTERVAL_MS must be a positive number',
+    )
   })
 
   it('enables response validation only when VALIDATE_RESPONSES=true', () => {

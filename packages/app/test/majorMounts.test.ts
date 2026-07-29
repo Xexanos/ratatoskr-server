@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
-import type { SessionManager } from '../src/playback/sessionManager.js'
+import type { ListeningToken, SessionManager } from '../src/playback/sessionManager.js'
 import type { SonosClient } from '../src/sonos/client.js'
 import { ABS_CHAIN, buildTestApp, DEVICE_TOKEN, V2_AUTH } from './helpers/testApp.js'
 
@@ -26,6 +26,17 @@ const DOMAIN_SESSION = {
   rotatedTokens: undefined,
 }
 const ROTATED = { accessToken: 'new-access', refreshToken: 'new-refresh' }
+
+// SessionManager.start is handed *where* to read its listening token, not the token itself
+// (sessionManager.ts), so these two unwrap that: the supplier the last start was given, and what it
+// answers right now.
+function listeningOf(start: Mock): ListeningToken {
+  return (start.mock.lastCall as [ListeningToken])[0]
+}
+
+function startedOn(start: Mock): Promise<string> {
+  return listeningOf(start)()
+}
 
 function appWith(abs: Partial<AbsClient> = {}, sessions: Partial<SessionManager> = {}) {
   return buildTestApp({
@@ -149,13 +160,38 @@ describe('the rotation handover reaches /v1 only', () => {
     const payload = { itemId: 'li_1', speakerId: 'RINCON_1', refreshToken: 'r' }
 
     await app.inject({ method: 'PUT', url: '/v1/sessions/current', headers: AUTH, payload })
-    expect(start).toHaveBeenLastCalledWith('user-token', 'r', 'li_1', 'RINCON_1')
+    expect(start).toHaveBeenLastCalledWith(expect.any(Function), 'r', 'li_1', 'RINCON_1')
+    await expect(startedOn(start)).resolves.toBe('user-token')
 
     // Same body, and /v2 drops the refresh token — it has no handover to arm. The listening token is
     // the session's chain, not the caller's bearer, which is what keeps the sync loop writing
     // progress as the signed-in ABS user.
     await app.inject({ method: 'PUT', url: '/v2/sessions/current', headers: V2_AUTH, payload })
-    expect(start).toHaveBeenLastCalledWith(ABS_CHAIN.accessToken, undefined, 'li_1', 'RINCON_1')
+    expect(start).toHaveBeenLastCalledWith(expect.any(Function), undefined, 'li_1', 'RINCON_1')
+    await expect(startedOn(start)).resolves.toBe(ABS_CHAIN.accessToken)
+    await app.close()
+  })
+
+  // The longevity half of the same difference (SPEC section 8): /v1's session holds the pair it was
+  // handed and rotates it itself, while /v2's reads the store entry again on every use — so a chain
+  // the keep-alive loop renews mid-playback reaches a session that is already running, instead of
+  // that session writing progress with a token that expired hours ago.
+  it('lets a /v2 session pick up a chain renewed under it, and pins /v1 to the one it was given', async () => {
+    const start = vi.fn().mockResolvedValue(DOMAIN_SESSION)
+    const { app, store } = await appWith({}, { start })
+    const payload = { itemId: 'li_1', speakerId: 'RINCON_1' }
+
+    await app.inject({ method: 'PUT', url: '/v1/sessions/current', headers: AUTH, payload })
+    const v1Listening = listeningOf(start)
+    await app.inject({ method: 'PUT', url: '/v2/sessions/current', headers: V2_AUTH, payload })
+    const v2Listening = listeningOf(start)
+
+    // What the keep-alive loop's daily sweep does to a chain while its device is listening.
+    const renewed = { accessToken: 'abs-chain-access-2', refreshToken: 'abs-chain-refresh-2' }
+    await store.updateChain(store.find(DEVICE_TOKEN)!, renewed)
+
+    await expect(v2Listening()).resolves.toBe(renewed.accessToken)
+    await expect(v1Listening()).resolves.toBe('user-token')
     await app.close()
   })
 
