@@ -497,7 +497,8 @@ ratatoskr-server/
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
-│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the per-major version
+│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the credential-endpoint
+│   │   │                       #   rate limit (rateLimit.ts, section 14), the per-major version
 │   │   │                       #   mount (apiPrefix.ts), and mapping between the domain and the
 │   │   │                       #   contract types: contractMapping.ts is the one place
 │   │   │                       #   contract-shaped library and session values are built, and
@@ -592,11 +593,23 @@ Decisions (binding for the implementation):
   `Session`, until `/v1` sunsets. The error mapper strips URLs from upstream errors before
   they reach responses or logs. (Also note: ABS and any proxy in between will log
   media-URL query strings — one more reason those URLs carry only the streamer API key.)
-- **Rate-limit the credential endpoints.** `/auth/login` (and `/v1`'s `/auth/refresh`
-  while it is still served) get a conservative per-IP rate limit so Ratatoskr is not a
-  free brute-force funnel in front of ABS. The other unauthenticated endpoints (`/health`,
-  `GET /speakers`) take no credentials and stay unlimited — they serve cached local state
-  and are polled legitimately.
+- **The credential endpoints are rate-limited.** `/auth/login` on every served major, and `/v1`'s
+  `/auth/refresh` while it is still served, carry a conservative per-source-address limit (10
+  attempts per minute) so Ratatoskr is not a free brute-force funnel in front of ABS — which cannot
+  throttle by source itself, since every attempt reaches it from this server. The limited routes are
+  derived from each served document's operationIds, so an operation taking a credential is limited on
+  whichever major declares it. Refusals answer `429` in the contract's error shape, with a
+  `Retry-After`. The other unauthenticated endpoints (`/health`, `GET /speakers`) take no credentials
+  and stay unlimited — they serve cached local state and are polled legitimately, so a limit there
+  would turn a monitoring loop into an outage. Unrouted paths are not counted either: a stranger
+  spraying unknown URLs must not consume a real client's budget.
+  Two consequences worth knowing. The limit keys on the source address, so behind a reverse proxy —
+  which Ratatoskr neither configures nor trusts headers from — every client shares one bucket, so a
+  deployment that needs per-client limits should not put one in front of the credential routes. And
+  `429` is declared by the contract under development but **not** by the frozen `/v1` document, which
+  cannot gain a response: there the status is served undeclared, as a consequence of the freeze rather
+  than a choice. A `/v1` client that reads an unexpected `4xx` on login as "credentials rejected" will
+  prompt again instead of waiting — the one behaviour this costs.
 - **The session store is encrypted, keyed by the operator.** The per-device ABS chains and
   Ratatoskr token hashes (section 8) persist as a single AES-256-GCM file on the mounted
   volume, key from `SESSION_STORE_KEY` (mandatory — no key, no boot). A foreign container
