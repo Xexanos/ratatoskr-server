@@ -14,6 +14,7 @@
     "start": "node --env-file-if-exists=../../.env dist/main.js"
   },
   "dependencies": {
+    "@fastify/rate-limit": "^11.1.0",
     "@ratatoskr/contract": "workspace:*",
     "@ratatoskr/position": "workspace:*",
     "@svrooij/sonos": "^2.5.0",
