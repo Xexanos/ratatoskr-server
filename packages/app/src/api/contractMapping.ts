@@ -20,16 +20,15 @@ type Speaker = components['schemas']['Speaker']
 // promising anything new.
 type MappedSummary = LibraryItemSummary & { coverUrl: string | null }
 type MappedItem = LibraryItem & { coverUrl: string | null; progress: Progress }
-// A session as any major puts it on the wire. Note what is *not* here: the rotated Audiobookshelf
-// pair. It is 1.4.0's handover field, so minting it for every major would leave "no /v2 response
-// carries an upstream credential" — the property SPEC section 8 exists for — resting on
-// fast-json-stringify dropping a field absent from 2.0.0's response schema. A serializer is the wrong
-// place to hold a security guarantee: it would hold only for as long as every /v2 response has a
-// declared schema. So the field is minted on the /v1 path alone (toV1SessionResponse).
+// A session as a surface puts it on the wire. Note what is *not* here: the rotated Audiobookshelf
+// pair. Minting it unconditionally would leave "no upstream credential leaves on a surface that does
+// not promise one" — the property SPEC section 8 exists for — resting on fast-json-stringify dropping
+// a field absent from the response schema, and a serializer is the wrong place to hold a security
+// guarantee: it holds only as long as every response has a declared schema.
 export type MappedSession = Session & { item: MappedSummary }
-// The frozen /v1 addition: 1.4.0's Session carries the rotated pair when one is pending, and 2.0.0
-// dropped the field, so — like V1AuthTokens — the served surface's shape is declared here. Optional,
-// because it appears only while a handover is in flight.
+// The addition made by the one surface that does promise it (toV1SessionResponse). Declared here for
+// the same reason as V1AuthTokens, and optional because a pair exists only while a handover is in
+// flight.
 export type MappedV1Session = MappedSession & { rotatedTokens?: RotatedTokenPair | undefined }
 
 // The cover image is served by Ratatoskr's own cover-proxy route, so coverUrl points there rather
@@ -117,9 +116,9 @@ export function toSessionResponse(session: PlaybackSession, apiPrefix: string): 
   }
 }
 
-// The same session, plus the handover field only /v1 promises. Reached through the /v1 service's
-// mapSession override, so every session response on that major carries a pending pair and no
-// response on any other major can (see MappedSession).
+// The same session, plus the handover field. Reached only through the /v1 service's mapSession
+// override, which is what confines a pending pair to the surface that documents it (see
+// MappedSession).
 export function toV1SessionResponse(session: PlaybackSession, apiPrefix: string): MappedV1Session {
   return {
     ...toSessionResponse(session, apiPrefix),

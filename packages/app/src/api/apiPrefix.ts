@@ -11,10 +11,9 @@ export type ContractDocument = Record<string, unknown>
 // the API hands out, and the contract that documents them cannot drift apart — deriving it is what
 // makes that a guarantee rather than a note.
 //
-// Deliberately a function and no constant: with /v1 and /v2 both served, a module-level prefix would
-// be one major's answer given to both, which is how a /v1 client ends up holding a /v2 cover URL —
-// for a route its own frozen contract documents under /v1, and which, once #134 lands, its token
-// cannot open.
+// Deliberately a function and no constant: with more than one major served, a module-level prefix
+// would be one major's answer given to all of them, which is how a client ends up holding a URL into
+// a surface its own contract does not document.
 //
 // The URL is a server-variable template (`http://{host}:{port}/v2`), so the path is taken after the
 // authority rather than by parsing it as a URL: the braces are not valid host syntax.

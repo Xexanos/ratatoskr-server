@@ -3,9 +3,9 @@ import type { PlaybackSession } from '../../playback/sessionManager.js'
 import { toAuthTokens, toV1SessionResponse, type MappedV1Session, type V1AuthTokens } from '../contractMapping.js'
 import { ApiService } from '../service.js'
 
-// The 1.4.0-only request bodies. Declared here rather than derived from a contract: this surface is
-// frozen, so these shapes cannot change, and only the served document is generated for /v1 — no
-// types (see the contract package's index).
+// The request bodies this surface alone accepts. Declared here rather than derived: the frozen
+// document is generated as data only, with no types (see the contract package's index), and these
+// shapes cannot change anyway.
 interface V1LoginRequest {
   username: string
   password: string
@@ -23,25 +23,23 @@ interface V1StartSessionRequest {
   refreshToken?: string
 }
 
-// The /v1 surface: contract 1.4.0, frozen at the contract-1.4.0 tag and served in parallel until the
-// sunset in ADR-0001. Everything both majors share is inherited unchanged from the /v2 service, so
-// the shared operations cannot drift apart between them; what lives here is exactly what 2.0.0
-// dropped — the credential proxying and the rotation handover (the old protocol's specification
-// lives in the frozen contract, not in SPEC section 8, which now describes the /v2 model).
+// The /v1 surface: contract 1.4.0, frozen at the contract-1.4.0 tag (ADR-0001). What lives here is the
+// credential proxying and the rotation handover; everything else is inherited from the shared service,
+// so this file cannot drift away from it. The handover protocol itself is specified in the frozen
+// contract, not in the SPEC.
 //
-// The split is what keeps 2.0.0's `login` honest, not just tidy: both documents declare that
-// operationId at POST /auth/login, so glue would resolve /v2's to whichever method the service
-// carries. Were the proxy still inherited, a /v2 client calling the login its own contract documents
-// would be handed an Audiobookshelf access *and* refresh token — the one property ADR-0001 exists to
-// remove, served happily and wrong. Below, /v2 has no such method, so its login falls through to
-// glue's not-implemented stub until #134 mints Ratatoskr tokens there.
+// Why these operations live in a subclass rather than in the shared body: `login` is declared at
+// POST /auth/login by more than one contract, and glue resolves an operationId to whichever method the
+// service carries. Inherited, this proxy would answer another major's login with an Audiobookshelf
+// access *and* refresh token — an upstream credential on the device, which is the property ADR-0001
+// exists to remove.
 //
-// Nothing here is a new feature, and nothing here should grow: installed app versions depend on this
-// behaving exactly as it did, so the only change this file should ever see is its deletion (#137).
+// Nothing here is a new feature and nothing here should grow: installed app versions depend on it
+// behaving exactly as it does, so the only change this file should ever see is its deletion.
 export class V1ApiService extends ApiService {
   // Proxied login: the credentials go to ABS and the resulting token pair goes to the client, which
-  // then sends the access token as its bearer. That the device ends up holding upstream ABS tokens
-  // at all is the property ADR-0001 removes — under /v2 there is no such response.
+  // then sends the access token as its bearer. That the device ends up holding upstream ABS tokens at
+  // all is what ADR-0001 set out to remove, and why this surface is frozen instead of extended.
   async login(request: FastifyRequest): Promise<V1AuthTokens> {
     const { username, password } = request.body as V1LoginRequest
     return toAuthTokens(await this.abs.login(username, password))
@@ -54,16 +52,15 @@ export class V1ApiService extends ApiService {
   }
 
   // The one place the rotated Audiobookshelf pair is put on a wire. Every session response on this
-  // major goes through the shared methods' mapSession, so overriding it here — and only here — is what
-  // makes the handover a property of /v1 rather than of what the serializer happens to drop from a
-  // /v2 body (contractMapping.ts, service.ts).
+  // surface goes through the shared methods' mapSession, so this single override is what makes the
+  // handover a property of the surface that promises it (contractMapping.ts).
   protected override mapSession(session: PlaybackSession): MappedV1Session {
     return toV1SessionResponse(session, this.apiPrefix)
   }
 
   // The caller's refresh token is accepted and held for the session, which is what arms the rotation
   // handover in the sync loop (LISTENING_TOKEN_REFRESH_MARGIN_SECONDS, SPEC section 7 — that knob
-  // serves this route alone). /v2's startSession passes no refresh token at all.
+  // serves this route alone).
   override async startSession(request: FastifyRequest): Promise<MappedV1Session> {
     const { itemId, speakerId, refreshToken } = request.body as V1StartSessionRequest
     return this.mapSession(await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId))
@@ -78,13 +75,12 @@ export class V1ApiService extends ApiService {
       await reply.code(204).send()
       return
     }
-    // Bound to this major's own session type before handing it to send(), which takes `unknown`.
-    // Every other operation returns its body and so has the mapping step enforced by the method's
-    // return type; this is the one response here that does not, and an unmapped domain session would
-    // sail through both the serializer (it drops unknown keys) and response validation (coverUrl is
-    // optional). MappedV1Session, not the shared contract Session: 2.0.0 has no rotatedTokens, so
-    // annotating this with that type would check everything about the handover response except the
-    // field it exists to deliver.
+    // Bound to this surface's own session type before handing it to send(), which takes `unknown`.
+    // Every other operation has the mapping step enforced by its return type; this is the one response
+    // that does not, and an unmapped domain session would sail through both the serializer (it drops
+    // unknown keys) and response validation (coverUrl is optional). The shared contract type would not
+    // do: it has no rotatedTokens, so it would check everything about this response except the field it
+    // exists to deliver.
     const body: MappedV1Session = this.mapSession(final)
     await reply.code(200).send(body)
   }

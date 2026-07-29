@@ -9,9 +9,9 @@ declare module 'fastify' {
   }
 }
 
-// One handler per OpenAPI security scheme name, as fastify-openapi-glue expects. Named so a served
-// major can be assembled with its own set (app.ts): /v2's bearer becomes an opaque Ratatoskr token
-// under #134, which is a different check from /v1's, on the same scheme name.
+// One handler per OpenAPI security scheme name, as fastify-openapi-glue expects. Named so that each
+// served major is assembled with its own set (app.ts) — two majors can name the same scheme and mean
+// a different check by it.
 export type SecurityHandlers = Record<string, (request: FastifyRequest, reply: FastifyReply, scopes: string[]) => void>
 
 // Security handlers for fastify-openapi-glue: one method per OpenAPI security scheme name.

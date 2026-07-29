@@ -23,9 +23,9 @@ export type GuardOperation = (operationId: string, handler: OperationHandler) =>
 // name a bearer-protected operationId in the contract — createTokenGuard throws at startup
 // otherwise, so a renamed or re-secured operation cannot leave a stale exemption behind.
 //
-// Shared by both served majors, so an entry has to hold for both: one naming an operation only /v2
-// declares would fail /v1's startup check and take the whole process down with it — and the frozen
-// 1.4.0 document can never gain an operationId to fix that. A major-specific exemption goes through
+// Shared by every served major, so an entry has to hold for all of them: one naming an operation that
+// only some declare fails the others' startup check and takes the whole process down with it, and a
+// frozen document cannot gain an operationId to resolve that. Pass a major-specific exemption as
 // createTokenGuard's third argument instead; it must never be added here.
 export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
   'listLibraryItems', // forwards the token via abs.listItems

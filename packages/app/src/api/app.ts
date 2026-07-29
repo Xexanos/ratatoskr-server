@@ -114,8 +114,8 @@ interface ServedMajor {
 }
 
 // The list of majors served side by side, and the only place that knows there is more than one
-// (SPEC section 6). Two are served for the transition window ADR-0001 sets out; sunsetting /v1 (#137)
-// is removing its entry, and nothing downstream has to be revisited for that.
+// (SPEC section 6). A major is added or dropped by editing this list alone; nothing downstream has to
+// be revisited for it.
 //
 // Every entry is fully built before any of them is mounted, so a stale token-guard exemption fails
 // startup rather than the first request that happens to hit that major (tokenGuard.ts). Order between
@@ -132,8 +132,8 @@ function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
 
   return [
     {
-      // Contract 1.4.0, frozen at the contract-1.4.0 tag: what installed app versions talk to. Its
-      // service adds back the operations 2.0.0 dropped (v1/service.ts).
+      // Frozen at the contract-1.4.0 tag: the surface installed app versions talk to, which is why it
+      // is served from its own document and its own service (v1/service.ts).
       document: frozenV1Document,
       prefix: v1Prefix,
       service: new V1ApiService({ ...deps, apiPrefix: v1Prefix }),
@@ -141,11 +141,9 @@ function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
       guardOperation: absTokenGuard(frozenV1Document),
     },
     {
-      // The contract under development. Its bearer is still an Audiobookshelf access token; #134
-      // replaces that with an opaque Ratatoskr one, which is a change to this entry's guard and
-      // service — the seam exists so it can be made without touching /v1's. Both majors share one
-      // securityHandlers object today because the scheme name and the presence check are the same;
-      // the field is per-major so #134 can give /v2 its own without touching /v1's.
+      // The contract under development. Its bearer is an Audiobookshelf access token, checked the same
+      // way as the frozen major's — hence one shared securityHandlers object. Both are fields of this
+      // entry rather than module state, so a major's auth model is replaceable on its own.
       document: openapiDocument,
       prefix: v2Prefix,
       service: new ApiService({ ...deps, apiPrefix: v2Prefix }),
@@ -167,10 +165,10 @@ async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<voi
   await app.register(openapiGlue, {
     specification: major.document,
     // glue registers every path the document declares. Resolve each operationId to its service
-    // method; operations this major declares but does not implement get a stub that throws
-    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. That is how
-    // /v2's login and logout answer until #134 wires them to the session store — deliberately not
-    // by inheriting /v1's Audiobookshelf proxies (v1/service.ts).
+    // method; operations a major declares but does not implement get a stub that throws
+    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. Not answering
+    // such an operation at all is the point: a stand-in that merely looked right would be worse than a
+    // 404 (service.ts, on the absent login and logout).
     operationResolver: (operationId) => {
       const method = methods[operationId]
       return typeof method === 'function'

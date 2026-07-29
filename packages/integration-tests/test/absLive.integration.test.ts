@@ -138,9 +138,8 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
   // shared service's, so this is what would catch a mapping that conforms under one major and not the
   // other — /health alone cannot, since its shape is identical in both documents.
   //
-  // The token comes from /v1's login because /v2 has none yet (#134). That a /v2 request accepts an
-  // Audiobookshelf access token as its bearer is true only for this transition window; when #134 makes
-  // /v2 bearers opaque Ratatoskr tokens, this test's setup is what changes, and its assertions stay.
+  // The token comes from /v1's login because /v2 has none: both majors currently accept the same
+  // Audiobookshelf access token as a bearer, which is what makes this setup possible at all.
   it('GET /v2/library/items serves the same seeded book, conformant to 2.0.0', async () => {
     const res = await fetch(`${serverBase}/v2/library/items`, {
       headers: { authorization: `Bearer ${auth.accessToken}` },

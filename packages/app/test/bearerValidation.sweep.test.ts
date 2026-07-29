@@ -40,21 +40,19 @@ function rejectingAbs(): AbsClient {
 }
 
 // The sweep runs per served major, each against its own document and its own mount. The invariant is
-// the same for both — no bearer-protected operation acts on an unproven token — but the set of
-// operations is not, and neither is the guard: /v1's and /v2's are built from different documents,
-// and #134 replaces /v2's check entirely. A sweep over one major would leave the other's operations
-// outside the mechanism that enforces this, and /v1 is the one that must not quietly change.
+// the same for all of them — no bearer-protected operation acts on an unproven token — but the set of
+// operations is not, and neither is the guard, since each is built from its own document. A sweep over
+// one major would leave the others' operations outside the mechanism that enforces this.
 //
-// `expectedProtected` is written out rather than derived a second time: for /v1 it is a fact that can
-// never change (the document is frozen at the contract-1.4.0 tag), and for /v2 it is the thing a
-// contract edit should have to state on purpose.
+// `expectedProtected` is written out rather than derived a second time: for the frozen major it is a
+// fact that cannot change, and for the one under development it is something a contract edit should
+// have to state on purpose.
 //
-// `notImplemented` names operations the document declares and no service implements, so glue's
-// resolver answers them with the not-implemented stub — reached before any token check, hence 404
-// rather than 401. /v2's logout is the case: it is bearer-protected in 2.0.0 and waits on #134 to
-// mint the tokens it would revoke. It touches nothing upstream, so nothing acts on an unproven token
-// here either; the entry has to disappear when #134 implements it, or the sweep stops holding it to
-// 401 forever.
+// `notImplemented` names operations a document declares and no service implements, so glue's resolver
+// answers them with the not-implemented stub — reached before any token check, hence 404 rather than
+// 401. Such an operation touches nothing upstream, so nothing acts on an unproven token there either.
+// Implementing one means removing its entry here, which is what keeps the exemption from outliving the
+// reason for it.
 const MAJORS = [
   {
     prefix: '/v1',
@@ -174,14 +172,13 @@ it('has no fixture for an operation neither major protects', () => {
   expect(Object.keys(FIXTURES).filter((id) => !protectedSomewhere.has(id))).toEqual([])
 })
 
-// SELF_VALIDATING_OPERATIONS is the one piece of the guard both majors share, and createTokenGuard
+// SELF_VALIDATING_OPERATIONS is the one piece of the guard every major shares, and createTokenGuard
 // checks each entry against the document it is built for — so an entry that holds for only one major
-// does not fail that major, it throws while building the *other* one and takes the whole process down
-// at startup. The frozen 1.4.0 document can never gain an operationId to resolve such a mismatch.
+// does not fail that major, it throws while building another one and takes the whole process down at
+// startup. A frozen document cannot gain an operationId to resolve such a mismatch.
 //
-// Stated here as its own assertion rather than left to a boot crash: this names the constraint and
-// says which major is missing the operation, and it fails in one test instead of in every test that
-// builds an app.
+// Its own assertion rather than a boot crash: this names the constraint and says which major lacks the
+// operation, and it fails in one test instead of in every test that builds an app.
 it('shares no self-validating exemption that only one major protects', () => {
   const perMajor = MAJORS.map((major) => ({
     prefix: major.prefix,

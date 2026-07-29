@@ -55,11 +55,10 @@ describe('both majors are served from one process', () => {
   })
 })
 
-// The reason the /v1 surface lives in its own service rather than in the shared one. Both documents
-// declare `login` at POST /auth/login, so an inherited proxy would answer /v2's login with an
-// Audiobookshelf token pair — an upstream credential on the device, under a contract that promises an
-// opaque Ratatoskr token (ADR-0001). The assertion that matters is not the status code but that ABS
-// is never asked.
+// Both documents declare `login` at POST /auth/login, so an inherited proxy would answer /v2's login
+// with an Audiobookshelf token pair — an upstream credential on the device, under a contract that
+// promises an opaque Ratatoskr token (ADR-0001). The assertion that matters is not the status code but
+// that ABS is never asked.
 describe('the /v2 auth surface is not the /v1 one', () => {
   afterEach(() => vi.restoreAllMocks())
 
@@ -100,8 +99,9 @@ describe('the /v2 auth surface is not the /v1 one', () => {
     await app.close()
   })
 
-  // logout is declared by 2.0.0 and implemented by nothing yet (#134), so glue's resolver falls back
-  // to the not-implemented stub. /v1 never declared the route at all — same status, different reason.
+  // /v2 declares logout and nothing implements it, so glue's resolver falls back to the
+  // not-implemented stub. /v1 does not declare the route at all — same status, different reason, and
+  // worth pinning both so neither starts answering for the other's reason.
   it('answers /v2/auth/logout as not implemented, and /v1/auth/logout as unknown', async () => {
     const app = await appWith()
     const v2 = await app.inject({ method: 'POST', url: '/v2/auth/logout', headers: AUTH })
@@ -177,9 +177,9 @@ describe('the rotation handover reaches /v1 only', () => {
   })
 })
 
-// #134 replaces /v2's bearer with an opaque Ratatoskr token resolved to a stored ABS chain. That
-// changes methods the two majors share, so this pins the half that must not move: on /v1 the token
-// the caller sent is the token ABS sees.
+// The shared service methods read the caller's bearer and forward it upstream, so any change to how a
+// bearer is resolved reaches every major at once. This pins the half that must not move: on /v1 the
+// token the caller sent is the token ABS sees.
 describe('/v1 forwards the caller own bearer upstream', () => {
   afterEach(() => vi.restoreAllMocks())
 
