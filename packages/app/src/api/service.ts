@@ -73,7 +73,7 @@ export interface ApiServiceDeps {
 // because installed app versions run on it. The /v2 auth model (#134) resolves the upstream token
 // from a session entry instead of from `request.absToken`, which touches these methods — that
 // belongs in an override on the /v2 side, not in the shared body. What catches it either way is
-// test/v1Routes.test.ts, which pins /v1 to forwarding the caller's own bearer.
+// test/majorMounts.test.ts, which pins /v1 to forwarding the caller's own bearer.
 export class ApiService {
   protected readonly abs: AbsClient
   private readonly sonos: SonosClient

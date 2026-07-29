@@ -13,11 +13,19 @@ import type { FastifyReply, FastifyRequest } from 'fastify'
 //     handler, wired in buildApp's operationResolver.
 // A new contract operation is guarded by default — forgetting this module fails closed.
 
-type OperationHandler = (request: FastifyRequest, reply: FastifyReply) => unknown
+export type OperationHandler = (request: FastifyRequest, reply: FastifyReply) => unknown
+
+// What createTokenGuard returns: the wrap applied to every one of a major's handlers (app.ts).
+export type GuardOperation = (operationId: string, handler: OperationHandler) => OperationHandler
 
 // The operations whose handlers present the caller's token to ABS themselves. An entry must
 // name a bearer-protected operationId in the contract — createTokenGuard throws at startup
 // otherwise, so a renamed or re-secured operation cannot leave a stale exemption behind.
+//
+// Shared by both served majors, so an entry has to hold for both: one naming an operation only /v2
+// declares would fail /v1's startup check and take the whole process down with it — and the frozen
+// 1.4.0 document can never gain an operationId to fix that. A major-specific exemption goes through
+// createTokenGuard's third argument instead; it must never be added here.
 export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
   'listLibraryItems', // forwards the token via abs.listItems
   'getLibraryItem', // forwards the token via abs.getItem
@@ -67,7 +75,7 @@ export function createTokenGuard(
   document: Record<string, unknown>,
   validate: (token: string) => Promise<void>,
   selfValidating: ReadonlySet<string> = SELF_VALIDATING_OPERATIONS,
-): (operationId: string, handler: OperationHandler) => OperationHandler {
+): GuardOperation {
   const protectedIds = bearerProtectedOperationIds(document)
   for (const operationId of selfValidating) {
     if (!protectedIds.has(operationId)) {

@@ -1,17 +1,18 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
-import { frozenV1Document } from '@ratatoskr/contract'
+import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
-import { API_PREFIX } from './apiPrefix.js'
+import { versionPrefix } from './apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
-import { securityHandlers } from './security.js'
-import { createTokenGuard } from './tokenGuard.js'
+import { securityHandlers, type SecurityHandlers } from './security.js'
+import { ApiService, type ApiServiceDeps } from './service.js'
+import { createTokenGuard, type GuardOperation } from './tokenGuard.js'
 import { V1ApiService } from './v1/service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
@@ -91,34 +92,80 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     enableResponseValidation(app)
   }
 
-  // Routes, request/response schemas and per-operation auth are all derived from the contract
-  // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
-  // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
-  // The same API_PREFIX the routes are mounted under below, so the cover URLs the service mints can
-  // never drift from the mount they have to be resolvable against.
-  const service = new V1ApiService({ abs, sonos, sessions, apiPrefix: API_PREFIX })
-  const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
-  // Every bearer-protected operation proves the caller's token against ABS before acting —
-  // either its handler forwards the token itself (self-validating), or the guard runs
-  // validateToken first. Derived from the contract, so a new operation is guarded by default;
-  // throws at startup on a stale exemption (tokenGuard.ts).
-  const guardOperation = createTokenGuard(frozenV1Document, (token) => abs.validateToken(token))
+  for (const major of servedMajors({ abs, sonos, sessions })) await mountMajor(app, major)
+
+  return app
+}
+
+// One served major: its contract document and everything derived from it. Nothing outside this file
+// branches on a version — a request is answered by whichever mount it arrived on, with that mount's
+// own service, security handlers and guard.
+interface ServedMajor {
+  document: Record<string, unknown>
+  service: object
+  securityHandlers: SecurityHandlers
+  guardOperation: GuardOperation
+}
+
+// The list of majors served side by side, and the only place that knows there is more than one
+// (SPEC section 6). Two are served for the transition window ADR-0001 sets out; sunsetting /v1 (#137)
+// is removing its entry, and nothing downstream has to be revisited for that.
+//
+// Order matters only for startup: each entry's guard validates its own document's exemptions, so a
+// stale one fails the build of the app rather than the first request to hit it.
+function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
+  // Every bearer-protected operation proves the caller's token against ABS before acting — either
+  // its handler forwards the token itself (self-validating), or the guard runs validateToken first.
+  // Derived per document, so an operation only one major has is still guarded by default, and a
+  // stale exemption throws at startup (tokenGuard.ts).
+  const absTokenGuard = (document: Record<string, unknown>): GuardOperation =>
+    createTokenGuard(document, (token) => deps.abs.validateToken(token))
+
+  return [
+    {
+      // Contract 1.4.0, frozen at the contract-1.4.0 tag: what installed app versions talk to. Its
+      // service adds back the operations 2.0.0 dropped (v1/service.ts).
+      document: frozenV1Document,
+      service: new V1ApiService({ ...deps, apiPrefix: versionPrefix(frozenV1Document) }),
+      securityHandlers,
+      guardOperation: absTokenGuard(frozenV1Document),
+    },
+    {
+      // The contract under development. Its bearer is still an Audiobookshelf access token; #134
+      // replaces that with an opaque Ratatoskr one, which is a change to this entry's guard and
+      // service — the seam exists so it can be made without touching /v1's.
+      document: openapiDocument,
+      service: new ApiService({ ...deps, apiPrefix: versionPrefix(openapiDocument) }),
+      securityHandlers,
+      guardOperation: absTokenGuard(openapiDocument),
+    },
+  ]
+}
+
+// Registers one openapi-glue instance for a major: routes, request/response schemas and
+// per-operation auth all derived from its document (SPEC section 12). glue maps each operationId to
+// the matching service method and runs the matching securityHandler as a preHandler.
+//
+// The mount prefix comes from the same document the routes come from, so a major's routes and the
+// URLs its responses carry are resolvable against each other by construction (apiPrefix.ts).
+async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<void> {
+  const methods = major.service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   await app.register(openapiGlue, {
-    specification: frozenV1Document,
-    // glue registers every contract path. Resolve each operationId to its ApiService method;
-    // operations without one get a stub that throws NotImplementedError → 404, rather than
-    // glue's default notImplemented stub → 500.
+    specification: major.document,
+    // glue registers every path the document declares. Resolve each operationId to its service
+    // method; operations this major declares but does not implement get a stub that throws
+    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. That is how
+    // /v2's login and logout answer until #134 wires them to the session store — deliberately not
+    // by inheriting /v1's Audiobookshelf proxies (v1/service.ts).
     operationResolver: (operationId) => {
       const method = methods[operationId]
       return typeof method === 'function'
-        ? guardOperation(operationId, method.bind(service))
+        ? major.guardOperation(operationId, method.bind(major.service))
         : () => {
             throw new NotImplementedError()
           }
     },
-    securityHandlers,
-    prefix: API_PREFIX,
+    securityHandlers: major.securityHandlers,
+    prefix: versionPrefix(major.document),
   })
-
-  return app
 }
