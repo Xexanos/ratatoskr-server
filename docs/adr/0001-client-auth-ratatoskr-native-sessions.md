@@ -131,10 +131,16 @@ silent token exfiltration.
 
 ## Contract impact (named, not implemented — decided in [#128](https://github.com/Xexanos/ratatoskr-server/issues/128))
 
-- **Breaking cut: contract 2.0.0 under `/v2`.** The prefix lives in one place
-  (`servers.url`). The oasdiff CI job takes its one-time breaking-change flag at the cut.
-- **`/v1` transition window**: `/v1` stays served in parallel, frozen at the **1.4.0 git
-  tag** (the tag *is* the freeze; no second contract file). It may be removed in the first
+- **Breaking cut: contract 2.0.0 under `/v2`.** The prefix lives in one place per major
+  (`servers.url`), derived per mount. The oasdiff CI job reads the major and skips itself at the
+  cut, so no one-time breaking-change flag has to be set and then remembered.
+- **`/v1` transition window**: `/v1` stays served in parallel, frozen at the **`contract-1.4.0`
+  tag**. This revises the parenthesis that said the tag *is* the freeze with no second contract
+  file: what is mounted is a tracked copy at `contract/v1/openapi.yaml`, held byte-identical to the
+  tag by the `contract-freeze` CI job. Reading the tagged document during the image build would have
+  cost the build its hermetic property — `.git` is deliberately outside the build context — and given
+  the generate step a second code path; one CI gate is the cheaper half of that trade. It may be
+  removed in the first
   release ≥ 1 month after the `/v2` app is published; the removal commit is `feat!:`, so
   the server major falls out automatically. After sunset, every `/v1` route answers from an
   unauthenticated catch-all **410 Gone** with the contract error shape, code
