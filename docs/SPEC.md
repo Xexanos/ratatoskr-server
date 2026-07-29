@@ -320,6 +320,15 @@ re-login.
   killing exactly this device's ABS session; other devices and other ABS clients are
   untouched. Idempotent and best-effort: unknown token or unreachable ABS still answers
   204 (an orphaned ABS session expires on its own, since nobody refreshes it).
+  **Version caveat, verified live against the supported minimum:** "one ABS chain per
+  device login" holds only from an ABS *newer* than 2.26.0. On 2.26.0 two logins of the
+  same user come back with the **same** refresh token — one session row per user, not one
+  per login — so ending one chain ends that user's other devices too. Ratatoskr's own
+  tokens are unaffected (each device keeps its own store entry and stays signed in as far
+  as this server is concerned), but its upstream calls then fail until those devices
+  re-authenticate. Nothing here can repair that: it is which session ABS decides to hand
+  back. This contradicts one of ADR-0001's grounding facts, which recorded per-login
+  independence as code-verified on 2.26.0.
 - All endpoints require a valid Ratatoskr token except `/health`, `/auth/login`, and
   `GET /speakers`. The **token guard** is now an in-process hash lookup — no per-request
   ABS roundtrip — but keeps deriving the protected set from the contract, so a new

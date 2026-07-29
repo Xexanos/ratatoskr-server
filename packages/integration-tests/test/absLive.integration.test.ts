@@ -269,14 +269,21 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       expect((await fetch(`${serverBase}/v2/auth/logout`, { method: 'POST', headers })).status).toBe(204)
     })
 
-    // Sign-out is full-depth and per device (SPEC section 8): the chain Ratatoskr held is ended at
-    // ABS, and only that one. Verified against the live ABS on chains this test owns — the server's
-    // own chain is deliberately unreachable from out here, so what is under test is the call
-    // AbsClient.logout makes and what this ABS version does with it.
+    // Sign-out is full-depth (SPEC section 8): the chain Ratatoskr held is ended at ABS, not merely
+    // forgotten locally. Verified on chains this test owns — the server's own chain is deliberately
+    // unreachable from out here, so what is under test is the call AbsClient.logout makes and what
+    // this ABS version does with it.
     //
-    // Two chains, and the doomed one is never refreshed before it is ended: refreshing rotates the
-    // token in place, which would leave the logout naming a session that no longer matches.
-    it('ends exactly one Audiobookshelf chain upstream, leaving other devices alone', async () => {
+    // The doomed chain is never refreshed before it is ended: refreshing rotates the token in place,
+    // which would leave the logout naming a session that no longer matches.
+    //
+    // The *per-device* half of that promise turns out to be version-dependent, which is why it is
+    // asserted conditionally below. On ABS 2.26.0 (the supported minimum) two logins of one user come
+    // back with the SAME refresh token — one session row per user, not one per login — so ending one
+    // ends them all. Newer ABS issues an independent chain per login, and there sign-out really is
+    // per device. ADR-0001's "one ABS chain per device login, never shared" therefore describes the
+    // newer behaviour only; on 2.26.0 the model degrades to one shared chain per user.
+    it('ends the Audiobookshelf chain upstream, and only that one where ABS keeps them apart', async () => {
       const v1Login = async () =>
         (await (
           await fetch(`${serverBase}/v1/auth/login`, {
@@ -301,10 +308,15 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       })
       expect(ended.ok).toBe(true)
 
-      // That chain is dead — sign-out was not merely local forgetting...
+      // That chain is dead — sign-out was not merely local forgetting. Holds on every version.
       expect((await absRefresh(doomed.refreshToken)).status).toBe(401)
-      // ...and the other device's chain is untouched, which is the "exactly this device" half.
-      expect((await absRefresh(control.refreshToken)).ok).toBe(true)
+
+      // Only meaningful where the two logins actually got different chains (see above). Guarded on
+      // the upstream property itself rather than on a version string, so this starts asserting the
+      // moment the minimum ABS gains per-login sessions, and never asserts something ABS cannot do.
+      if (control.refreshToken !== doomed.refreshToken) {
+        expect((await absRefresh(control.refreshToken)).ok).toBe(true)
+      }
     })
   })
 })
