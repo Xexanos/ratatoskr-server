@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../src/api/app.js'
 import type { SonosClient } from '../src/sonos/client.js'
 import { SonosUpstreamError } from '../src/sonos/errors.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
@@ -16,8 +17,8 @@ const SPEAKERS = [
   { id: 'rincon_office', name: 'Office', isGroup: false },
 ]
 
-function appWith(sonos: Partial<SonosClient>) {
-  return buildApp(testConfig(), { sonosClient: sonos as SonosClient })
+async function appWith(sonos: Partial<SonosClient>) {
+  return buildApp(testConfig(), { sonosClient: sonos as SonosClient, sessionStore: await tempSessionStore() })
 }
 
 describe('GET /v1/speakers', () => {

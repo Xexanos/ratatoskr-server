@@ -1,6 +1,7 @@
 import type { FastifyError } from 'fastify'
 import { InvalidCursorError } from '../abs/cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from '../abs/errors.js'
+import { UnknownTokenError } from '../auth/errors.js'
 import { NoActiveSessionError } from '../playback/errors.js'
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
@@ -51,8 +52,10 @@ export function mapError(error: unknown): MappedError {
   if (isGlueSecurityError(error)) {
     return mapError(error.errors[0] ?? new MissingBearerError())
   }
-  if (error instanceof MissingBearerError) {
-    return { statusCode: 401, code: 'unauthorized', message: 'A valid Audiobookshelf token is required' }
+  // No bearer, or one naming no session: both mean "signed out" to a client, and the contract gives
+  // them one code deliberately (see UnknownTokenError) — hence one arm.
+  if (error instanceof MissingBearerError || error instanceof UnknownTokenError) {
+    return { statusCode: 401, code: 'unauthorized', message: 'A valid bearer token is required' }
   }
   if (error instanceof AbsAuthError) {
     return { statusCode: 401, code: 'unauthorized', message: 'Audiobookshelf rejected the credentials' }

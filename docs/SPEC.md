@@ -146,17 +146,14 @@ must build on:
   [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step with no
   deprecation markers, since `/v1` clients read the frozen 1.4.0 tag — and **1.4.0 under `/v1`**,
   frozen, until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED` stub). One
-  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service and
-  contract-derived token guard, and its own slot for security handlers (both majors share one set
-  today, since the scheme name and the presence check are identical); assembling that list is the only
-  place that knows there is more than one, so sunsetting `/v1` is removing an entry.
-- **Known gap during the transition window:** the `/v2` auth operations that need the session store
-  are declared by 2.0.0 and implemented by nothing, so they answer **404** — a status neither
-  operation declares. That is a deliberate, temporary breach of "implement it exactly": the
-  alternatives were to answer with an Audiobookshelf credential under a name that promises a
-  Ratatoskr one, or to document a 404 on `login` and `logout` that the finished surface will not have.
-  It is resolved by implementing them, not by amending the contract, and it is the one place `/v2`
-  knowingly lags this document.
+  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service,
+  security handlers and contract-derived token guard; assembling that list is the only place that knows
+  there is more than one, so sunsetting `/v1` is removing an entry. The two majors' **auth models are
+  genuinely different**, which is what those per-major slots are for: both name the same bearer scheme
+  and mean a different credential by it — an Audiobookshelf access token proved upstream on `/v1`, an
+  opaque Ratatoskr token resolved in process on `/v2` (section 8) — and each major's guard therefore
+  exempts a different set of operations. Everything a client does *with* its token is shared code, and
+  runs on whichever Audiobookshelf token that major's guard put on the request.
 - `/v1` is frozen at the **`contract-1.4.0`** tag, and what it mounts is a tracked copy of that
   document at `contract/v1/openapi.yaml`. The `contract-freeze` CI job is what makes that a freeze
   rather than a duplicate: it holds the copy byte-identical to the tag. The accident it exists for is
@@ -232,18 +229,30 @@ if something required is missing:
   `SEEK_RETRIES` (optional, default 2) — tuning knobs for section 4; defaults come from the
   spike findings there.
 - `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default 5).
-- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required once the `/v2` auth model lands,
-  mutually exclusive) — key for the encrypted session store (section 8), as a value or a
-  Docker-secret-compatible file path. A 256-bit key, base64- or hex-encoded (`openssl rand
-  -base64 32`); a trailing newline in the file variant is tolerated. Missing key → the server
-  refuses to boot; wrong key → a clear error, never silent data loss.
-- `SESSION_STORE_PATH` — where that store file lives (section 8). Deliberately without a default,
-  like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation is a
-  property of the deployment, and a wrong guess would silently sign every device out on the next
-  restart. The container entrypoint supplies it the same way it supplies the certificate paths,
-  pointing into the image's own `/data` volume (the server's own persistent state, so future
-  additions have somewhere to go without another rename) — separate from the certificate's
-  `/tls`, since the certificate is regenerable and the store is not (see section 8).
+- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required, mutually exclusive) — key for the
+  encrypted session store (section 8), as a value or a Docker-secret-compatible file path. A
+  256-bit key, base64- or hex-encoded (`openssl rand -base64 32`); a trailing newline in the file
+  variant is tolerated. Missing key → the server refuses to boot; wrong key → a clear error, never
+  silent data loss.
+  **A random value, not an operator-chosen passphrase, and deliberately so.** The point of encrypting
+  the store is that a copy of the *file* alone is worthless — a backup pulled off the host, a dataset
+  snapshot, a support bundle. Against that, the attack is offline and unlimited, so the only thing
+  standing in its way is the key's entropy: 256 random bits cannot be guessed, while a memorable
+  phrase realistically carries 40–70. A slow KDF (scrypt, Argon2id) would raise the cost per guess
+  but add no entropy, and what is behind the door is every signed-in device's ABS access *and*
+  refresh token. The ergonomic complaint a passphrase answers — "I have to keep a random string
+  somewhere" — is answered by `SESSION_STORE_KEY_FILE` instead: a password manager or `docker secret`
+  owns the file, and the operator never types or stores the value.
+- `SESSION_STORE_PATH` (required) — where that store file lives (section 8). Deliberately without
+  a default, like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation
+  is a property of the deployment, and a wrong guess would silently sign every device out on the
+  next restart. The container entrypoint supplies it the same way it supplies the certificate
+  paths, pointing into the image's own `/data` volume (the server's own persistent state, so
+  future additions have somewhere to go without another rename) — separate from the certificate's
+  `/tls`, since the certificate is regenerable and the store is not (see section 8). The
+  entrypoint also refuses to start when that directory is not a mounted volume: it would be
+  writable either way, and the store would then silently disappear on the next container
+  recreation.
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
@@ -290,7 +299,11 @@ re-login.
   fingerprint, while this file is irreplaceable and losing it signs every device out. That
   also makes the backup rule one sentence: back up `/data`, not the cert. The key is
   operator-supplied and mandatory (`SESSION_STORE_KEY`, section 7); without it the server
-  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14).
+  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14). The store is
+  opened during startup, not on first use, so a wrong key, a corrupt file and a directory
+  that cannot be written all stop the boot while the operator is watching rather than
+  surfacing later as one user's failed sign-in — opening it creates the file when absent,
+  which is what makes the last of those visible at all.
 - **Keep-alive**: the server refreshes every stored ABS chain daily (jittered), refreshes
   stale chains on boot, and refreshes on demand when an access token expires mid-use. A
   chain now dies only if server↔ABS contact is lost for the entire ABS refresh window
@@ -302,11 +315,32 @@ re-login.
   token". The app reacts with a targeted password prompt; re-login creates a fresh chain
   and a **new** token and deletes the old entry (no in-place repair). This failure is rare
   and loud — the inverse of the old model's frequent silent re-logins.
+  Mechanically, "deletes the old entry" is the client's doing: `POST /v2/auth/login` is
+  unauthenticated, but reads a bearer when one is offered and signs that session out once
+  the new one exists. So a re-authenticating device sends the token it is replacing and ends
+  up with exactly one session, while a first sign-in sends none. The old entry is retired
+  only *after* the new one exists, and only best-effort: a rejected password must not sign a
+  device out of a session that still works, and once the new token is live, failing the
+  sign-in over a stale entry would lose a credential that does work. An offered token this
+  server does not know is ignored — the route must never turn a valid sign-in into a 401 —
+  and only the holder of a token can retire it this way, so no device can sign another out.
 - **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
   immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
   killing exactly this device's ABS session; other devices and other ABS clients are
   untouched. Idempotent and best-effort: unknown token or unreachable ABS still answers
   204 (an orphaned ABS session expires on its own, since nobody refreshes it).
+  **Requires ABS ≥ 2.35.1 to be per device.** Before that release ABS minted the refresh
+  token from second-precision JWT timestamps with no per-session claim, so two sign-ins (or
+  two refreshes) of the same user inside the same second came back with the *identical*
+  token — the session rows were distinct, but the token that names a session at `POST
+  /logout` is not, so ending one chain ends the other
+  ([advplyr/audiobookshelf#5253](https://github.com/advplyr/audiobookshelf/issues/5253),
+  fixed in 2.35.1). Verified by probe: 2.26.0, 2.29.0, 2.31.0 and 2.35.0 collide, 2.35.1
+  does not. The affected device stays signed in as far as Ratatoskr is concerned — its token
+  and store entry are untouched — but its upstream calls fail until it re-authenticates.
+  Timing-dependent, so occasional rather than reproducible on an older ABS. Nothing here can
+  repair it; ADR-0001 carries the amended grounding fact and what it costs the keep-alive
+  loop.
 - All endpoints require a valid Ratatoskr token except `/health`, `/auth/login`, and
   `GET /speakers`. The **token guard** is now an in-process hash lookup — no per-request
   ABS roundtrip — but keeps deriving the protected set from the contract, so a new

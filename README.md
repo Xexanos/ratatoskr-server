@@ -84,22 +84,26 @@ cp .env.example .env
 
 The `dev` and `start` scripts load `.env` automatically (Node's `--env-file`). The full
 list of variables, with defaults, lives in [`.env.example`](.env.example). The required
-ones are `ABS_URL` and `ABS_STREAMER_API_KEY`; the server also
-requires TLS (`TLS_CERT_PATH` / `TLS_KEY_PATH`) unless you set `ALLOW_PLAIN_HTTP=true`,
-so credentials aren't sent in cleartext. On startup, any missing or invalid variable is
-reported — all problems at once — and the server refuses to run.
+ones are `ABS_URL`, `ABS_STREAMER_API_KEY`, and the encrypted session store's
+`SESSION_STORE_KEY` (or `SESSION_STORE_KEY_FILE`) plus `SESSION_STORE_PATH` — the store is
+what keeps devices signed in across a restart, so there is no useful mode without it. The
+server also requires TLS (`TLS_CERT_PATH` / `TLS_KEY_PATH`) unless you set
+`ALLOW_PLAIN_HTTP=true`, so credentials aren't sent in cleartext. On startup, any missing or
+invalid variable is reported — all problems at once — and the server refuses to run.
 
 ## Running with Docker
 
 The server ships as a single multi-arch container image published at
 `ghcr.io/xexanos/ratatoskr-server` (build details and the publishing pipeline are in
 [`docs/deploy.md`](docs/deploy.md)). To deploy it, download the single
-[`compose.yaml`](compose.yaml), set `ABS_URL` and `ABS_STREAMER_API_KEY` in its `environment:`
+[`compose.yaml`](compose.yaml), fill in the three required variables in its `environment:`
 block, and start it — you don't need the rest of the repository:
 
 ```sh
 curl -O https://raw.githubusercontent.com/Xexanos/ratatoskr-server/main/compose.yaml
-# edit ABS_URL + ABS_STREAMER_API_KEY in compose.yaml, then:
+openssl rand -base64 32          # the SESSION_STORE_KEY to paste in; keep a copy
+mkdir -p tls data                # both are bind-mounted; the container runs as uid 1000
+# edit ABS_URL + ABS_STREAMER_API_KEY + SESSION_STORE_KEY in compose.yaml, then:
 docker compose up -d
 ```
 

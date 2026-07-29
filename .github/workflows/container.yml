@@ -134,10 +134,17 @@ jobs:
           # Plain HTTP (no cert to manage) + an unreachable ABS (connection refused is a network
           # error, which the server tolerates at startup — it degrades and /health reports it). If a
           # dependency is broken on this arch, Node fails to load it and the listener never comes up.
+          # A named volume on /data plus a throwaway SESSION_STORE_KEY are what the encrypted session
+          # store needs to open at boot (SPEC section 8) — without both, the image refuses to start.
+          # This covers the accepting side of the entrypoint's mount probe only; its refusal path has
+          # no automated coverage (it would need a second, deliberately failing container run).
+          docker volume create smoke-data >/dev/null
           docker run -d --name smoke \
             -e ALLOW_PLAIN_HTTP=true \
             -e ABS_URL=http://127.0.0.1:1 -e ABS_ALLOW_PLAIN_HTTP=true \
             -e ABS_STREAMER_API_KEY=smoke-dummy \
+            -e SESSION_STORE_KEY="$(head -c 32 /dev/urandom | base64)" \
+            -v smoke-data:/data \
             -e PORT=8080 -p 8080:8080 ratatoskr-server:smoke
           # Wait for the listener on one major, then require the rest to answer too. Waiting on only
           # one is deliberate: all mounts are registered before the server listens, so a mount that
@@ -156,6 +163,7 @@ jobs:
           fi
           echo "--- container logs ---"; docker logs smoke || true
           docker rm -f smoke >/dev/null 2>&1 || true
+          docker volume rm smoke-data >/dev/null 2>&1 || true
           [ -n "$ok" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not come up on any of$prefixes"; exit 1; }
           [ -z "$missing" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not serve health on$missing"; exit 1; }
           echo "served health on$prefixes"

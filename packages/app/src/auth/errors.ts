@@ -1,3 +1,15 @@
+// The bearer names no session this server holds: it was never issued, or sign-out revoked it.
+// Distinct from a *missing* bearer only in wording — both mean "signed out" to a client, which is
+// why the contract gives them one code (`unauthorized`). The other 401 the contract can carry,
+// `UPSTREAM_SESSION_LOST`, is the opposite case (a live token over a dead upstream chain) and
+// belongs to the keep-alive loop, not here.
+export class UnknownTokenError extends Error {
+  constructor() {
+    super('This token names no session on this server')
+    this.name = 'UnknownTokenError'
+  }
+}
+
 // Errors from the encrypted session store (SPEC section 8). All of them are fatal by design:
 // the store holds every device's credentials, so the only safe reaction to a file it cannot
 // read is to refuse — never to start from an empty store, which would silently sign every
@@ -45,6 +57,22 @@ export class SessionStoreIoError extends SessionStoreError {
   constructor(path: string, options: { cause: unknown }) {
     super(`The session store at ${path} could not be read. Refusing to continue.`, options)
     this.name = 'SessionStoreIoError'
+  }
+}
+
+// The file could not be written. Separate from the read failure because the remedy is about the
+// *directory*, not the file — and because this is what a mistyped SESSION_STORE_PATH or an
+// unwritable volume looks like. Wrapped rather than left raw so it reaches the operator as an
+// actionable line at boot (main.ts) instead of a stack trace.
+export class SessionStoreWriteError extends SessionStoreError {
+  constructor(path: string, options: { cause: unknown }) {
+    super(
+      `The session store at ${path} could not be written. Check that its directory exists and is ` +
+        'writable by the user this server runs as (SESSION_STORE_PATH; in the container, the /data ' +
+        'volume). Refusing to continue.',
+      options,
+    )
+    this.name = 'SessionStoreWriteError'
   }
 }
 

@@ -2,30 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
-import { buildApp } from '../src/api/app.js'
 import { SELF_VALIDATING_OPERATIONS } from '../src/api/tokenGuard.js'
-import type { Config } from '../src/config/index.js'
 import type { SonosClient } from '../src/sonos/client.js'
-
-function testConfig(): Config {
-  return {
-    absUrl: 'http://abs.invalid',
-    absStreamerApiKey: 'streamer-key',
-    sonosSeedHost: undefined,
-    port: 0,
-    pollIntervalSeconds: 15,
-    seekSettleMs: 1000,
-    seekToleranceSeconds: 3,
-    seekRetries: 2,
-    progressWriteThresholdSeconds: 5,
-    tls: undefined,
-    validateResponses: true,
-  } as Config
-}
+import { buildTestApp } from './helpers/testApp.js'
 
 // Every ABS-touching method rejects like ABS does for a bad token, so whichever path an
 // operation takes to prove the caller's token — the token guard or its own upstream call —
-// the correct outcome for an invalid bearer is 401.
+// the correct outcome for an invalid bearer is 401. `logout` is here for the opposite reason: on the
+// tolerated path nothing should call it at all.
 function rejectingAbs(): AbsClient {
   const reject = () => vi.fn().mockRejectedValue(new AbsAuthError())
   return {
@@ -36,6 +20,8 @@ function rejectingAbs(): AbsClient {
     listInProgressItems: reject(),
     getPlaybackManifest: reject(),
     getProgress: reject(),
+    login: reject(),
+    logout: reject(),
   } as unknown as AbsClient
 }
 
@@ -48,11 +34,11 @@ function rejectingAbs(): AbsClient {
 // fact that cannot change, and for the one under development it is something a contract edit should
 // have to state on purpose.
 //
-// `notImplemented` names operations a document declares and no service implements, so glue's resolver
-// answers them with the not-implemented stub — reached before any token check, hence 404 rather than
-// 401. Such an operation touches nothing upstream, so nothing acts on an unproven token there either.
-// Implementing one means removing its entry here, which is what keeps the exemption from outliving the
-// reason for it.
+// `tolerated` names operations that are *defined* to answer normally for a bearer naming no session,
+// so 401 is the wrong expectation for them — sign-out is idempotent by contract, so that a client can
+// always complete a sign-out locally (tokenGuard.ts's UNKNOWN_TOKEN_TOLERANT_OPERATIONS). They still
+// require a bearer, and they still touch nothing upstream on an unknown one, which is what keeps them
+// inside the invariant rather than an exception to it — the assertions below check exactly that.
 const MAJORS = [
   {
     prefix: '/v1',
@@ -69,7 +55,7 @@ const MAJORS = [
       'startSession',
       'stopSession',
     ],
-    notImplemented: [] as string[],
+    tolerated: [] as string[],
   },
   {
     prefix: '/v2',
@@ -87,7 +73,7 @@ const MAJORS = [
       'startSession',
       'stopSession',
     ],
-    notImplemented: ['logout'],
+    tolerated: ['logout'],
   },
 ]
 
@@ -143,10 +129,10 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
   it.each(major.expectedProtected)('%s', async (operationId) => {
     const fixture = FIXTURES[operationId]
     if (fixture === undefined) throw new Error(`no fixture for ${operationId}`)
-    const app = await buildApp(testConfig(), {
-      absClient: rejectingAbs(),
-      sonosClient: {} as SonosClient,
-    })
+    const abs = rejectingAbs()
+    // No device signed in, and an empty store: the bearer below names no session on /v2 and is not a
+    // valid ABS token on /v1, so it is unproven on either surface — one request, one invariant.
+    const { app } = await buildTestApp({ absClient: abs, sonosClient: {} as SonosClient }, { signedIn: false })
     const res = await app.inject({
       method: fixture.method,
       url: `${major.prefix}${fixture.path}`,
@@ -154,9 +140,15 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
       ...(fixture.payload !== undefined ? { payload: fixture.payload } : {}),
     })
 
-    if (major.notImplemented.includes(operationId)) {
-      expect(res.statusCode).toBe(404)
-      expect(res.json().code).toBe('not_found')
+    if (major.tolerated.includes(operationId)) {
+      expect(res.statusCode).toBe(204)
+      // A tolerated operation is exempt from *rejecting* an unknown token, not from acting on one:
+      // sign-out has no chain to end when the token names no session, so nothing goes upstream.
+      // (On /v1 the opposite is true by design — proving the bearer there *is* an ABS call — so this
+      // assertion belongs to the tolerated path alone.)
+      for (const method of Object.values(abs as unknown as Record<string, unknown>)) {
+        if (typeof method === 'function') expect(method).not.toHaveBeenCalled()
+      }
     } else {
       expect(res.statusCode).toBe(401)
       expect(res.json().code).toBe('unauthorized')

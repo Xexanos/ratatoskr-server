@@ -92,11 +92,9 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  // No login and no logout here on purpose: both hand out or revoke the opaque Ratatoskr token, and
-  // nothing wires the session store (auth/sessionStore.ts) to them yet. Answering with an
-  // Audiobookshelf access token under that name would put an upstream credential on the device, the
-  // one property the model exists to remove (SPEC section 8), so glue's not-implemented stub answers
-  // instead of something that only looks right.
+  // No auth operations here: both majors declare `login` at POST /auth/login and mean incompatible
+  // things by it, so each one's auth model lives in its own subclass — see v1/service.ts, which
+  // carries the reasoning.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
@@ -153,8 +151,11 @@ export class ApiService {
     return this.mapSession(await this.sessions.current(request.absToken as string))
   }
 
-  // The contract declares no refresh token on this request, so the sync loop runs on the caller's
-  // access token alone and playback outlives it only as long as that token does.
+  // No refresh token is passed on, so the sync loop runs on whatever access token this request
+  // carried and playback outlives it only as long as that token does. On /v1 that is the caller's own
+  // bearer, since 1.4.0 declares no refresh token on this request; on /v2 it is the device session's
+  // chain, and renewing it mid-session belongs to the keep-alive loop, which does not exist yet —
+  // until it does, a session started on /v2 holds the access token it started with (SPEC section 8).
   async startSession(request: FastifyRequest): Promise<Session> {
     const { itemId, speakerId } = request.body as StartSessionRequest
     const session = await this.sessions.start(request.absToken as string, undefined, itemId, speakerId)

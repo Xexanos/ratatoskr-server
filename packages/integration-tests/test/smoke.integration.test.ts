@@ -1,12 +1,16 @@
 import { once } from 'node:events'
+import { statSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
   assertServerBuilt,
   cleanEnv,
   contractValidator,
   freePort,
+  sessionStoreEnv,
   spawnServer,
   stopServer,
   waitUntilReady,
@@ -17,6 +21,16 @@ import {
 // spoken to over real HTTP — no inject(), no fetch stubbing. This is the automated
 // version of the manual "boot it and curl /v1/health" verification, and it pins down
 // the one file no unit test executes: main.ts. The shared harness lives in helpers.ts.
+
+// An ABS that refuses the connection: a network error is tolerated at startup (the server degrades
+// and /health reports it), so this boots a server without needing a fake upstream — what the tests
+// using it are about happens after the ABS probe.
+const UNREACHABLE_ABS = {
+  ABS_URL: 'http://127.0.0.1:1',
+  ABS_ALLOW_PLAIN_HTTP: 'true',
+  ABS_STREAMER_API_KEY: 'streamer-key',
+  ALLOW_PLAIN_HTTP: 'true',
+}
 
 // Poll /v1/health until Sonos is no longer reported as probing (its `detail` moves on from
 // "probing, retry shortly"), so the test can assert the eventual, settled state rather than
@@ -67,6 +81,7 @@ describe('server process smoke test', () => {
         ALLOW_PLAIN_HTTP: 'true',
         ABS_ALLOW_PLAIN_HTTP: 'true',
         PORT: String(port),
+        ...sessionStoreEnv(),
       }),
     )
     await waitUntilReady(running, port)
@@ -134,6 +149,7 @@ describe('server process smoke test', () => {
         ALLOW_PLAIN_HTTP: 'true',
         ABS_ALLOW_PLAIN_HTTP: 'true',
         PORT: String(await freePort()),
+        ...sessionStoreEnv(),
       }),
     )
     const [code] = (await once(running.child, 'exit')) as [number | null]
@@ -156,6 +172,7 @@ describe('server process smoke test', () => {
         ALLOW_PLAIN_HTTP: 'true',
         ABS_ALLOW_PLAIN_HTTP: 'true',
         PORT: String(await freePort()),
+        ...sessionStoreEnv(),
       }),
     )
     const [code] = (await once(running.child, 'exit')) as [number | null]
@@ -173,5 +190,64 @@ describe('server process smoke test', () => {
     expect(stderr).toContain('ABS_URL is required')
     expect(stderr).toContain('ABS_STREAMER_API_KEY is required')
     expect(stderr).toContain('no TLS configured')
+    // Without the store there is nowhere to keep who is signed in, so it is required too
+    // (SPEC section 8) — and unset is reported at boot, not at the first sign-in.
+    expect(stderr).toContain('SESSION_STORE_KEY (or SESSION_STORE_KEY_FILE) is required')
+    expect(stderr).toContain('SESSION_STORE_PATH is required')
+  })
+
+  // The three store failures below all happen at boot rather than at a user's first sign-in, which
+  // is the point of opening it during startup (SPEC section 8). ABS is deliberately unreachable
+  // here — a network error is tolerated at startup, so the store check is what the server gets to.
+  it('refuses to start when the session store file cannot be written', async () => {
+    running = spawnServer(
+      cleanEnv({
+        ...UNREACHABLE_ABS,
+        PORT: String(await freePort()),
+        ...sessionStoreEnv(),
+        SESSION_STORE_PATH: join(tmpdir(), 'rtk-smoke-absent-dir', 'sessions.enc'),
+      }),
+    )
+    const [code] = (await once(running.child, 'exit')) as [number | null]
+
+    expect(code).toBe(1)
+    expect(running.stderr()).toContain('could not be written')
+  })
+
+  it('refuses to start on a store it cannot decrypt, rather than starting from an empty one', async () => {
+    // A store this server itself wrote at boot, then a restart under a different key — an operator
+    // who rotated or lost SESSION_STORE_KEY. Starting empty would sign every device out silently,
+    // so the only safe answer is to refuse and keep the file.
+    const store = sessionStoreEnv()
+    const port = await freePort()
+    running = spawnServer(cleanEnv({ ...UNREACHABLE_ABS, PORT: String(port), ...store }))
+    await waitUntilReady(running, port)
+    await stopServer(running)
+
+    running = spawnServer(
+      cleanEnv({
+        ...UNREACHABLE_ABS,
+        PORT: String(await freePort()),
+        ...store,
+        SESSION_STORE_KEY: Buffer.alloc(32, 0x07).toString('base64'),
+      }),
+    )
+    const [code] = (await once(running.child, 'exit')) as [number | null]
+
+    expect(code).toBe(1)
+    const stderr = running.stderr()
+    expect(stderr).toContain('cannot be decrypted with the configured SESSION_STORE_KEY')
+    expect(stderr).toContain('Refusing to continue')
+  })
+
+  it('creates the store file at boot, so an unwritable volume cannot go unnoticed', async () => {
+    const store = sessionStoreEnv()
+    const port = await freePort()
+    running = spawnServer(cleanEnv({ ...UNREACHABLE_ABS, PORT: String(port), ...store }))
+    await waitUntilReady(running, port)
+
+    // Present before any request has been served — the store's own write path is what proves the
+    // configured directory is real and writable.
+    expect(statSync(store.SESSION_STORE_PATH).isFile()).toBe(true)
   })
 })

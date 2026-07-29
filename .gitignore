@@ -23,6 +23,9 @@ npm-debug.log*
 .env.*
 !.env.example
 
+# Local dev state — where .env.example points the encrypted session store for `pnpm dev`
+.local/
+
 # Editor / OS
 .idea/
 .vscode/

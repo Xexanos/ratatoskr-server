@@ -1,6 +1,7 @@
 import { AbsClient } from './abs/client.js'
 import { buildAbsDispatcher } from './abs/transport.js'
 import { buildApp } from './api/app.js'
+import { SessionStoreError } from './auth/errors.js'
 import { ConfigError, loadConfig } from './config/index.js'
 import { SonosClient } from './sonos/client.js'
 
@@ -53,7 +54,20 @@ async function main(): Promise<void> {
       process.exit(1)
     }
   }
-  const app = await buildApp(config, { absClient: abs, sonosClient: sonos })
+  // buildApp opens the encrypted session store (SPEC section 8). Every way that can fail — a wrong
+  // key, an unreadable or corrupt file, a directory that cannot be written — is fatal by design:
+  // starting from an empty store would silently sign every device out. Report it the way a config
+  // problem is reported, since to an operator that is what it is.
+  let app
+  try {
+    app = await buildApp(config, { absClient: abs, sonosClient: sonos })
+  } catch (err) {
+    if (err instanceof SessionStoreError) {
+      console.error(err.message)
+      process.exit(1)
+    }
+    throw err
+  }
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw
   // unhandled rejection instead of the same clean, formatted exit the config path gives.

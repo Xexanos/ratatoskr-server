@@ -4,6 +4,7 @@ import type { AbsClient } from '../src/abs/client.js'
 import { buildApp } from '../src/api/app.js'
 import { CREDENTIAL_ATTEMPTS_PER_WINDOW, CREDENTIAL_OPERATIONS, credentialPaths } from '../src/api/rateLimit.js'
 import type { SonosClient } from '../src/sonos/client.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 // SPEC section 14: the credential endpoints carry a conservative per-source-address limit so
@@ -13,10 +14,11 @@ import { testConfig } from './helpers/testConfig.js'
 const CREDENTIALS = { username: 'lars', password: 'wrong' }
 const TOKENS = { accessToken: 'a', refreshToken: 'r', user: { id: '42', username: 'lars' } }
 
-function appWith(abs: Partial<AbsClient> = {}) {
+async function appWith(abs: Partial<AbsClient> = {}) {
   return buildApp(testConfig(), {
     absClient: {
       login: vi.fn().mockResolvedValue(TOKENS),
+      logout: vi.fn().mockResolvedValue(undefined),
       refresh: vi.fn().mockResolvedValue(TOKENS),
       probe: vi.fn().mockResolvedValue('ok'),
       ...abs,
@@ -25,6 +27,8 @@ function appWith(abs: Partial<AbsClient> = {}) {
       isReachable: vi.fn().mockResolvedValue(true),
       listSpeakers: vi.fn().mockResolvedValue([]),
     } as unknown as SonosClient,
+    // A successful /v2 sign-in writes a session, so these need a store they may actually write to.
+    sessionStore: await tempSessionStore(),
   })
 }
 

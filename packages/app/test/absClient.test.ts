@@ -86,6 +86,41 @@ describe('AbsClient', () => {
     })
   })
 
+  // Sign-out's upstream half (SPEC section 8). The header pair is the whole substance of the call: the
+  // refresh token names the session to close and the access token authenticates the request, so a
+  // regression in either would silently leave chains alive at ABS after every sign-out. That this ABS
+  // version really ends the chain on these headers is pinned separately, against a live server
+  // (absLive.integration.test.ts) — a stub can only pin what we send.
+  describe('logout', () => {
+    it('posts to /logout with the chain refresh token and its access token', async () => {
+      const mock = stubFetch(() => jsonResponse({ redirect_url: null }))
+      await new AbsClient(BASE).logout({ accessToken: 'access-1', refreshToken: 'refresh-1' })
+
+      const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${BASE}/logout`)
+      expect(init.method).toBe('POST')
+      const headers = init.headers as Record<string, string>
+      expect(headers['x-refresh-token']).toBe('refresh-1')
+      expect(headers.authorization).toBe('Bearer access-1')
+    })
+
+    // The caller (AuthService) treats every failure as best-effort, so what matters here is only that
+    // failures surface as the domain errors rather than something unrecognizable.
+    it('maps a rejected chain to AbsAuthError and an unreachable ABS to AbsUpstreamError', async () => {
+      stubFetch(() => new Response(null, { status: 401 }))
+      await expect(new AbsClient(BASE).logout({ accessToken: 'a', refreshToken: 'r' })).rejects.toBeInstanceOf(
+        AbsAuthError,
+      )
+
+      stubFetch(() => {
+        throw new Error('ECONNREFUSED')
+      })
+      await expect(new AbsClient(BASE).logout({ accessToken: 'a', refreshToken: 'r' })).rejects.toBeInstanceOf(
+        AbsUpstreamError,
+      )
+    })
+  })
+
   describe('probe', () => {
     it('reports ok for a genuine Audiobookshelf /ping', async () => {
       const mock = stubFetch(() => jsonResponse({ success: true }))

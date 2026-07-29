@@ -1,12 +1,16 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
-import { frozenV1Document } from '@ratatoskr/contract'
-import { createTokenGuard, SELF_VALIDATING_OPERATIONS } from '../src/api/tokenGuard.js'
+import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
+import {
+  createTokenGuard,
+  SELF_VALIDATING_OPERATIONS,
+  UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
+} from '../src/api/tokenGuard.js'
 
 // A minimal contract shape: global bearer security, one op inheriting it, one opting out,
-// one bearer-protected op that will be exempted as self-validating, and one secured by a
-// different scheme — which the guard must leave alone (only the bearerAuth handler sets
-// request.absToken, so a bearer check against it would 401 unconditionally).
+// one bearer-protected op that will be exempted, and one secured by a different scheme — which the
+// guard must leave alone (its own scheme's handler stashes whatever `prove` would read, so proving
+// it here would reject it unconditionally).
 const DOCUMENT: Record<string, unknown> = {
   security: [{ bearerAuth: [] }],
   paths: {
@@ -26,69 +30,69 @@ const reply = {} as FastifyReply
 describe('createTokenGuard', () => {
   it('wraps a bearer-protected operation: validates the token, then delegates', async () => {
     const calls: string[] = []
-    const validate = vi.fn(async (token: string) => {
-      calls.push(`validate:${token}`)
+    const prove = vi.fn(async (request: FastifyRequest) => {
+      calls.push(`prove:${request.absToken}`)
     })
     const handler = vi.fn(async () => {
       calls.push('handler')
       return 'result'
     })
-    const guard = createTokenGuard(DOCUMENT, validate, new Set(['selfOp']))
+    const guard = createTokenGuard(DOCUMENT, prove, new Set(['selfOp']))
 
     const wrapped = guard('guardedOp', handler)
     await expect(wrapped(request('token-1'), reply)).resolves.toBe('result')
-    // Validation strictly precedes the handler — the whole point of the guard.
-    expect(calls).toEqual(['validate:token-1', 'handler'])
+    // Proving strictly precedes the handler — the whole point of the guard.
+    expect(calls).toEqual(['prove:token-1', 'handler'])
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ absToken: 'token-1' }), reply)
   })
 
-  it('propagates a validation failure without invoking the handler', async () => {
+  it('propagates a proving failure without invoking the handler', async () => {
     const failure = new Error('invalid token')
-    const validate = vi.fn().mockRejectedValue(failure)
+    const prove = vi.fn().mockRejectedValue(failure)
     const handler = vi.fn()
-    const guard = createTokenGuard(DOCUMENT, validate, new Set(['selfOp']))
+    const guard = createTokenGuard(DOCUMENT, prove, new Set(['selfOp']))
 
     await expect(guard('guardedOp', handler)(request('bad'), reply)).rejects.toBe(failure)
     expect(handler).not.toHaveBeenCalled()
   })
 
-  it('returns unprotected and self-validating handlers unchanged', () => {
-    const validate = vi.fn()
+  it('returns unprotected and exempt handlers unchanged', () => {
+    const prove = vi.fn()
     const handler = vi.fn()
-    const guard = createTokenGuard(DOCUMENT, validate, new Set(['selfOp']))
+    const guard = createTokenGuard(DOCUMENT, prove, new Set(['selfOp']))
 
     // Identity, not just equivalence: no wrapper means no behaviour to reason about.
     expect(guard('openOp', handler)).toBe(handler)
     expect(guard('selfOp', handler)).toBe(handler)
     // Unknown operationIds (glue's NotImplemented stubs) pass through untouched too.
     expect(guard('unknownOp', handler)).toBe(handler)
-    expect(validate).not.toHaveBeenCalled()
+    expect(prove).not.toHaveBeenCalled()
   })
 
   it('leaves an operation secured by a non-bearer scheme alone', () => {
-    const validate = vi.fn()
+    const prove = vi.fn()
     const handler = vi.fn()
-    const guard = createTokenGuard(DOCUMENT, validate, new Set(['selfOp']))
+    const guard = createTokenGuard(DOCUMENT, prove, new Set(['selfOp']))
 
     // Secured, but not by bearerAuth: no absToken is stashed for it, so a bearer check
     // would reject it unconditionally. Its own scheme's handler is responsible for it.
     expect(guard('otherSchemeOp', handler)).toBe(handler)
-    // And exempting it as self-validating is a category error the startup assertion rejects.
-    expect(() => createTokenGuard(DOCUMENT, validate, new Set(['otherSchemeOp']))).toThrow(/otherSchemeOp/)
+    // And exempting it is a category error the startup assertion rejects.
+    expect(() => createTokenGuard(DOCUMENT, prove, new Set(['otherSchemeOp']))).toThrow(/otherSchemeOp/)
   })
 
-  it('rejects a self-validating entry that is not a bearer-protected operation', () => {
-    const validate = vi.fn()
+  it('rejects an exempt entry that is not a bearer-protected operation', () => {
+    const prove = vi.fn()
     // A renamed/removed operation must not leave a stale exemption behind.
-    expect(() => createTokenGuard(DOCUMENT, validate, new Set(['goneOp']))).toThrow(/goneOp/)
+    expect(() => createTokenGuard(DOCUMENT, prove, new Set(['goneOp']))).toThrow(/goneOp/)
     // Exempting an operation that carries no bearer requirement is equally stale.
-    expect(() => createTokenGuard(DOCUMENT, validate, new Set(['openOp']))).toThrow(/openOp/)
+    expect(() => createTokenGuard(DOCUMENT, prove, new Set(['openOp']))).toThrow(/openOp/)
   })
 
   it('accepts the real contract and the real exemption set', () => {
     // The startup assertion must hold for the shipped contract — this is the test that fails
     // when an operation in SELF_VALIDATING_OPERATIONS is renamed or its security changes.
-    expect(() => createTokenGuard(frozenV1Document, vi.fn())).not.toThrow()
+    expect(() => createTokenGuard(frozenV1Document, vi.fn(), SELF_VALIDATING_OPERATIONS)).not.toThrow()
     // The exemptions are exactly the handlers that present the caller's token to ABS themselves.
     expect([...SELF_VALIDATING_OPERATIONS].sort()).toEqual([
       'getLibraryItem',
@@ -97,5 +101,20 @@ describe('createTokenGuard', () => {
       'listLibraryItems',
       'startSession',
     ])
+  })
+
+  // /v2's own set, and the reason it is a different one: no handler there forwards the caller's
+  // bearer upstream, so nothing is self-validating and every operation needs the resolved session.
+  // What is left is the one operation the contract defines as idempotent.
+  it('accepts the /v2 contract with its own exemption set, and exempts only sign-out', () => {
+    expect(() => createTokenGuard(openapiDocument, vi.fn(), UNKNOWN_TOKEN_TOLERANT_OPERATIONS)).not.toThrow()
+    expect([...UNKNOWN_TOKEN_TOLERANT_OPERATIONS]).toEqual(['logout'])
+  })
+
+  // The two sets are not interchangeable: on /v2 the guard is also what resolves the caller's chain,
+  // so exempting the library operations there would leave them running with no absToken at all rather
+  // than rejecting. Pinning the difference is cheaper than discovering it from a 500.
+  it('keeps the two majors exemption sets distinct', () => {
+    expect([...SELF_VALIDATING_OPERATIONS].sort()).not.toEqual([...UNKNOWN_TOKEN_TOLERANT_OPERATIONS].sort())
   })
 })

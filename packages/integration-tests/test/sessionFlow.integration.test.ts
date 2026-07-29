@@ -5,6 +5,7 @@ import {
   cleanEnv,
   contractValidator,
   freePort,
+  sessionStoreEnv,
   spawnServer,
   stopServer,
   waitUntilReady,
@@ -81,6 +82,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
         RESUME_REWIND_SECONDS: '0',
         WRITE_POSITION_BACKOFF_SECONDS: '0',
         PORT: String(port),
+        ...sessionStoreEnv(),
       }),
     )
     await waitUntilReady(server, port)

@@ -1,20 +1,28 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
 import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
 import { versionPrefix, type ContractDocument } from './apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
+import { AuthService } from '../auth/authService.js'
+import { SessionStore } from '../auth/sessionStore.js'
 import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
 import { credentialPaths, enableCredentialRateLimit } from './rateLimit.js'
-import { securityHandlers, type SecurityHandlers } from './security.js'
-import { ApiService, type ApiServiceDeps } from './service.js'
-import { createTokenGuard, type GuardOperation } from './tokenGuard.js'
+import { absBearerHandlers, ratatoskrBearerHandlers, type SecurityHandlers } from './security.js'
+import type { ApiService } from './service.js'
+import {
+  createTokenGuard,
+  SELF_VALIDATING_OPERATIONS,
+  UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
+  type GuardOperation,
+} from './tokenGuard.js'
 import { V1ApiService } from './v1/service.js'
+import { V2ApiService, type V2ApiServiceDeps } from './v2/service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -38,6 +46,8 @@ export interface BuildAppOptions {
   absClient?: AbsClient
   sonosClient?: SonosClient
   sessionManager?: SessionManager
+  // A store on a throwaway file, so a test does not write the configured one (test/helpers).
+  sessionStore?: SessionStore
 }
 
 export async function buildApp(config: Config, options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -75,6 +85,12 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     options.absClient ?? new AbsClient(config.absUrl, buildAbsDispatcher(config), config.absRequestTimeoutMs, app.log)
   const sonos = options.sonosClient ?? new SonosClient(config.sonosSeedHost, undefined, config.sonosRequestTimeoutMs)
   const sessions = options.sessionManager ?? new SessionManager({ abs, sonos, config })
+  // Opened here, as part of startup wiring, so a wrong key, an unreadable file or a directory that
+  // cannot be written stops the boot rather than surfacing at some user's first sign-in — the store
+  // creates its file when absent, which is what makes the last of those visible (SPEC section 8).
+  // main.ts turns the resulting SessionStoreError into one actionable line.
+  const store = options.sessionStore ?? (await SessionStore.open({ path: config.sessionStorePath, key: config.sessionStoreKey }))
+  const auth = new AuthService(abs, store)
   // On shutdown, stop any active session (writes the final position back to ABS) before releasing
   // the Sonos subscription. Best-effort and optional-chained so injected Partial fakes are fine.
   app.addHook('onClose', async () => {
@@ -93,7 +109,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     enableResponseValidation(app)
   }
 
-  const majors = servedMajors({ abs, sonos, sessions })
+  const majors = servedMajors({ abs, sonos, sessions, auth })
   // Before the mounts: the limit attaches as a per-route hook, so it has to be in place by the time
   // openapi-glue registers the routes it applies to (rateLimit.ts).
   await enableCredentialRateLimit(
@@ -128,13 +144,7 @@ interface ServedMajor {
 // Every entry is fully built before any of them is mounted, so a stale token-guard exemption fails
 // startup rather than the first request that happens to hit that major (tokenGuard.ts). Order between
 // the entries carries no meaning.
-function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
-  // Every bearer-protected operation proves the caller's token against ABS before acting — either
-  // its handler forwards the token itself (self-validating), or the guard runs validateToken first.
-  // Derived per document, so an operation only one major has is still guarded by default.
-  const absTokenGuard = (document: ContractDocument): GuardOperation =>
-    createTokenGuard(document, (token) => deps.abs.validateToken(token))
-
+function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
   const v1Prefix = versionPrefix(frozenV1Document)
   const v2Prefix = versionPrefix(openapiDocument)
 
@@ -145,20 +155,40 @@ function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
       document: frozenV1Document,
       prefix: v1Prefix,
       service: new V1ApiService({ ...deps, apiPrefix: v1Prefix }),
-      securityHandlers,
-      guardOperation: absTokenGuard(frozenV1Document),
+      // The bearer is an Audiobookshelf access token, and ABS is the sole authority on whether it is
+      // still valid, so proving it costs an upstream call — skipped for the handlers that make one
+      // anyway (SELF_VALIDATING_OPERATIONS).
+      securityHandlers: absBearerHandlers,
+      guardOperation: createTokenGuard(
+        frozenV1Document,
+        (request) => deps.abs.validateToken(request.absToken as string),
+        SELF_VALIDATING_OPERATIONS,
+      ),
     },
     {
-      // The contract under development. Its bearer is an Audiobookshelf access token, checked the same
-      // way as the frozen major's — hence one shared securityHandlers object. Both are fields of this
-      // entry rather than module state, so a major's auth model is replaceable on its own.
+      // The Ratatoskr-native surface (ADR-0001): the bearer is an opaque token this server issued, so
+      // proving it is an in-process store lookup and no request path reaches ABS to authenticate.
       document: openapiDocument,
       prefix: v2Prefix,
-      service: new ApiService({ ...deps, apiPrefix: v2Prefix }),
-      securityHandlers,
-      guardOperation: absTokenGuard(openapiDocument),
+      service: new V2ApiService({ ...deps, apiPrefix: v2Prefix }),
+      securityHandlers: ratatoskrBearerHandlers,
+      guardOperation: createTokenGuard(
+        openapiDocument,
+        resolveDeviceSession(deps.auth),
+        UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
+      ),
     },
   ]
+}
+
+// /v2's `prove`: turn the caller's Ratatoskr token into the device session behind it, and put that
+// session's Audiobookshelf access token where every shared handler already looks for one. That
+// single assignment is what makes "upstream calls run on the session entry's chain" true for the
+// whole surface at once (SPEC section 8), without any shared handler knowing which major it serves.
+function resolveDeviceSession(auth: AuthService): (request: FastifyRequest) => void {
+  return (request) => {
+    request.absToken = auth.resolve(request.ratatoskrToken as string).chain.accessToken
+  }
 }
 
 // Registers one openapi-glue instance for a major: routes, request/response schemas and
@@ -173,10 +203,10 @@ async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<voi
   await app.register(openapiGlue, {
     specification: major.document,
     // glue registers every path the document declares. Resolve each operationId to its service
-    // method; operations a major declares but does not implement get a stub that throws
-    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. Not answering
-    // such an operation at all is the point: a stand-in that merely looked right would be worse than a
-    // 404 (service.ts, on the absent login and logout).
+    // method; an operation a major declares but does not implement gets a stub that throws
+    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. Both majors
+    // currently implement everything they declare, so no route reaches it — it stays because the
+    // alternative for the next declared-but-unbuilt operation is a 500 that reads like a server fault.
     operationResolver: (operationId) => {
       const method = methods[operationId]
       return typeof method === 'function'
