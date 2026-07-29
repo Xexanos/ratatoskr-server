@@ -117,7 +117,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
 
-    const validate = contractValidator('Session')
+    const validate = contractValidator('Session', '/v1')
     expect(validate(session)).toBe(true)
     expect(session).toMatchObject({ itemId, speakerId: SPEAKER_UUID, state: 'playing', positionSeconds: 1 })
     expect(session.durationSeconds as number).toBeGreaterThan(0)
@@ -145,7 +145,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     const res = await api('GET', '/v1/sessions/current')
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
-    expect(contractValidator('Session')(session)).toBe(true)
+    expect(contractValidator('Session', '/v1')(session)).toBe(true)
     expect(session).toMatchObject({ itemId, state: 'playing', positionSeconds: 1 })
   })
 
@@ -165,7 +165,7 @@ describe.skipIf(abs === null)('playback session flow (real ABS + fake Sonos)', (
     const res = await api('POST', '/v1/sessions/current/pause')
     expect(res.status).toBe(200)
     const session = (await res.json()) as Record<string, unknown>
-    expect(contractValidator('Session')(session)).toBe(true)
+    expect(contractValidator('Session', '/v1')(session)).toBe(true)
     expect(session.state).toBe('paused')
     expect(fake?.transportState).toBe('PAUSED_PLAYBACK')
   })

@@ -116,17 +116,21 @@ jobs:
           provenance: false
           sbom: false
 
-      - name: Boot the image and assert the health endpoint responds
+      - name: Boot the image and assert the health endpoint responds on every served major
         run: |
-          # The health path carries the version prefix of the major the image actually serves, which
-          # lives in that document's servers.url and nowhere else (SPEC section 6) — read it from there
-          # rather than pinning a major here. Today the served document is the frozen /v1 one
-          # (api/app.ts); contract/openapi.yaml is the one under development and is not mounted yet, so
-          # reading it would smoke-test a surface the image does not answer on. When /v2 joins the
-          # mount, this step checks both.
-          served=contract/v1/openapi.yaml
-          prefix=$(sed -n 's#^  - url: [a-z]*://[^/]*\(/[^ ]*\)$#\1#p' "$served" | head -1)
-          [ -n "$prefix" ] || { echo "::error title=smoke failed::could not read the version prefix from $served"; exit 1; }
+          # A health path carries the version prefix of the major serving it, which lives in that
+          # document's servers.url and nowhere else (SPEC section 6) — read it from there rather than
+          # pinning a major here. Both served majors are checked: the frozen /v1 document and the one
+          # under development, the same two api/app.ts mounts. For /v1 this is also the only place that
+          # proves the frozen copy reached the image through `COPY contract ./contract` and the
+          # generate step, with no git history in the build context.
+          served="contract/v1/openapi.yaml contract/openapi.yaml"
+          prefixes=
+          for document in $served; do
+            prefix=$(sed -n 's#^  - url: [a-z]*://[^/]*\(/[^ ]*\)$#\1#p' "$document" | head -1)
+            [ -n "$prefix" ] || { echo "::error title=smoke failed::could not read the version prefix from $document"; exit 1; }
+            prefixes="$prefixes $prefix"
+          done
           # Plain HTTP (no cert to manage) + an unreachable ABS (connection refused is a network
           # error, which the server tolerates at startup — it degrades and /health reports it). If a
           # dependency is broken on this arch, Node fails to load it and the listener never comes up.
@@ -142,15 +146,27 @@ jobs:
             -e SESSION_STORE_KEY="$(head -c 32 /dev/urandom | base64)" \
             -v smoke-data:/data \
             -e PORT=8080 -p 8080:8080 ratatoskr-server:smoke
+          # Wait for the listener on one major, then require the rest to answer too. Waiting on only
+          # one is deliberate: all mounts are registered before the server listens, so a mount that
+          # failed to register has to fail this step rather than be waited out.
+          first=$(set -- $prefixes; echo "$1")
           ok=
           for _ in $(seq 1 30); do
-            if curl -fsS "http://localhost:8080$prefix/health" >/dev/null 2>&1; then ok=1; break; fi
+            if curl -fsS "http://localhost:8080$first/health" >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
+          missing=
+          if [ -n "$ok" ]; then
+            for prefix in $prefixes; do
+              curl -fsS "http://localhost:8080$prefix/health" >/dev/null 2>&1 || missing="$missing $prefix"
+            done
+          fi
           echo "--- container logs ---"; docker logs smoke || true
           docker rm -f smoke >/dev/null 2>&1 || true
           docker volume rm smoke-data >/dev/null 2>&1 || true
-          [ -n "$ok" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not serve $prefix/health"; exit 1; }
+          [ -n "$ok" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not come up on any of$prefixes"; exit 1; }
+          [ -z "$missing" ] || { echo "::error title=smoke failed::the ${{ matrix.platform }} image did not serve health on$missing"; exit 1; }
+          echo "served health on$prefixes"
 
       # Vulnerability gate: scan the freshly built image (this arch, on its native runner) BEFORE it
       # is pushed. A fixable HIGH/CRITICAL fails the matrix leg, which blocks merge -> E2E -> promote,

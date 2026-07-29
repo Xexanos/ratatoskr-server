@@ -1,18 +1,19 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
-import { frozenV1Document } from '@ratatoskr/contract'
+import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
-import { API_PREFIX } from './apiPrefix.js'
+import { versionPrefix, type ContractDocument } from './apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
 import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
-import { securityHandlers } from './security.js'
-import { ApiService } from './service.js'
-import { createTokenGuard } from './tokenGuard.js'
+import { securityHandlers, type SecurityHandlers } from './security.js'
+import { ApiService, type ApiServiceDeps } from './service.js'
+import { createTokenGuard, type GuardOperation } from './tokenGuard.js'
+import { V1ApiService } from './v1/service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -91,34 +92,92 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     enableResponseValidation(app)
   }
 
-  // Routes, request/response schemas and per-operation auth are all derived from the contract
-  // (SPEC section 12): glue maps each operationId to an ApiService method and runs the matching
-  // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
-  // The same API_PREFIX the routes are mounted under below, so the cover URLs the service mints can
-  // never drift from the mount they have to be resolvable against.
-  const service = new ApiService({ abs, sonos, sessions, apiPrefix: API_PREFIX })
-  const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
-  // Every bearer-protected operation proves the caller's token against ABS before acting —
-  // either its handler forwards the token itself (self-validating), or the guard runs
-  // validateToken first. Derived from the contract, so a new operation is guarded by default;
-  // throws at startup on a stale exemption (tokenGuard.ts).
-  const guardOperation = createTokenGuard(frozenV1Document, (token) => abs.validateToken(token))
+  for (const major of servedMajors({ abs, sonos, sessions })) await mountMajor(app, major)
+
+  return app
+}
+
+// One served major: its contract document and everything derived from it. Nothing outside this file
+// branches on a version — a request is answered by whichever mount it arrived on, with that mount's
+// own service, guard, and security-handler set.
+//
+// `prefix` is derived once, here, and used for both the Fastify mount and the service that mints
+// URLs under it. Deriving it twice from the same document would give the same answer today, which is
+// exactly the problem: the guarantee that a major's routes and its URLs cannot drift apart should be
+// structural, not two independent calls happening to agree.
+interface ServedMajor {
+  document: ContractDocument
+  prefix: string
+  service: ApiService
+  securityHandlers: SecurityHandlers
+  guardOperation: GuardOperation
+}
+
+// The list of majors served side by side, and the only place that knows there is more than one
+// (SPEC section 6). A major is added or dropped by editing this list alone; nothing downstream has to
+// be revisited for it.
+//
+// Every entry is fully built before any of them is mounted, so a stale token-guard exemption fails
+// startup rather than the first request that happens to hit that major (tokenGuard.ts). Order between
+// the entries carries no meaning.
+function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
+  // Every bearer-protected operation proves the caller's token against ABS before acting — either
+  // its handler forwards the token itself (self-validating), or the guard runs validateToken first.
+  // Derived per document, so an operation only one major has is still guarded by default.
+  const absTokenGuard = (document: ContractDocument): GuardOperation =>
+    createTokenGuard(document, (token) => deps.abs.validateToken(token))
+
+  const v1Prefix = versionPrefix(frozenV1Document)
+  const v2Prefix = versionPrefix(openapiDocument)
+
+  return [
+    {
+      // Frozen at the contract-1.4.0 tag: the surface installed app versions talk to, which is why it
+      // is served from its own document and its own service (v1/service.ts).
+      document: frozenV1Document,
+      prefix: v1Prefix,
+      service: new V1ApiService({ ...deps, apiPrefix: v1Prefix }),
+      securityHandlers,
+      guardOperation: absTokenGuard(frozenV1Document),
+    },
+    {
+      // The contract under development. Its bearer is an Audiobookshelf access token, checked the same
+      // way as the frozen major's — hence one shared securityHandlers object. Both are fields of this
+      // entry rather than module state, so a major's auth model is replaceable on its own.
+      document: openapiDocument,
+      prefix: v2Prefix,
+      service: new ApiService({ ...deps, apiPrefix: v2Prefix }),
+      securityHandlers,
+      guardOperation: absTokenGuard(openapiDocument),
+    },
+  ]
+}
+
+// Registers one openapi-glue instance for a major: routes, request/response schemas and
+// per-operation auth all derived from its document (SPEC section 12). glue maps each operationId to
+// the matching service method and runs the matching securityHandler as a preHandler.
+//
+// The mount prefix is the one the major's own service was given, so a major's routes and the URLs its
+// responses carry are resolvable against each other by construction (apiPrefix.ts).
+async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<void> {
+  // glue resolves operationIds to methods by name, which no type can express — hence the index cast.
+  const methods = major.service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   await app.register(openapiGlue, {
-    specification: frozenV1Document,
-    // glue registers every contract path. Resolve each operationId to its ApiService method;
-    // operations without one get a stub that throws NotImplementedError → 404, rather than
-    // glue's default notImplemented stub → 500.
+    specification: major.document,
+    // glue registers every path the document declares. Resolve each operationId to its service
+    // method; operations a major declares but does not implement get a stub that throws
+    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. Not answering
+    // such an operation at all is the point: a stand-in that merely looked right would be worse than a
+    // 404 (service.ts, on the absent login and logout).
     operationResolver: (operationId) => {
       const method = methods[operationId]
       return typeof method === 'function'
-        ? guardOperation(operationId, method.bind(service))
+        ? major.guardOperation(operationId, method.bind(major.service))
         : () => {
             throw new NotImplementedError()
           }
     },
-    securityHandlers,
-    prefix: API_PREFIX,
+    securityHandlers: major.securityHandlers,
+    prefix: major.prefix,
   })
-
-  return app
 }

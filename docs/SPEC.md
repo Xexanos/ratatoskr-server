@@ -137,15 +137,33 @@ must build on:
 ## 6. API and versioning
 
 - `contract/openapi.yaml` is the single source of truth. Implement it exactly.
-- Everything is mounted under the version prefix, kept in one place (`servers.url`), so two
-  majors can be served side by side. The contract is **2.0.0 under `/v2`** — the auth surface
-  of [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step
-  with no deprecation markers, since `/v1` clients read the frozen 1.4.0 tag. `/v1` is served
-  in parallel from that tag until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED`
-  stub). The server-side implementation of both follows the contract in tracked issues — the
-  session store and its boot-time wiring are in place; the `/v2` auth endpoints, the in-process
-  token guard and the parallel `/v1` mount are not — so for a window the served surface lags
-  this document.
+- Everything is mounted under a version prefix, and that prefix lives in one place **per major**:
+  each mount derives it from the `servers.url` of the very document it registers. A major's routes
+  and the URLs its responses hand out therefore cannot drift apart, and no build-wide prefix can
+  give one major's answer to both.
+- Two majors are served side by side, from one process, each from its own document:
+  **2.0.0 under `/v2`** — the auth surface of
+  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step with no
+  deprecation markers, since `/v1` clients read the frozen 1.4.0 tag — and **1.4.0 under `/v1`**,
+  frozen, until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED` stub). One
+  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service and
+  contract-derived token guard, and its own slot for security handlers (both majors share one set
+  today, since the scheme name and the presence check are identical); assembling that list is the only
+  place that knows there is more than one, so sunsetting `/v1` is removing an entry.
+- **Known gap during the transition window:** the `/v2` auth operations that need the session store
+  are declared by 2.0.0 and implemented by nothing, so they answer **404** — a status neither
+  operation declares. That is a deliberate, temporary breach of "implement it exactly": the
+  alternatives were to answer with an Audiobookshelf credential under a name that promises a
+  Ratatoskr one, or to document a 404 on `login` and `logout` that the finished surface will not have.
+  It is resolved by implementing them, not by amending the contract, and it is the one place `/v2`
+  knowingly lags this document.
+- `/v1` is frozen at the **`contract-1.4.0`** tag, and what it mounts is a tracked copy of that
+  document at `contract/v1/openapi.yaml`. The `contract-freeze` CI job is what makes that a freeze
+  rather than a duplicate: it holds the copy byte-identical to the tag. The accident it exists for is
+  not a deliberate edit but a sweep — a reformat, a lint rule, a search-and-replace across
+  `contract/**` — silently reshaping the surface installed app versions talk to. The copy exists at
+  all because generating the served artifacts must need no git history: `.git` is deliberately
+  outside the image build context, and keeping that hermetic is worth more than avoiding a copy.
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
   practice for the server: never remove or repurpose a field within a served major, only
@@ -153,7 +171,9 @@ must build on:
 - A CI job runs oasdiff between the PR's base and head and fails the build on a breaking
   change. It reads `info.version` on both sides and skips itself when the major differs,
   which is exactly the case this rule allows — so a major cut needs no manual flag, and
-  everything else stays gated.
+  everything else stays gated. It grades the contract under development only: the other served
+  major is frozen rather than versioned, and `contract-freeze` gates that one more strictly than any
+  breaking-change check could.
 - Any operation whose request is validated — a bounded or typed query param, a required body, a
   path param — must declare `400: BadRequest` in the contract. Fastify rejects an invalid request
   with a 400 before the handler runs (mapped to the contract's error shape, section 12), so an
@@ -309,6 +329,30 @@ re-login.
   handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).
 
+**What `/v1` still runs.** The frozen major keeps every part of the old model, unchanged, in
+a service of its own: the `POST /v1/auth/login` and `POST /v1/auth/refresh` proxies that hand
+ABS token pairs to the device, the optional `refreshToken` on `PUT /v1/sessions/current` that
+arms the sync loop's renewal (`LISTENING_TOKEN_REFRESH_MARGIN_SECONDS`, section 7 — that knob
+serves this route alone), and the rotation handover, including the
+`DELETE /v1/sessions/current` that answers 200 with a final `Session` when a rotated pair was
+still owed. Everything else is implemented once and inherited by both majors, so the shared
+operations cannot drift apart by accident — with the consequence that **a change to a shared
+method changes `/v1` too**. `/v2`'s move from the caller's bearer to a session-resolved
+upstream token is exactly such a change, and belongs in an override on the `/v2` side rather
+than in the shared body. Until it lands, `/v2` still validates the bearer against ABS per
+request; what exists today is the seam that lets one major's auth model be replaced without
+touching the other's.
+
+**The one thing the two majors share.** Not the handover — it cannot be armed or delivered
+under `/v2`, which has no field for it — but the single active playback session, of which there
+is still exactly one. A `/v2` caller presenting the same Audiobookshelf access token a `/v1`
+client is listening with can stop that session, and a rotated pair the `/v1` client had not yet
+collected is discarded with it, because `/v2`'s stop hands nothing back. The `/v1` client then
+re-authenticates. This needs one device speaking both majors with the same upstream token, and
+it stops being expressible once `/v2` bearers are Ratatoskr tokens. It is recorded here, and at
+the `/v2` stop itself, rather than papered over: the alternative would be a `/v2` response
+carrying an upstream credential under a field its own contract does not declare.
+
 The client-side half is specified in the app's SPEC, section 5, and degenerates to:
 attach the token; on 401 + `UPSTREAM_SESSION_LOST` show a targeted re-login prompt; on any
 other 401 treat the device as signed out. The entire rotation-adoption protocol on the app
@@ -460,12 +504,15 @@ ratatoskr-server/
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
-│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the version mount
-│   │   │                       #   (apiPrefix.ts), and mapping between the domain and the
+│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the per-major version
+│   │   │                       #   mount (apiPrefix.ts), and mapping between the domain and the
 │   │   │                       #   contract types: contractMapping.ts is the one place
 │   │   │                       #   contract-shaped library and session values are built, and
 │   │   │                       #   the only place a cover URL is minted; domainShapeAssertion.ts
 │   │   │                       #   makes skipping that step a build error rather than a wrong URL
+│   │   │   └── v1/             #   what contract 2.0.0 dropped, served frozen under /v1 until its
+│   │   │                       #   sunset: the credential proxies and the rotation handover. Extends
+│   │   │                       #   the shared service; deleted whole when /v1 goes (section 8)
 │   │   └── main.ts             #   startup wiring
 │   │
 │   ├── fake-sonos/           # @ratatoskr/fake-sonos — the UPnP/SOAP speaker double (test-only):

@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
+import type { ContractDocument } from './apiPrefix.js'
 
 // The invariant this module enforces: every bearer-protected operation proves the caller's
 // token against ABS before acting. The bearerAuth security handler checks for presence only
@@ -13,11 +14,19 @@ import type { FastifyReply, FastifyRequest } from 'fastify'
 //     handler, wired in buildApp's operationResolver.
 // A new contract operation is guarded by default — forgetting this module fails closed.
 
-type OperationHandler = (request: FastifyRequest, reply: FastifyReply) => unknown
+export type OperationHandler = (request: FastifyRequest, reply: FastifyReply) => unknown
+
+// What createTokenGuard returns: the wrap applied to every one of a major's handlers (app.ts).
+export type GuardOperation = (operationId: string, handler: OperationHandler) => OperationHandler
 
 // The operations whose handlers present the caller's token to ABS themselves. An entry must
 // name a bearer-protected operationId in the contract — createTokenGuard throws at startup
 // otherwise, so a renamed or re-secured operation cannot leave a stale exemption behind.
+//
+// Shared by every served major, so an entry has to hold for all of them: one naming an operation that
+// only some declare fails the others' startup check and takes the whole process down with it, and a
+// frozen document cannot gain an operationId to resolve that. Pass a major-specific exemption as
+// createTokenGuard's third argument instead; it must never be added here.
 export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
   'listLibraryItems', // forwards the token via abs.listItems
   'getLibraryItem', // forwards the token via abs.getItem
@@ -36,7 +45,7 @@ export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
 // reject it unconditionally.
 const BEARER_SCHEME = 'bearerAuth'
 
-function bearerProtectedOperationIds(document: Record<string, unknown>): Set<string> {
+function bearerProtectedOperationIds(document: ContractDocument): Set<string> {
   const globalSecurity = Array.isArray(document['security']) ? (document['security'] as unknown[]) : []
   const ids = new Set<string>()
   const paths = (document['paths'] ?? {}) as Record<string, Record<string, unknown>>
@@ -64,10 +73,10 @@ function requiresBearer(requirements: unknown[]): boolean {
 // bearer-protected and not self-validating → the handler is prefixed with `validate`;
 // anything else passes through untouched (identity, so there is no wrapper to reason about).
 export function createTokenGuard(
-  document: Record<string, unknown>,
+  document: ContractDocument,
   validate: (token: string) => Promise<void>,
   selfValidating: ReadonlySet<string> = SELF_VALIDATING_OPERATIONS,
-): (operationId: string, handler: OperationHandler) => OperationHandler {
+): GuardOperation {
   const protectedIds = bearerProtectedOperationIds(document)
   for (const operationId of selfValidating) {
     if (!protectedIds.has(operationId)) {

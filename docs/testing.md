@@ -55,10 +55,16 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
   appears only in the media URLs handed to speakers; secrets never appear in logs
   (redaction); bearer auth + refresh-token rotation; the session store persists only the
   Ratatoskr token's hash, never the token.
-- **Contract runtime-conformance:** the running server's responses are validated
-  against `contract/openapi.yaml` (Ajv / response validation), and CI runs
-  `oasdiff` between a PR's base and head to fail on breaking changes that do not bump
-  the contract's major version.
+- **Contract runtime-conformance:** the running server's responses are validated against the
+  contract (Ajv / response validation) **per served major** — a response is graded against the
+  document that promised it, `contract/v1/openapi.yaml` for `/v1` and `contract/openapi.yaml` for
+  `/v2`. The same schema name means different things in the two (`AuthTokens` exists only in 1.4.0,
+  and only its `Session` carries the rotation handover), so one registry cannot serve both, and
+  `contractValidator` takes the mount with no default: naming the wrong major would not fail, it
+  would grade the response against the other major's shapes and pass. Conformance for `/v1` is
+  therefore conformance to the frozen tag, which `contract-freeze` holds the copy identical to.
+  CI also runs `oasdiff` between a PR's base and head to fail on breaking changes that do not bump
+  the contract's major version — for the contract under development only.
   There is deliberately **no separate contract-test level** — both sides generate
   from the shared spec, so the type contract holds by construction (see the
   central concept, §3).
