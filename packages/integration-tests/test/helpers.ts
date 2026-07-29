@@ -11,13 +11,20 @@ import { Ajv, type ValidateFunction } from 'ajv'
 // Both the config/health smoke test and the live-Audiobookshelf tests build on this.
 
 export const DIST_MAIN = fileURLToPath(new URL('../../app/dist/main.js', import.meta.url))
-// The document of the major the spawned server actually serves — today the frozen /v1 one (api/app.ts
-// mounts it). A response has to be graded against the contract that promised it: schema names mean
-// different things per major (a /v1 Session may carry the rotation handover, a /v2 one has no such
-// field, and AuthTokens exists only in 1.4.0), so grading against contract/openapi.yaml — the document
-// under development, not mounted yet — would check shapes this server never promised, and fail
-// outright on the ones 2.0.0 dropped.
-export const CONTRACT = fileURLToPath(new URL('../../../contract/v1/openapi.yaml', import.meta.url))
+
+// The documents of the majors the spawned server serves, one per mount (api/app.ts). A response has
+// to be graded against the contract that promised it, and which contract that is follows from the
+// path it came in on: schema names mean different things per major — a /v1 Session may carry the
+// rotation handover, a /v2 one has no such field, and AuthTokens exists only in 1.4.0. Grading
+// everything against one document would check shapes the other never promised, and fail outright on
+// the ones 2.0.0 dropped. Conformance for /v1 is therefore conformance to the frozen copy, which the
+// contract-freeze CI job holds identical to the contract-1.4.0 tag.
+export const CONTRACTS = {
+  '/v1': fileURLToPath(new URL('../../../contract/v1/openapi.yaml', import.meta.url)),
+  '/v2': fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url)),
+} as const
+
+export type ServedMajor = keyof typeof CONTRACTS
 
 // Env keys the config reader consumes — removed from the inherited env so a test is
 // hermetic no matter what the host shell has set. The rest of process.env is inherited
@@ -139,14 +146,23 @@ export function assertServerBuilt(): void {
 // its own homework. strict:false because the contract uses OpenAPI-3.0 keywords (nullable,
 // format: double) that plain Ajv rejects; note this *ignores* nullable rather than honoring
 // it, which is fine for the shapes asserted here (their required fields are never null).
-let contractAjv: Ajv | undefined
+//
+// One Ajv per major, built on first use: two documents define different schemas under the same names,
+// so they cannot share a registry.
+//
+// `major` has no default on purpose. It names the mount the response came from, and a wrong answer
+// here does not fail — it grades the response against a different major's idea of the schema and
+// passes. Making every call site say which surface it is testing is the whole safeguard.
+const contractAjvs = new Map<ServedMajor, Ajv>()
 
-export function contractValidator(schemaName: string): ValidateFunction {
-  if (!contractAjv) {
-    contractAjv = new Ajv({ strict: false })
-    contractAjv.addSchema(load(readFileSync(CONTRACT, 'utf8')) as object, 'contract')
+export function contractValidator(schemaName: string, major: ServedMajor): ValidateFunction {
+  let ajv = contractAjvs.get(major)
+  if (!ajv) {
+    ajv = new Ajv({ strict: false })
+    ajv.addSchema(load(readFileSync(CONTRACTS[major], 'utf8')) as object, 'contract')
+    contractAjvs.set(major, ajv)
   }
-  const validate = contractAjv.getSchema(`contract#/components/schemas/${schemaName}`)
-  if (!validate) throw new Error(`${schemaName} schema not found in contract`)
+  const validate = ajv.getSchema(`contract#/components/schemas/${schemaName}`)
+  if (!validate) throw new Error(`${schemaName} schema not found in the ${major} contract`)
   return validate as ValidateFunction
 }

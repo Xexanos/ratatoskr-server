@@ -90,7 +90,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(typeof body.refreshToken).toBe('string')
     expect(body.user).toMatchObject({ username: LIVE_USER })
 
-    const validate = contractValidator('AuthTokens')
+    const validate = contractValidator('AuthTokens', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
   })
@@ -104,7 +104,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 
-    const validate = contractValidator('AuthTokens')
+    const validate = contractValidator('AuthTokens', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
     expect(typeof body.accessToken).toBe('string')
@@ -122,7 +122,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(res.status).toBe(200)
     const body = (await res.json()) as { items: { id: string; title: string; durationSeconds: number }[] }
 
-    const validate = contractValidator('LibraryItemPage')
+    const validate = contractValidator('LibraryItemPage', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -134,6 +134,32 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(seeded?.durationSeconds).toBeGreaterThan(0)
   })
 
+  // The same live data through the other mount, graded against 2.0.0. /v2's library operations are the
+  // shared service's, so this is what would catch a mapping that conforms under one major and not the
+  // other — /health alone cannot, since its shape is identical in both documents.
+  //
+  // The token comes from /v1's login because /v2 has none: both majors currently accept the same
+  // Audiobookshelf access token as a bearer, which is what makes this setup possible at all.
+  it('GET /v2/library/items serves the same seeded book, conformant to 2.0.0', async () => {
+    const res = await fetch(`${serverBase}/v2/library/items`, {
+      headers: { authorization: `Bearer ${auth.accessToken}` },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { items: { id: string; coverUrl: string | null }[] }
+
+    const validate = contractValidator('LibraryItemPage', '/v2')
+    expect(validate(body)).toBe(true)
+    expect(validate.errors).toBeNull()
+
+    const seeded = body.items.find((item) => item.id === seededItemId)
+    expect(seeded).toBeDefined()
+    // The seeded fixture is a bare audio file with no cover art, so the honest expectation here is
+    // null rather than a URL — ABS reports no coverPath and the mapping turns that into null. The
+    // per-mount prefix on a book that *does* have a cover is pinned in the app's majorMounts test,
+    // where the projection's input is controlled.
+    expect(seeded?.coverUrl).toBeNull()
+  })
+
   it('GET /v1/library/items/{itemId} returns detail with zero stored progress', async () => {
     const res = await fetch(`${serverBase}/v1/library/items/${encodeURIComponent(seededItemId)}`, {
       headers: { authorization: `Bearer ${auth.accessToken}` },
@@ -141,7 +167,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(res.status).toBe(200)
     const body = (await res.json()) as { id: string; progress: { positionSeconds: number; isFinished: boolean } }
 
-    const validate = contractValidator('LibraryItem')
+    const validate = contractValidator('LibraryItem', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -171,7 +197,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       items: { id: string; progress?: { positionSeconds: number; isFinished: boolean } }[]
     }
 
-    const validate = contractValidator('LibraryItemPage')
+    const validate = contractValidator('LibraryItemPage', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 

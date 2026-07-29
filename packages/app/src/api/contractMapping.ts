@@ -20,10 +20,16 @@ type Speaker = components['schemas']['Speaker']
 // promising anything new.
 type MappedSummary = LibraryItemSummary & { coverUrl: string | null }
 type MappedItem = LibraryItem & { coverUrl: string | null; progress: Progress }
-// The frozen /v1 addition: 1.4.0's Session carries the rotated Audiobookshelf pair when one is
-// pending, and 2.0.0 dropped the field, so — like V1AuthTokens — the served surface's shape is
-// declared here. Optional, because it appears only while a handover is in flight.
-type MappedSession = Session & { item: MappedSummary; rotatedTokens?: RotatedTokenPair | undefined }
+// A session as a surface puts it on the wire. Note what is *not* here: the rotated Audiobookshelf
+// pair. Minting it unconditionally would leave "no upstream credential leaves on a surface that does
+// not promise one" — the property SPEC section 8 exists for — resting on fast-json-stringify dropping
+// a field absent from the response schema, and a serializer is the wrong place to hold a security
+// guarantee: it holds only as long as every response has a declared schema.
+export type MappedSession = Session & { item: MappedSummary }
+// The addition made by the one surface that does promise it (toV1SessionResponse). Declared here for
+// the same reason as V1AuthTokens, and optional because a pair exists only while a handover is in
+// flight.
+export type MappedV1Session = MappedSession & { rotatedTokens?: RotatedTokenPair | undefined }
 
 // The cover image is served by Ratatoskr's own cover-proxy route, so coverUrl points there rather
 // than at ABS. A path relative to the server origin, carrying the mount prefix of the major that
@@ -107,6 +113,15 @@ export function toSessionResponse(session: PlaybackSession, apiPrefix: string): 
     positionSeconds: session.positionSeconds,
     durationSeconds: session.durationSeconds,
     updatedAt: session.updatedAt,
+  }
+}
+
+// The same session, plus the handover field. Reached only through the /v1 service's mapSession
+// override, which is what confines a pending pair to the surface that documents it (see
+// MappedSession).
+export function toV1SessionResponse(session: PlaybackSession, apiPrefix: string): MappedV1Session {
+  return {
+    ...toSessionResponse(session, apiPrefix),
     ...(session.rotatedTokens !== undefined ? { rotatedTokens: session.rotatedTokens } : {}),
   }
 }
