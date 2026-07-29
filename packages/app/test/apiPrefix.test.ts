@@ -29,6 +29,12 @@ describe('versionPrefix', () => {
     ['a non-string url', { servers: [{ url: 42 }] }],
     ['an origin with no path', { servers: [{ url: 'http://{host}:{port}' }] }],
     ['a root path', { servers: [{ url: 'http://{host}:{port}/' }] }],
+    // OpenAPI allows a relative servers.url, and this rejects one rather than reading it as a prefix.
+    // Pinned as a known limitation, not an accident: both served documents carry an absolute template,
+    // and a contract that switched to `/v2` should fail loudly at startup here — where the message
+    // names servers[0].url — instead of being parsed by a looser rule that would also accept a path
+    // that is not a version prefix at all.
+    ['a relative url', { servers: [{ url: '/v2' }] }],
   ])('throws on %s', (_case, document) => {
     expect(() => versionPrefix(document)).toThrow(/no version path/)
   })

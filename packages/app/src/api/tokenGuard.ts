@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
+import type { ContractDocument } from './apiPrefix.js'
 
 // The invariant this module enforces: every bearer-protected operation proves the caller's
 // token against ABS before acting. The bearerAuth security handler checks for presence only
@@ -44,7 +45,7 @@ export const SELF_VALIDATING_OPERATIONS: ReadonlySet<string> = new Set([
 // reject it unconditionally.
 const BEARER_SCHEME = 'bearerAuth'
 
-function bearerProtectedOperationIds(document: Record<string, unknown>): Set<string> {
+function bearerProtectedOperationIds(document: ContractDocument): Set<string> {
   const globalSecurity = Array.isArray(document['security']) ? (document['security'] as unknown[]) : []
   const ids = new Set<string>()
   const paths = (document['paths'] ?? {}) as Record<string, Record<string, unknown>>
@@ -72,7 +73,7 @@ function requiresBearer(requirements: unknown[]): boolean {
 // bearer-protected and not self-validating → the handler is prefixed with `validate`;
 // anything else passes through untouched (identity, so there is no wrapper to reason about).
 export function createTokenGuard(
-  document: Record<string, unknown>,
+  document: ContractDocument,
   validate: (token: string) => Promise<void>,
   selfValidating: ReadonlySet<string> = SELF_VALIDATING_OPERATIONS,
 ): GuardOperation {

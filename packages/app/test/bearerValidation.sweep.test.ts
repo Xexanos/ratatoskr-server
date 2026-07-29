@@ -3,6 +3,7 @@ import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
 import { buildApp } from '../src/api/app.js'
+import { SELF_VALIDATING_OPERATIONS } from '../src/api/tokenGuard.js'
 import type { Config } from '../src/config/index.js'
 import type { SonosClient } from '../src/sonos/client.js'
 
@@ -171,4 +172,23 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
 it('has no fixture for an operation neither major protects', () => {
   const protectedSomewhere = new Set(MAJORS.flatMap((major) => bearerProtectedOperationIds(major.document)))
   expect(Object.keys(FIXTURES).filter((id) => !protectedSomewhere.has(id))).toEqual([])
+})
+
+// SELF_VALIDATING_OPERATIONS is the one piece of the guard both majors share, and createTokenGuard
+// checks each entry against the document it is built for — so an entry that holds for only one major
+// does not fail that major, it throws while building the *other* one and takes the whole process down
+// at startup. The frozen 1.4.0 document can never gain an operationId to resolve such a mismatch.
+//
+// Stated here as its own assertion rather than left to a boot crash: this names the constraint and
+// says which major is missing the operation, and it fails in one test instead of in every test that
+// builds an app.
+it('shares no self-validating exemption that only one major protects', () => {
+  const perMajor = MAJORS.map((major) => ({
+    prefix: major.prefix,
+    protectedIds: new Set(bearerProtectedOperationIds(major.document)),
+  }))
+  const unsupported = [...SELF_VALIDATING_OPERATIONS].flatMap((operationId) =>
+    perMajor.filter((major) => !major.protectedIds.has(operationId)).map((major) => `${major.prefix}:${operationId}`),
+  )
+  expect(unsupported).toEqual([])
 })

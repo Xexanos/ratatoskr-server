@@ -1,3 +1,9 @@
+// A parsed OpenAPI document as the runtime sees it. The contract package emits each served major's
+// document as plain data (no schema type), and the two places that read one — the mount prefix here
+// and the token guard's walk over `paths` — both index into it by key. Named so those signatures say
+// what they take rather than repeating an anonymous bag.
+export type ContractDocument = Record<string, unknown>
+
 // A served major's version-mount prefix, read out of its contract's `servers.url` — which SPEC
 // section 6 names as the one place the prefix lives, one place *per major*, so that two majors can be
 // served side by side. The Fastify mount (app.ts's openapi-glue `prefix`) and the cover URLs that
@@ -12,7 +18,7 @@
 //
 // The URL is a server-variable template (`http://{host}:{port}/v2`), so the path is taken after the
 // authority rather than by parsing it as a URL: the braces are not valid host syntax.
-export function versionPrefix(document: Record<string, unknown>): string {
+export function versionPrefix(document: ContractDocument): string {
   const servers = document['servers']
   const url = Array.isArray(servers) ? (servers[0] as { url?: unknown } | undefined)?.url : undefined
   const path = typeof url === 'string' ? /^[a-z][a-z0-9+.-]*:\/\/[^/]+(\/[^?#]*)/i.exec(url)?.[1] : undefined

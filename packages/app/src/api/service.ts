@@ -1,9 +1,10 @@
 import type { components } from '@ratatoskr/contract'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
-import type { SessionManager } from '../playback/sessionManager.js'
+import type { PlaybackSession, SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 import {
+  type MappedSession,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
@@ -145,12 +146,21 @@ export class ApiService {
 
   // --- Playback (SPEC sections 4 and 5) ---
 
+  // How this major renders a session. Every session response below goes through it, so the wire shape
+  // is decided in exactly one place per major: /v1 overrides it to add the rotated Audiobookshelf pair
+  // (v1/service.ts), and this one deliberately cannot produce that field at all. The alternative —
+  // one mapper minting it for both majors — would leave an upstream credential off the /v2 wire only
+  // because the serializer drops what 2.0.0's schema omits (contractMapping.ts).
+  protected mapSession(session: PlaybackSession): MappedSession {
+    return toSessionResponse(session, this.apiPrefix)
+  }
+
   // The session methods never forward the caller's token to ABS on their own (they act on the
   // session's stored listening token), so the token guard validates it upstream before dispatch —
   // see tokenGuard.ts. startSession is the exception (self-validating): it presents the token to
   // ABS via getPlaybackManifest, which 401s an invalid one.
   async getCurrentSession(request: FastifyRequest): Promise<Session> {
-    return toSessionResponse(await this.sessions.current(request.absToken as string), this.apiPrefix)
+    return this.mapSession(await this.sessions.current(request.absToken as string))
   }
 
   // No refresh token comes in any more (2.0.0 dropped the field), so the sync loop runs on the
@@ -159,7 +169,7 @@ export class ApiService {
   async startSession(request: FastifyRequest): Promise<Session> {
     const { itemId, speakerId } = request.body as StartSessionRequest
     const session = await this.sessions.start(request.absToken as string, undefined, itemId, speakerId)
-    return toSessionResponse(session, this.apiPrefix)
+    return this.mapSession(session)
   }
 
   // Always 204: nothing is handed back at stop any more, now that no token pair travels to the
@@ -178,16 +188,16 @@ export class ApiService {
   // The caller's token is forwarded so an adopted rotated pair stops being redelivered (SPEC
   // section 8).
   async pauseSession(request: FastifyRequest): Promise<Session> {
-    return toSessionResponse(await this.sessions.pause(request.absToken as string), this.apiPrefix)
+    return this.mapSession(await this.sessions.pause(request.absToken as string))
   }
 
   async resumeSession(request: FastifyRequest): Promise<Session> {
-    return toSessionResponse(await this.sessions.resume(request.absToken as string), this.apiPrefix)
+    return this.mapSession(await this.sessions.resume(request.absToken as string))
   }
 
   async seekSession(request: FastifyRequest): Promise<Session> {
     const { positionSeconds } = request.body as SeekRequest
     const session = await this.sessions.seek(request.absToken as string, positionSeconds)
-    return toSessionResponse(session, this.apiPrefix)
+    return this.mapSession(session)
   }
 }

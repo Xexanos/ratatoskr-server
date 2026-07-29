@@ -3,7 +3,7 @@ import type { Server as HttpsServer } from 'node:https'
 import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
-import { versionPrefix } from './apiPrefix.js'
+import { versionPrefix, type ContractDocument } from './apiPrefix.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import type { Config } from '../config/index.js'
@@ -99,10 +99,16 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
 
 // One served major: its contract document and everything derived from it. Nothing outside this file
 // branches on a version — a request is answered by whichever mount it arrived on, with that mount's
-// own service, security handlers and guard.
+// own service, guard, and security-handler set.
+//
+// `prefix` is derived once, here, and used for both the Fastify mount and the service that mints
+// URLs under it. Deriving it twice from the same document would give the same answer today, which is
+// exactly the problem: the guarantee that a major's routes and its URLs cannot drift apart should be
+// structural, not two independent calls happening to agree.
 interface ServedMajor {
-  document: Record<string, unknown>
-  service: object
+  document: ContractDocument
+  prefix: string
+  service: ApiService
   securityHandlers: SecurityHandlers
   guardOperation: GuardOperation
 }
@@ -111,31 +117,38 @@ interface ServedMajor {
 // (SPEC section 6). Two are served for the transition window ADR-0001 sets out; sunsetting /v1 (#137)
 // is removing its entry, and nothing downstream has to be revisited for that.
 //
-// Order matters only for startup: each entry's guard validates its own document's exemptions, so a
-// stale one fails the build of the app rather than the first request to hit it.
+// Every entry is fully built before any of them is mounted, so a stale token-guard exemption fails
+// startup rather than the first request that happens to hit that major (tokenGuard.ts). Order between
+// the entries carries no meaning.
 function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
   // Every bearer-protected operation proves the caller's token against ABS before acting — either
   // its handler forwards the token itself (self-validating), or the guard runs validateToken first.
-  // Derived per document, so an operation only one major has is still guarded by default, and a
-  // stale exemption throws at startup (tokenGuard.ts).
-  const absTokenGuard = (document: Record<string, unknown>): GuardOperation =>
+  // Derived per document, so an operation only one major has is still guarded by default.
+  const absTokenGuard = (document: ContractDocument): GuardOperation =>
     createTokenGuard(document, (token) => deps.abs.validateToken(token))
+
+  const v1Prefix = versionPrefix(frozenV1Document)
+  const v2Prefix = versionPrefix(openapiDocument)
 
   return [
     {
       // Contract 1.4.0, frozen at the contract-1.4.0 tag: what installed app versions talk to. Its
       // service adds back the operations 2.0.0 dropped (v1/service.ts).
       document: frozenV1Document,
-      service: new V1ApiService({ ...deps, apiPrefix: versionPrefix(frozenV1Document) }),
+      prefix: v1Prefix,
+      service: new V1ApiService({ ...deps, apiPrefix: v1Prefix }),
       securityHandlers,
       guardOperation: absTokenGuard(frozenV1Document),
     },
     {
       // The contract under development. Its bearer is still an Audiobookshelf access token; #134
       // replaces that with an opaque Ratatoskr one, which is a change to this entry's guard and
-      // service — the seam exists so it can be made without touching /v1's.
+      // service — the seam exists so it can be made without touching /v1's. Both majors share one
+      // securityHandlers object today because the scheme name and the presence check are the same;
+      // the field is per-major so #134 can give /v2 its own without touching /v1's.
       document: openapiDocument,
-      service: new ApiService({ ...deps, apiPrefix: versionPrefix(openapiDocument) }),
+      prefix: v2Prefix,
+      service: new ApiService({ ...deps, apiPrefix: v2Prefix }),
       securityHandlers,
       guardOperation: absTokenGuard(openapiDocument),
     },
@@ -146,9 +159,10 @@ function servedMajors(deps: Omit<ApiServiceDeps, 'apiPrefix'>): ServedMajor[] {
 // per-operation auth all derived from its document (SPEC section 12). glue maps each operationId to
 // the matching service method and runs the matching securityHandler as a preHandler.
 //
-// The mount prefix comes from the same document the routes come from, so a major's routes and the
-// URLs its responses carry are resolvable against each other by construction (apiPrefix.ts).
+// The mount prefix is the one the major's own service was given, so a major's routes and the URLs its
+// responses carry are resolvable against each other by construction (apiPrefix.ts).
 async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<void> {
+  // glue resolves operationIds to methods by name, which no type can express — hence the index cast.
   const methods = major.service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   await app.register(openapiGlue, {
     specification: major.document,
@@ -166,6 +180,6 @@ async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<voi
           }
     },
     securityHandlers: major.securityHandlers,
-    prefix: versionPrefix(major.document),
+    prefix: major.prefix,
   })
 }

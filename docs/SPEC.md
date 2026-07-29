@@ -146,12 +146,17 @@ must build on:
   [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step with no
   deprecation markers, since `/v1` clients read the frozen 1.4.0 tag — and **1.4.0 under `/v1`**,
   frozen, until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED` stub). One
-  `fastify-openapi-glue` registration per major, each with its own service, security handlers and
-  contract-derived token guard; assembling that list is the only place that knows there is more than
-  one, so sunsetting `/v1` is removing an entry. The `/v2` auth operations that need the session
-  store still answer 404 until their own issue lands — deliberately, rather than answering with an
-  Audiobookshelf credential under a name that promises a Ratatoskr one — so for that window `/v2`
-  lags this document.
+  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service and
+  contract-derived token guard, and its own slot for security handlers (both majors share one set
+  today, since the scheme name and the presence check are identical); assembling that list is the only
+  place that knows there is more than one, so sunsetting `/v1` is removing an entry.
+- **Known gap during the transition window:** the `/v2` auth operations that need the session store
+  are declared by 2.0.0 and implemented by nothing, so they answer **404** — a status neither
+  operation declares. That is a deliberate, temporary breach of "implement it exactly": the
+  alternatives were to answer with an Audiobookshelf credential under a name that promises a
+  Ratatoskr one, or to document a 404 on `login` and `logout` that the finished surface will not have.
+  It is resolved by implementing them, not by amending the contract, and it is the one place `/v2`
+  knowingly lags this document.
 - `/v1` is frozen at the **`contract-1.4.0`** tag, and what it mounts is a tracked copy of that
   document at `contract/v1/openapi.yaml`. The `contract-freeze` CI job is what makes that a freeze
   rather than a duplicate: it holds the copy byte-identical to the tag. The accident it exists for is

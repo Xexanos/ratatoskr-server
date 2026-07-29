@@ -159,9 +159,10 @@ describe('the rotation handover reaches /v1 only', () => {
     await app.close()
   })
 
-  // Belt and braces on the shared session mapper: it fills rotatedTokens whenever the manager has a
-  // pending pair, and what keeps that off the /v2 wire is 2.0.0's response schema — Fastify's
-  // serializer emits only the fields the schema names.
+  // Through a real route, both halves at once: /v1 delivers a pending pair and /v2 cannot. Nothing
+  // here relies on Fastify's serializer dropping a field 2.0.0's schema omits — only the /v1 service
+  // maps the pair onto a response at all (contractMapping.ts) — but a route test is what proves the
+  // right service is behind the right mount.
   it('never puts a rotated pair on a /v2 session response', async () => {
     const current = vi.fn().mockResolvedValue({ ...DOMAIN_SESSION, rotatedTokens: ROTATED })
     const app = await appWith({}, { current })

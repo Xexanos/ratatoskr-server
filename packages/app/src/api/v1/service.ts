@@ -1,12 +1,7 @@
-import type { components } from '@ratatoskr/contract'
 import type { FastifyReply, FastifyRequest } from 'fastify'
-import { toAuthTokens, toSessionResponse, type V1AuthTokens } from '../contractMapping.js'
+import type { PlaybackSession } from '../../playback/sessionManager.js'
+import { toAuthTokens, toV1SessionResponse, type MappedV1Session, type V1AuthTokens } from '../contractMapping.js'
 import { ApiService } from '../service.js'
-
-// A started session looks the same in both majors: the handover field 1.4.0 adds to Session can only
-// appear once the sync loop has rotated, which start() has just ruled out by clearing any pending
-// pair — so the shared contract type describes this response exactly.
-type Session = components['schemas']['Session']
 
 // The 1.4.0-only request bodies. Declared here rather than derived from a contract: this surface is
 // frozen, so these shapes cannot change, and only the served document is generated for /v1 — no
@@ -58,13 +53,20 @@ export class V1ApiService extends ApiService {
     return toAuthTokens(await this.abs.refresh(refreshToken))
   }
 
+  // The one place the rotated Audiobookshelf pair is put on a wire. Every session response on this
+  // major goes through the shared methods' mapSession, so overriding it here — and only here — is what
+  // makes the handover a property of /v1 rather than of what the serializer happens to drop from a
+  // /v2 body (contractMapping.ts, service.ts).
+  protected override mapSession(session: PlaybackSession): MappedV1Session {
+    return toV1SessionResponse(session, this.apiPrefix)
+  }
+
   // The caller's refresh token is accepted and held for the session, which is what arms the rotation
   // handover in the sync loop (LISTENING_TOKEN_REFRESH_MARGIN_SECONDS, SPEC section 7 — that knob
   // serves this route alone). /v2's startSession passes no refresh token at all.
-  override async startSession(request: FastifyRequest): Promise<Session> {
+  override async startSession(request: FastifyRequest): Promise<MappedV1Session> {
     const { itemId, speakerId, refreshToken } = request.body as V1StartSessionRequest
-    const session = await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
-    return toSessionResponse(session, this.apiPrefix)
+    return this.mapSession(await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId))
   }
 
   // 204 normally; 200 + a final Session when a rotated token pair was still pending at stop, so the
@@ -76,11 +78,14 @@ export class V1ApiService extends ApiService {
       await reply.code(204).send()
       return
     }
-    // Bound to Session before handing it to send(), which takes `unknown`. Every other operation
-    // returns its body and so has the mapping step enforced by the method's return type; this is the
-    // one response on this surface that does not, and an unmapped domain session would sail through
-    // both the serializer (it drops unknown keys) and response validation (coverUrl is optional).
-    const body: Session = toSessionResponse(final, this.apiPrefix)
+    // Bound to this major's own session type before handing it to send(), which takes `unknown`.
+    // Every other operation returns its body and so has the mapping step enforced by the method's
+    // return type; this is the one response here that does not, and an unmapped domain session would
+    // sail through both the serializer (it drops unknown keys) and response validation (coverUrl is
+    // optional). MappedV1Session, not the shared contract Session: 2.0.0 has no rotatedTokens, so
+    // annotating this with that type would check everything about the handover response except the
+    // field it exists to deliver.
+    const body: MappedV1Session = this.mapSession(final)
     await reply.code(200).send(body)
   }
 }
