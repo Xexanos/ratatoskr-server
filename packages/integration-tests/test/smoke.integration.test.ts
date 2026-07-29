@@ -51,7 +51,7 @@ describe('server process smoke test', () => {
     }
   })
 
-  it('boots, serves /v1/health over real HTTP, and conforms to the contract', async () => {
+  it('boots, serves /health on both majors over real HTTP, and conforms to each contract', async () => {
     // A real HTTP upstream standing in for Audiobookshelf: answer /ping like ABS so the startup
     // probe and the health check treat it as a genuine, reachable ABS. No streamer login happens at
     // startup anymore — the media path uses a static API key — so only /ping needs answering.
@@ -86,10 +86,24 @@ describe('server process smoke test', () => {
     expect(body.version).toBeUndefined()
 
     // Independent contract conformance (see helpers.contractValidator).
-    const validate = contractValidator('Health')
+    const validate = contractValidator('Health', '/v1')
     const valid = validate(body)
     expect(validate.errors).toBeNull()
     expect(valid).toBe(true)
+
+    // The second mount, on the same process, graded against its own document (SPEC section 6). This
+    // is the one check that the real compiled server — not an injected Fastify instance — actually
+    // serves both majors: the frozen /v1 document has to have reached the build, which for the
+    // container means through `COPY contract ./contract` and the generate step, with no git history
+    // in the build context.
+    const v2 = await fetch(`http://127.0.0.1:${port}/v2/health`)
+    expect(v2.status).toBe(200)
+    const v2Body = (await v2.json()) as Record<string, unknown>
+    expect(v2Body.abs).toEqual({ reachable: true })
+    const validateV2 = contractValidator('Health', '/v2')
+    const v2Valid = validateV2(v2Body)
+    expect(validateV2.errors).toBeNull()
+    expect(v2Valid).toBe(true)
 
     // Once the first probe actually settles - no real Sonos on the CI/test network, so discovery
     // finds nothing - the now-confirmed-unreachable Sonos does drag the overall status down.

@@ -90,7 +90,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(typeof body.refreshToken).toBe('string')
     expect(body.user).toMatchObject({ username: LIVE_USER })
 
-    const validate = contractValidator('AuthTokens')
+    const validate = contractValidator('AuthTokens', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
   })
@@ -104,7 +104,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 
-    const validate = contractValidator('AuthTokens')
+    const validate = contractValidator('AuthTokens', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
     expect(typeof body.accessToken).toBe('string')
@@ -122,7 +122,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(res.status).toBe(200)
     const body = (await res.json()) as { items: { id: string; title: string; durationSeconds: number }[] }
 
-    const validate = contractValidator('LibraryItemPage')
+    const validate = contractValidator('LibraryItemPage', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -141,7 +141,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(res.status).toBe(200)
     const body = (await res.json()) as { id: string; progress: { positionSeconds: number; isFinished: boolean } }
 
-    const validate = contractValidator('LibraryItem')
+    const validate = contractValidator('LibraryItem', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -171,7 +171,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       items: { id: string; progress?: { positionSeconds: number; isFinished: boolean } }[]
     }
 
-    const validate = contractValidator('LibraryItemPage')
+    const validate = contractValidator('LibraryItemPage', '/v1')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 

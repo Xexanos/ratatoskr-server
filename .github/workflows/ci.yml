@@ -87,8 +87,37 @@ jobs:
             commitlint --from ${{ github.event.pull_request.base.sha }} \
                        --to ${{ github.event.pull_request.head.sha }} --verbose
 
+  # /v1 is served frozen at the contract-1.4.0 tag (SPEC section 6, ADR-0001), from a tracked copy at
+  # contract/v1/openapi.yaml rather than read out of git history — the image build gets no .git, and
+  # keeping it hermetic is worth more than avoiding this copy. This job is what makes the copy a
+  # freeze instead of a duplicate: it holds the two byte-identical as git blobs.
+  #
+  # The realistic accident is not a deliberate edit but a sweep — a reformat, a lint rule, a
+  # search-and-replace across contract/** — silently reshaping the surface installed app versions
+  # talk to. Runs on pushes as well as PRs, because that is a property of the branch, not of a
+  # proposed change to it.
+  contract-freeze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Only the tagged commit is needed, not the history leading up to it.
+      - run: git fetch --depth=1 origin tag contract-1.4.0
+      - name: contract/v1/openapi.yaml must be contract 1.4.0, verbatim
+        run: |
+          frozen=$(git rev-parse contract-1.4.0:contract/openapi.yaml)
+          served=$(git rev-parse HEAD:contract/v1/openapi.yaml)
+          if [ "$frozen" = "$served" ]; then
+            echo "contract/v1/openapi.yaml matches contract-1.4.0 ($frozen)"
+            exit 0
+          fi
+          echo "::error file=contract/v1/openapi.yaml::the frozen /v1 contract no longer matches the contract-1.4.0 tag ($served != $frozen). /v1 is the surface installed app versions talk to; restore it with: git show contract-1.4.0:contract/openapi.yaml > contract/v1/openapi.yaml"
+          diff -u <(git show contract-1.4.0:contract/openapi.yaml) <(git show HEAD:contract/v1/openapi.yaml) || true
+          exit 1
+
   # SPEC section 6: contract/openapi.yaml is the single source of truth and must not
-  # change in a breaking way within a major without a major version bump.
+  # change in a breaking way within a major without a major version bump. Only that document — the
+  # other served major, /v1, is frozen rather than versioned, and contract-freeze above gates it more
+  # strictly than any breaking-change check could.
   oasdiff:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
