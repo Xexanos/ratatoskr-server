@@ -23,7 +23,7 @@ const DAY_MS = 24 * HOUR_MS
 // Small enough that a paced sweep costs a test nothing, large enough that the gap between two
 // refreshes is measurable rather than lost in scheduling noise.
 const TEST_SPACING_MS = 20
-const OPTIONS = { chainSpacingMs: TEST_SPACING_MS, refreshIntervalMs: DAY_MS, refreshJitterMs: HOUR_MS }
+const OPTIONS = { chainSpacingMs: TEST_SPACING_MS, refreshIntervalMs: DAY_MS }
 
 // An access token shaped like the JWT Audiobookshelf issues, expiring `inSeconds` from now. Only
 // the `exp` claim is read (unverified), so nothing else has to be real.
@@ -268,6 +268,42 @@ describe('ChainKeepAlive.start', () => {
     await vi.advanceTimersByTimeAsync(HOUR_MS / 2)
     expect(abs.refresh).toHaveBeenCalledTimes(1)
 
+    keepAlive.stop()
+  })
+
+  // The jitter is a fraction of the interval, not a constant beside it. A deployment that shortens
+  // the interval to provoke the dead-chain path (KEEP_ALIVE_REFRESH_INTERVAL_MS) would otherwise
+  // wait out an hour of spread on top of its five seconds.
+  it('scales the jitter to the interval, so a shortened one is not swamped by it', async () => {
+    const abs = fakeAbs()
+    const keepAlive = build(abs, { refreshIntervalMs: 5000, random: () => 1 }, memoryStore([entryOf('phone')]))
+    keepAlive.start()
+
+    // A twenty-fourth of five seconds is about 208 ms, so the whole window is inside this step.
+    await vi.advanceTimersByTimeAsync(6000)
+
+    expect(abs.refresh).toHaveBeenCalledTimes(1)
+    keepAlive.stop()
+  })
+
+  // At a shortened interval a sweep can still be walking when the next is due — the normal case for
+  // the test deployments the knob exists for. Starting a second walk beside the first would queue
+  // every chain twice over, and the pile-up grows with each interval.
+  it('skips a scheduled sweep while the previous one is still walking', async () => {
+    const abs = fakeAbs()
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const store = memoryStore([entryOf('phone'), entryOf('tablet'), entryOf('watch')])
+    // Chains spaced wider than the interval: the sweep due at 2000 lands mid-walk of the one that
+    // started at 1000 (chains at 1000, 1900, 2800).
+    const keepAlive = build(abs, { refreshIntervalMs: 1000, chainSpacingMs: 900, random: () => 0, logger }, store)
+    keepAlive.start()
+
+    await vi.advanceTimersByTimeAsync(2950)
+
+    // One walk's worth of chains, and the skip said so — a second walk beside the first would have
+    // queued all three again, and the pile-up would grow with every interval.
+    expect(abs.refresh).toHaveBeenCalledTimes(3)
+    expect(logger.info).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('skipping'))
     keepAlive.stop()
   })
 

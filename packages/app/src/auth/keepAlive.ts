@@ -6,12 +6,14 @@ import { chainRefreshedAt, type AbsChain, type SessionEntry, type SessionStore }
 
 // How often every stored chain is renewed. Daily, as ADR-0001 decided: Audiobookshelf's refresh
 // window is at least seven days, so a sweep a day means a chain survives six missed ones.
-const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
+export const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
 
-// Spread on top of that interval, drawn once per sweep. Two servers started by the same update do
-// not then walk into ABS together every day at the same moment, and neither does this one land on
-// the same wall-clock second for the rest of its uptime.
-const REFRESH_JITTER_MS = 60 * 60 * 1000
+// The jitter window, as a fraction of whatever the interval is: a spread drawn on top of each
+// interval so two servers started by the same update do not walk into ABS together every day at the
+// same moment, and neither does one of them land on the same wall-clock second for the rest of its
+// uptime. A twenty-fourth gives the daily default its hour, and — being derived rather than a
+// constant of its own — cannot outgrow a shortened interval and swamp the thing it is spreading.
+const REFRESH_JITTER_FRACTION = 24
 
 // The gap between two chains within one sweep. Deliberately over a second: below Audiobookshelf
 // 2.35.1 the refresh token is minted from second-precision timestamps with no per-session claim, so
@@ -36,8 +38,10 @@ export interface KeepAliveLogger {
 type RefreshOutcome = { kind: 'renewed'; chain: AbsChain } | { kind: 'dead' } | { kind: 'gone' }
 
 export interface KeepAliveOptions {
+  // How often the sweep runs. The one knob an operator can reach (KEEP_ALIVE_REFRESH_INTERVAL_MS,
+  // SPEC section 7), because it is also the boot pass's staleness cutoff — which is what lets a test
+  // deployment provoke the dead-chain path by restarting instead of by waiting a day.
   refreshIntervalMs?: number
-  refreshJitterMs?: number
   chainSpacingMs?: number
   accessTokenMarginSeconds?: number
   // Injected so a test can pin the jitter it would otherwise have to guess.
@@ -62,7 +66,6 @@ export interface KeepAliveOptions {
 // `UPSTREAM_SESSION_LOST` — "your password, please" — instead of the 401 that means "signed out".
 export class ChainKeepAlive {
   private readonly refreshIntervalMs: number
-  private readonly refreshJitterMs: number
   private readonly chainSpacingMs: number
   private readonly accessTokenMarginSeconds: number
   private readonly random: () => number
@@ -72,6 +75,8 @@ export class ChainKeepAlive {
   private running = false
   // Set by stop(), read between the steps of a paced batch — a sweep must not outlive the server.
   private aborted = false
+  // Whether a sweep is mid-walk, so the schedule can skip rather than stack (see scheduleSweep).
+  private sweeping = false
   // When the last renewal of any kind finished, so a sweep can leave the spacing gap after an
   // on-demand refresh too (see refreshEach).
   private lastRefreshAt = 0
@@ -88,7 +93,6 @@ export class ChainKeepAlive {
     options: KeepAliveOptions = {},
   ) {
     this.refreshIntervalMs = options.refreshIntervalMs ?? REFRESH_INTERVAL_MS
-    this.refreshJitterMs = options.refreshJitterMs ?? REFRESH_JITTER_MS
     this.chainSpacingMs = options.chainSpacingMs ?? CHAIN_SPACING_MS
     this.accessTokenMarginSeconds = options.accessTokenMarginSeconds ?? ACCESS_TOKEN_MARGIN_SECONDS
     this.random = options.random ?? Math.random
@@ -122,7 +126,12 @@ export class ChainKeepAlive {
 
   // Renew every live chain in the store, paced (see CHAIN_SPACING_MS).
   async sweep(): Promise<void> {
-    await this.refreshEach(this.store.list().filter(isLive))
+    this.sweeping = true
+    try {
+      await this.refreshEach(this.store.list().filter(isLive))
+    } finally {
+      this.sweeping = false
+    }
   }
 
   // The boot pass: only the chains that missed a sweep, stalest first, so a recovery that gets
@@ -257,15 +266,20 @@ export class ChainKeepAlive {
   }
 
   private scheduleSweep(): void {
-    this.timer = setTimeout(
-      () => {
-        // Rescheduled before the sweep rather than after it, so the next day is armed even if this
-        // sweep is slow, and so the cadence cannot drift by however long a full store takes.
-        if (this.running) this.scheduleSweep()
-        void this.sweep().catch((err: unknown) => this.logger?.warn({ err }, 'the daily chain sweep failed'))
-      },
-      this.refreshIntervalMs + Math.floor(this.random() * this.refreshJitterMs),
-    )
+    const jitter = Math.floor(this.random() * (this.refreshIntervalMs / REFRESH_JITTER_FRACTION))
+    this.timer = setTimeout(() => {
+      // Rescheduled before the sweep rather than after it, so the next interval is armed even if
+      // this sweep is slow, and so the cadence cannot drift by however long a full store takes.
+      if (this.running) this.scheduleSweep()
+      // A sweep still walking when the next one comes due is skipped rather than started beside it.
+      // At the daily default this cannot happen; at an interval shortened for a test deployment it
+      // is the normal case, and stacking the walks would queue every chain several times over.
+      if (this.sweeping) {
+        this.logger?.info({}, 'the previous chain sweep is still running; skipping this one')
+        return
+      }
+      void this.sweep().catch((err: unknown) => this.logger?.warn({ err }, 'the daily chain sweep failed'))
+    }, this.refreshIntervalMs + jitter)
     // Never keep the process alive for the sweep: it is maintenance, and shutdown stops it anyway.
     this.timer.unref?.()
   }

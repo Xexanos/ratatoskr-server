@@ -124,6 +124,7 @@ services:
       # RESUME_REWIND_SECONDS: "10"                     # rewind this far when resuming a book (SPEC §5)
       # WRITE_POSITION_BACKOFF_SECONDS: "2"             # settle window before writing a reached position back (SPEC §5)
       # LISTENING_TOKEN_REFRESH_MARGIN_SECONDS: "300"   # renew the ABS token this long before it expires
+      # KEEP_ALIVE_REFRESH_INTERVAL_MS: "86400000"      # how often stored ABS sessions are renewed (SPEC §8); daily is right — lowering it only adds upstream traffic
       # SHUTDOWN_TIMEOUT_MS: "5000"                     # upper bound on the graceful-shutdown drain
       # VALIDATE_RESPONSES: "true"                      # off by default; dev/staging aid, validates every response against the contract (per-response overhead)
 

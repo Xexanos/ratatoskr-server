@@ -96,7 +96,10 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // renewed daily, the ones that went stale while this server was down are renewed now, and the
   // request path renews an access token that has run out (SPEC section 8). Non-blocking — a slow or
   // unreachable Audiobookshelf may delay the first request, never the boot.
-  const keepAlive = new ChainKeepAlive(abs, store, { logger: app.log })
+  const keepAlive = new ChainKeepAlive(abs, store, {
+    refreshIntervalMs: config.keepAliveRefreshIntervalMs,
+    logger: app.log,
+  })
   keepAlive.start()
   // On shutdown, stop any active session (writes the final position back to ABS) before releasing
   // the Sonos subscription. Best-effort and optional-chained so injected Partial fakes are fine.

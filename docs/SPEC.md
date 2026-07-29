@@ -257,6 +257,15 @@ if something required is missing:
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
   1.4.0 contract, see section 8) and is removed together with `/v1`.
+- `KEEP_ALIVE_REFRESH_INTERVAL_MS` (optional, default 86400000 — a day) — how often the keep-alive
+  loop renews every stored Audiobookshelf chain (section 8), and with it the boot pass's staleness
+  cutoff, since a chain is stale exactly when it missed a sweep. The daily default is what ADR-0001
+  decided and what a deployment should run; the knob exists because it is also the only lever that
+  makes the dead-chain path reachable on demand — a test deployment sets it low, restarts, and the
+  chains it holds count as stale immediately, instead of waiting out a day or pinning Audiobookshelf's
+  own token lifetimes short. Lowering it in production only adds upstream traffic: it buys no
+  resilience, since a chain already survives six missed sweeps. The jitter is not separately
+  configurable — it is a fraction of this interval, so the two cannot drift apart.
 - `SHUTDOWN_TIMEOUT_MS` (optional, default 5000) — upper bound on the graceful-shutdown drain
   (section 5); the process exits after this even if the final write is still hung.
 - `RESUME_REWIND_SECONDS` (optional, default 10) — resume this many seconds before the stored

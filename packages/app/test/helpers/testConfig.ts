@@ -21,6 +21,10 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     seekRetries: 2,
     progressWriteThresholdSeconds: 5,
     listeningTokenRefreshMarginSeconds: 300,
+    // The shipped cadence. Route tests build an app and therefore arm the keep-alive loop; a day
+    // means its sweep never fires inside a test, and the chains they create are never stale enough
+    // for the boot pass either — so no test touches ABS by merely building an app.
+    keepAliveRefreshIntervalMs: 24 * 60 * 60 * 1000,
     shutdownTimeoutMs: 5000,
     resumeRewindSeconds: 0,
     writePositionBackoffSeconds: 0,
