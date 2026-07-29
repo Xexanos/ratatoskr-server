@@ -11,8 +11,8 @@ import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
 import { securityHandlers } from './security.js'
-import { ApiService } from './service.js'
 import { createTokenGuard } from './tokenGuard.js'
+import { V1ApiService } from './v1/service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
 // the raw `req.url` including the query string, so a path-based redact of `req.query.token`
@@ -96,7 +96,7 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // securityHandler as a preHandler. Mounted under /v1 (the contract's paths omit the prefix).
   // The same API_PREFIX the routes are mounted under below, so the cover URLs the service mints can
   // never drift from the mount they have to be resolvable against.
-  const service = new ApiService({ abs, sonos, sessions, apiPrefix: API_PREFIX })
+  const service = new V1ApiService({ abs, sonos, sessions, apiPrefix: API_PREFIX })
   const methods = service as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
   // Every bearer-protected operation proves the caller's token against ABS before acting —
   // either its handler forwards the token itself (self-validating), or the guard runs

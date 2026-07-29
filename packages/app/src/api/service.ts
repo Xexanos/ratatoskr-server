@@ -4,13 +4,11 @@ import type { AbsClient } from '../abs/client.js'
 import type { SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 import {
-  toAuthTokens,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
   toSessionResponse,
   toSpeaker,
-  type V1AuthTokens,
 } from './contractMapping.js'
 
 type Health = components['schemas']['Health']
@@ -19,22 +17,9 @@ type LibraryItemPage = components['schemas']['LibraryItemPage']
 type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItem = components['schemas']['LibraryItem']
 type Speaker = components['schemas']['Speaker']
-type LoginRequest = components['schemas']['LoginRequest']
 type Session = components['schemas']['Session']
+type StartSessionRequest = components['schemas']['StartSessionRequest']
 type SeekRequest = components['schemas']['SeekRequest']
-
-// The request bodies contract 1.4.0 has and 2.0.0 dropped — the refresh operation, and the refresh
-// token on startSession that arms the rotation handover. Declared here for the same reason as
-// V1AuthTokens: the served /v1 document is generated without types, and these shapes are frozen.
-interface V1RefreshRequest {
-  refreshToken: string
-}
-
-interface V1StartSessionRequest {
-  itemId: string
-  speakerId: string
-  refreshToken?: string
-}
 
 async function checkAbs(abs: AbsClient): Promise<DependencyStatus> {
   // probe() verifies the host is genuinely Audiobookshelf (GET /ping) rather than accepting any
@@ -78,11 +63,22 @@ export interface ApiServiceDeps {
 // each operationId to the matching method and binds `this` to this instance, so the abs/sonos
 // clients are available via constructor injection. Methods return the payload or throw a domain
 // error; the central error handler (errorHandler.ts) maps thrown errors to contract responses.
+//
+// This is the /v2 surface, and — until the sunset in ADR-0001 — also the body of the /v1 one, which
+// extends it (v1/service.ts) with the operations 2.0.0 dropped. Both majors implement the shared
+// operations here exactly once, so they cannot drift apart by accident; the members below are
+// protected for that subclass, not for open extension.
+//
+// The load-bearing consequence: **a change to a method here changes /v1 too**, and /v1 is frozen
+// because installed app versions run on it. The /v2 auth model (#134) resolves the upstream token
+// from a session entry instead of from `request.absToken`, which touches these methods — that
+// belongs in an override on the /v2 side, not in the shared body. What catches it either way is
+// test/v1Routes.test.ts, which pins /v1 to forwarding the caller's own bearer.
 export class ApiService {
-  private readonly abs: AbsClient
+  protected readonly abs: AbsClient
   private readonly sonos: SonosClient
-  private readonly sessions: SessionManager
-  private readonly apiPrefix: string
+  protected readonly sessions: SessionManager
+  protected readonly apiPrefix: string
 
   constructor(deps: ApiServiceDeps) {
     this.abs = deps.abs
@@ -102,15 +98,13 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  async login(request: FastifyRequest): Promise<V1AuthTokens> {
-    const { username, password } = request.body as LoginRequest
-    return toAuthTokens(await this.abs.login(username, password))
-  }
-
-  async refresh(request: FastifyRequest): Promise<V1AuthTokens> {
-    const { refreshToken } = request.body as V1RefreshRequest
-    return toAuthTokens(await this.abs.refresh(refreshToken))
-  }
+  // No login and no logout here on purpose. Both are declared by contract 2.0.0 and both hand out or
+  // revoke the opaque Ratatoskr token, which means writing session entries: the store exists
+  // (auth/sessionStore.ts) but nothing wires it to these routes yet (#134). Handing out an
+  // Audiobookshelf access token under that name in the meantime would put an upstream credential on
+  // the device, which is the one property the model exists to remove (SPEC section 8) — so glue's
+  // not-implemented stub answers both routes rather than something that only looks right. The /v1
+  // proxies live in v1/service.ts, deliberately not inherited from here.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
@@ -159,27 +153,25 @@ export class ApiService {
     return toSessionResponse(await this.sessions.current(request.absToken as string), this.apiPrefix)
   }
 
+  // No refresh token comes in any more (2.0.0 dropped the field), so the sync loop runs on the
+  // caller's access token alone until the server holds ABS chains of its own (#134, #135). /v1
+  // overrides this to keep accepting one.
   async startSession(request: FastifyRequest): Promise<Session> {
-    const { itemId, speakerId, refreshToken } = request.body as V1StartSessionRequest
-    const session = await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
+    const { itemId, speakerId } = request.body as StartSessionRequest
+    const session = await this.sessions.start(request.absToken as string, undefined, itemId, speakerId)
     return toSessionResponse(session, this.apiPrefix)
   }
 
-  // 204 normally; 200 + a final Session when a rotated token pair was still pending at stop, so the
-  // client can adopt it (SPEC section 8) — stop discards the in-memory tokens, so this is the last
-  // chance to deliver the pair.
+  // Always 204: nothing is handed back at stop any more, now that no token pair travels to the
+  // client (SPEC section 8). The final Session the manager returns is discarded here — including, in
+  // the one case where the shared manager still produces one, a rotated pair a /v1 listener was owed.
+  // That needs a /v2 caller presenting the same Audiobookshelf access token as that listener, i.e.
+  // one device speaking both majors, and it stops being expressible once /v2 bearers are Ratatoskr
+  // tokens (#134); the /v1 client re-authenticates in the meantime. Answering with it here is not the
+  // fix — that would put an upstream credential on a /v2 device, under a field 2.0.0 does not have.
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const final = await this.sessions.stop(request.absToken as string)
-    if (final === undefined) {
-      await reply.code(204).send()
-      return
-    }
-    // Bound to Session before handing it to send(), which takes `unknown`. Every other operation
-    // returns its body and so has the mapping step enforced by the method's return type; this is the
-    // one response on this surface that does not, and an unmapped domain session would sail through
-    // both the serializer (it drops unknown keys) and response validation (coverUrl is optional).
-    const body: Session = toSessionResponse(final, this.apiPrefix)
-    await reply.code(200).send(body)
+    await this.sessions.stop(request.absToken as string)
+    await reply.code(204).send()
   }
 
   // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).
