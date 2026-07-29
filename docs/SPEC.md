@@ -146,17 +146,14 @@ must build on:
   [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step with no
   deprecation markers, since `/v1` clients read the frozen 1.4.0 tag — and **1.4.0 under `/v1`**,
   frozen, until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED` stub). One
-  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service and
-  contract-derived token guard, and its own slot for security handlers (both majors share one set
-  today, since the scheme name and the presence check are identical); assembling that list is the only
-  place that knows there is more than one, so sunsetting `/v1` is removing an entry.
-- **Known gap during the transition window:** the `/v2` auth operations that need the session store
-  are declared by 2.0.0 and implemented by nothing, so they answer **404** — a status neither
-  operation declares. That is a deliberate, temporary breach of "implement it exactly": the
-  alternatives were to answer with an Audiobookshelf credential under a name that promises a
-  Ratatoskr one, or to document a 404 on `login` and `logout` that the finished surface will not have.
-  It is resolved by implementing them, not by amending the contract, and it is the one place `/v2`
-  knowingly lags this document.
+  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service,
+  security handlers and contract-derived token guard; assembling that list is the only place that knows
+  there is more than one, so sunsetting `/v1` is removing an entry. The two majors' **auth models are
+  genuinely different**, which is what those per-major slots are for: both name the same bearer scheme
+  and mean a different credential by it — an Audiobookshelf access token proved upstream on `/v1`, an
+  opaque Ratatoskr token resolved in process on `/v2` (section 8) — and each major's guard therefore
+  exempts a different set of operations. Everything a client does *with* its token is shared code, and
+  runs on whichever Audiobookshelf token that major's guard put on the request.
 - `/v1` is frozen at the **`contract-1.4.0`** tag, and what it mounts is a tracked copy of that
   document at `contract/v1/openapi.yaml`. The `contract-freeze` CI job is what makes that a freeze
   rather than a duplicate: it holds the copy byte-identical to the tag. The accident it exists for is
@@ -309,6 +306,15 @@ re-login.
   token". The app reacts with a targeted password prompt; re-login creates a fresh chain
   and a **new** token and deletes the old entry (no in-place repair). This failure is rare
   and loud — the inverse of the old model's frequent silent re-logins.
+  Mechanically, "deletes the old entry" is the client's doing: `POST /v2/auth/login` is
+  unauthenticated, but reads a bearer when one is offered and signs that session out once
+  the new one exists. So a re-authenticating device sends the token it is replacing and ends
+  up with exactly one session, while a first sign-in sends none. The old entry is retired
+  only *after* the new one exists, and only best-effort: a rejected password must not sign a
+  device out of a session that still works, and once the new token is live, failing the
+  sign-in over a stale entry would lose a credential that does work. An offered token this
+  server does not know is ignored — the route must never turn a valid sign-in into a 401 —
+  and only the holder of a token can retire it this way, so no device can sign another out.
 - **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
   immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
   killing exactly this device's ABS session; other devices and other ABS clients are

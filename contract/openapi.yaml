@@ -77,6 +77,14 @@ paths:
 
         Each sign-in creates an independent session with its own token: signing in on one
         device never signs another out, and each device is revoked on its own.
+
+        This endpoint requires no bearer token, but **honours one if sent**. A client
+        replacing a session it can no longer use — after a 401 with
+        `UPSTREAM_SESSION_LOST`, say — should send the token it is replacing; that session
+        is then signed out once the new one exists, so the device ends up with exactly one
+        and leaves no orphan behind. Omitting it, as a first sign-in does, is equally
+        valid, and a token this server does not know is ignored: this endpoint never
+        answers 401 on account of the bearer.
       security: []
       tags: [system]
       requestBody:

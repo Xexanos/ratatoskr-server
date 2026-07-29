@@ -1,9 +1,11 @@
 import type { components } from '@ratatoskr/contract'
 import type { AbsTokenPair } from '../abs/client.js'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
+import type { DeviceSession } from '../auth/authService.js'
 import type { PlaybackSession, RotatedTokenPair } from '../playback/sessionManager.js'
 import type { SonosSpeaker } from '../sonos/client.js'
 
+type AuthSession = components['schemas']['AuthSession']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 type LibraryItem = components['schemas']['LibraryItem']
 type LibraryItemList = components['schemas']['LibraryItemList']
@@ -101,6 +103,17 @@ export function toAuthTokens(pair: AbsTokenPair): V1AuthTokens {
     accessToken: pair.accessToken,
     refreshToken: pair.refreshToken,
     user: { id: pair.user.id, username: pair.user.username },
+  }
+}
+
+// A signed-in device as its client sees it. The mirror image of toAuthTokens: same identity, but the
+// credential handed over is the Ratatoskr token and no Audiobookshelf token appears at all — the one
+// difference between the two majors' auth models, in one function. Takes the DeviceSession rather
+// than a store entry, so a caller has nothing to hand it that carries a chain.
+export function toAuthSession(session: DeviceSession): AuthSession {
+  return {
+    token: session.token,
+    user: { id: session.user.id, username: session.user.username },
   }
 }
 

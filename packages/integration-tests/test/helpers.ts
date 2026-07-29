@@ -86,6 +86,19 @@ export function sessionStoreEnv(): { SESSION_STORE_KEY: string; SESSION_STORE_PA
   return { SESSION_STORE_KEY: randomBytes(32).toString('base64'), SESSION_STORE_PATH: join(dir, 'sessions.enc') }
 }
 
+// Sign in through the spawned server and return the opaque Ratatoskr token, the way a /v2 client does
+// (SPEC section 8). Every authenticated /v2 test starts here: an Audiobookshelf token of our own is
+// not a usable bearer on that surface, which is the whole point of the model.
+export async function signIn(base: string, username: string, password: string): Promise<string> {
+  const res = await fetch(`${base}/v2/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!res.ok) throw new Error(`sign-in failed: ${res.status} ${await res.text()}`)
+  return ((await res.json()) as { token: string }).token
+}
+
 export async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createNetServer()

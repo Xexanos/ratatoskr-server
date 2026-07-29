@@ -3,6 +3,7 @@ import { get as httpsGet } from 'node:https'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../src/api/app.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 // The one thing worth proving end-to-end here (SPEC section 14): a configured
@@ -21,7 +22,7 @@ describe('buildApp TLS wiring', () => {
   })
 
   it('serves over plain HTTP when no TLS is configured', async () => {
-    app = await buildApp(testConfig())
+    app = await buildApp(testConfig(), { sessionStore: await tempSessionStore() })
     expect(app.server).not.toBeInstanceOf(HttpsServer)
   })
 
@@ -32,6 +33,7 @@ describe('buildApp TLS wiring', () => {
       testConfig({
         tls: { certPath: `${FIXTURES}cert.pem`, keyPath: `${FIXTURES}key.pem` },
       }),
+      { sessionStore: await tempSessionStore() },
     )
     expect(app.server).toBeInstanceOf(HttpsServer)
 

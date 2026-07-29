@@ -35,9 +35,9 @@ Runner: **Vitest** (TypeScript/ESM-native).
 - seek tolerance / settle math
 
 ### Component — one subsystem against a simulated neighbor
-- **ABS client** against a **fake ABS** HTTP server: login / refresh (both still used
-  upstream, though only login has a route on `/v2`), library projection, progress
-  read/write.
+- **ABS client** against a **fake ABS** HTTP server: login / logout / refresh (all three used
+  upstream, though `/v2` proxies none of them — login and logout serve its own session model,
+  refresh serves `/v1`'s handover), library projection, progress read/write.
 - **Sonos control** against the **fake Sonos** (see [Fakes](#the-fakes)):
   `SetAVTransportURI`, `Play`/`Pause`/`Seek`, `GetPositionInfo`/`GetTransportInfo`;
   asserts the DIDL-Lite requirement and that `RelTime` is trusted while the

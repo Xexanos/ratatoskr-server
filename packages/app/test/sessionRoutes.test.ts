@@ -5,6 +5,7 @@ import { buildApp } from '../src/api/app.js'
 import { NoActiveSessionError } from '../src/playback/errors.js'
 import type { SessionManager } from '../src/playback/sessionManager.js'
 import type { SonosClient } from '../src/sonos/client.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
@@ -35,11 +36,12 @@ const SESSION = {
 }
 
 // A valid-by-default token validator; override `abs` to simulate an invalid token.
-function appWith(sessions: Partial<SessionManager>, abs: Partial<AbsClient> = {}) {
+async function appWith(sessions: Partial<SessionManager>, abs: Partial<AbsClient> = {}) {
   return buildApp(testConfig(), {
     sessionManager: sessions as SessionManager,
     absClient: { validateToken: vi.fn().mockResolvedValue(undefined), ...abs } as AbsClient,
     sonosClient: {} as SonosClient,
+    sessionStore: await tempSessionStore(),
   })
 }
 
