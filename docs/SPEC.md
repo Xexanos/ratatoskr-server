@@ -142,9 +142,10 @@ must build on:
   of [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step
   with no deprecation markers, since `/v1` clients read the frozen 1.4.0 tag. `/v1` is served
   in parallel from that tag until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED`
-  stub). The server-side implementation of both — the session store, the `/v2` auth
-  endpoints, the parallel `/v1` mount — follows the contract in tracked issues, so for a
-  window the served surface lags this document.
+  stub). The server-side implementation of both follows the contract in tracked issues — the
+  session store and its boot-time wiring are in place; the `/v2` auth endpoints, the in-process
+  token guard and the parallel `/v1` mount are not — so for a window the served surface lags
+  this document.
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
   practice for the server: never remove or repurpose a field within a served major, only
@@ -211,18 +212,21 @@ if something required is missing:
   `SEEK_RETRIES` (optional, default 2) — tuning knobs for section 4; defaults come from the
   spike findings there.
 - `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default 5).
-- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required once the `/v2` auth model lands,
-  mutually exclusive) — key for the encrypted session store (section 8), as a value or a
-  Docker-secret-compatible file path. A 256-bit key, base64- or hex-encoded (`openssl rand
-  -base64 32`); a trailing newline in the file variant is tolerated. Missing key → the server
-  refuses to boot; wrong key → a clear error, never silent data loss.
-- `SESSION_STORE_PATH` — where that store file lives (section 8). Deliberately without a default,
-  like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation is a
-  property of the deployment, and a wrong guess would silently sign every device out on the next
-  restart. The container entrypoint supplies it the same way it supplies the certificate paths,
-  pointing into the image's own `/data` volume (the server's own persistent state, so future
-  additions have somewhere to go without another rename) — separate from the certificate's
-  `/tls`, since the certificate is regenerable and the store is not (see section 8).
+- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required, mutually exclusive) — key for the
+  encrypted session store (section 8), as a value or a Docker-secret-compatible file path. A
+  256-bit key, base64- or hex-encoded (`openssl rand -base64 32`); a trailing newline in the file
+  variant is tolerated. Missing key → the server refuses to boot; wrong key → a clear error, never
+  silent data loss.
+- `SESSION_STORE_PATH` (required) — where that store file lives (section 8). Deliberately without
+  a default, like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation
+  is a property of the deployment, and a wrong guess would silently sign every device out on the
+  next restart. The container entrypoint supplies it the same way it supplies the certificate
+  paths, pointing into the image's own `/data` volume (the server's own persistent state, so
+  future additions have somewhere to go without another rename) — separate from the certificate's
+  `/tls`, since the certificate is regenerable and the store is not (see section 8). The
+  entrypoint also refuses to start when that directory is not a mounted volume: it would be
+  writable either way, and the store would then silently disappear on the next container
+  recreation.
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
@@ -269,7 +273,11 @@ re-login.
   fingerprint, while this file is irreplaceable and losing it signs every device out. That
   also makes the backup rule one sentence: back up `/data`, not the cert. The key is
   operator-supplied and mandatory (`SESSION_STORE_KEY`, section 7); without it the server
-  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14).
+  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14). The store is
+  opened during startup, not on first use, so a wrong key, a corrupt file and a directory
+  that cannot be written all stop the boot while the operator is watching rather than
+  surfacing later as one user's failed sign-in — opening it creates the file when absent,
+  which is what makes the last of those visible at all.
 - **Keep-alive**: the server refreshes every stored ABS chain daily (jittered), refreshes
   stale chains on boot, and refreshes on demand when an access token expires mid-use. A
   chain now dies only if server↔ABS contact is lost for the entire ABS refresh window
