@@ -234,6 +234,15 @@ if something required is missing:
   256-bit key, base64- or hex-encoded (`openssl rand -base64 32`); a trailing newline in the file
   variant is tolerated. Missing key → the server refuses to boot; wrong key → a clear error, never
   silent data loss.
+  **A random value, not an operator-chosen passphrase, and deliberately so.** The point of encrypting
+  the store is that a copy of the *file* alone is worthless — a backup pulled off the host, a dataset
+  snapshot, a support bundle. Against that, the attack is offline and unlimited, so the only thing
+  standing in its way is the key's entropy: 256 random bits cannot be guessed, while a memorable
+  phrase realistically carries 40–70. A slow KDF (scrypt, Argon2id) would raise the cost per guess
+  but add no entropy, and what is behind the door is every signed-in device's ABS access *and*
+  refresh token. The ergonomic complaint a passphrase answers — "I have to keep a random string
+  somewhere" — is answered by `SESSION_STORE_KEY_FILE` instead: a password manager or `docker secret`
+  owns the file, and the operator never types or stores the value.
 - `SESSION_STORE_PATH` (required) — where that store file lives (section 8). Deliberately without
   a default, like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation
   is a property of the deployment, and a wrong guess would silently sign every device out on the
