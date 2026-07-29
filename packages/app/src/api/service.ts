@@ -55,8 +55,8 @@ export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
   sessions: SessionManager
-  // The version-mount prefix this service is served under (see contractMapping.ts's coverPathFor).
-  // Injected rather than read from the constant, so an instance always speaks for its own mount.
+  // The version-mount prefix this instance is served under. Injected, so the URLs its responses carry
+  // resolve against the surface the request arrived on (contractMapping.ts's coverPathFor).
   apiPrefix: string
 }
 
@@ -65,16 +65,9 @@ export interface ApiServiceDeps {
 // clients are available via constructor injection. Methods return the payload or throw a domain
 // error; the central error handler (errorHandler.ts) maps thrown errors to contract responses.
 //
-// This is the /v2 surface, and — until the sunset in ADR-0001 — also the body of the /v1 one, which
-// extends it (v1/service.ts) with the operations 2.0.0 dropped. Both majors implement the shared
-// operations here exactly once, so they cannot drift apart by accident; the members below are
-// protected for that subclass, not for open extension.
-//
-// The load-bearing consequence: **a change to a method here changes /v1 too**, and /v1 is frozen
-// because installed app versions run on it. The /v2 auth model (#134) resolves the upstream token
-// from a session entry instead of from `request.absToken`, which touches these methods — that
-// belongs in an override on the /v2 side, not in the shared body. What catches it either way is
-// test/majorMounts.test.ts, which pins /v1 to forwarding the caller's own bearer.
+// Every served major runs these operations from this one body, so they cannot drift apart by
+// accident — which also means a change here reaches every mount. The members below are protected for
+// the subclass in v1/, not for open extension.
 export class ApiService {
   protected readonly abs: AbsClient
   private readonly sonos: SonosClient
@@ -99,13 +92,11 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  // No login and no logout here on purpose. Both are declared by contract 2.0.0 and both hand out or
-  // revoke the opaque Ratatoskr token, which means writing session entries: the store exists
-  // (auth/sessionStore.ts) but nothing wires it to these routes yet (#134). Handing out an
-  // Audiobookshelf access token under that name in the meantime would put an upstream credential on
-  // the device, which is the one property the model exists to remove (SPEC section 8) — so glue's
-  // not-implemented stub answers both routes rather than something that only looks right. The /v1
-  // proxies live in v1/service.ts, deliberately not inherited from here.
+  // No login and no logout here on purpose: both hand out or revoke the opaque Ratatoskr token, and
+  // nothing wires the session store (auth/sessionStore.ts) to them yet. Answering with an
+  // Audiobookshelf access token under that name would put an upstream credential on the device, the
+  // one property the model exists to remove (SPEC section 8), so glue's not-implemented stub answers
+  // instead of something that only looks right.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
@@ -146,11 +137,10 @@ export class ApiService {
 
   // --- Playback (SPEC sections 4 and 5) ---
 
-  // How this major renders a session. Every session response below goes through it, so the wire shape
-  // is decided in exactly one place per major: /v1 overrides it to add the rotated Audiobookshelf pair
-  // (v1/service.ts), and this one deliberately cannot produce that field at all. The alternative —
-  // one mapper minting it for both majors — would leave an upstream credential off the /v2 wire only
-  // because the serializer drops what 2.0.0's schema omits (contractMapping.ts).
+  // Every session response goes through here, so a surface that puts an extra field on the wire says
+  // so in one place. This mapper cannot produce the rotated Audiobookshelf pair at all: leaving that
+  // to the serializer would make "no upstream credential on the wire" (SPEC section 8) depend on every
+  // response having a declared schema (contractMapping.ts).
   protected mapSession(session: PlaybackSession): MappedSession {
     return toSessionResponse(session, this.apiPrefix)
   }
@@ -163,30 +153,23 @@ export class ApiService {
     return this.mapSession(await this.sessions.current(request.absToken as string))
   }
 
-  // No refresh token comes in any more (2.0.0 dropped the field), so the sync loop runs on the
-  // caller's access token alone until the server holds ABS chains of its own (#134, #135). /v1
-  // overrides this to keep accepting one.
+  // The contract declares no refresh token on this request, so the sync loop runs on the caller's
+  // access token alone and playback outlives it only as long as that token does.
   async startSession(request: FastifyRequest): Promise<Session> {
     const { itemId, speakerId } = request.body as StartSessionRequest
     const session = await this.sessions.start(request.absToken as string, undefined, itemId, speakerId)
     return this.mapSession(session)
   }
 
-  // Always 204: nothing is handed back at stop any more, now that no token pair travels to the
-  // client (SPEC section 8). The final Session the manager returns is discarded here — including, in
-  // the one case where the shared manager still produces one, a rotated pair a /v1 listener was owed.
-  // That needs a /v2 caller presenting the same Audiobookshelf access token as that listener, i.e.
-  // one device speaking both majors, and it stops being expressible once /v2 bearers are Ratatoskr
-  // tokens (#134); the /v1 client re-authenticates in the meantime. Answering with it here is not the
-  // fix — that would put an upstream credential on a /v2 device, under a field 2.0.0 does not have.
+  // Always 204: no token pair travels to the client on this surface, so the final Session the manager
+  // returns has nothing left to deliver and is discarded (SPEC section 8, which also records what that
+  // costs when a session is shared with a surface that does deliver one).
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     await this.sessions.stop(request.absToken as string)
     await reply.code(204).send()
   }
 
   // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).
-  // The caller's token is forwarded so an adopted rotated pair stops being redelivered (SPEC
-  // section 8).
   async pauseSession(request: FastifyRequest): Promise<Session> {
     return this.mapSession(await this.sessions.pause(request.absToken as string))
   }
