@@ -277,12 +277,12 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     // The doomed chain is never refreshed before it is ended: refreshing rotates the token in place,
     // which would leave the logout naming a session that no longer matches.
     //
-    // The *per-device* half of that promise turns out to be version-dependent, which is why it is
-    // asserted conditionally below. On ABS 2.26.0 (the supported minimum) two logins of one user come
-    // back with the SAME refresh token — one session row per user, not one per login — so ending one
-    // ends them all. Newer ABS issues an independent chain per login, and there sign-out really is
-    // per device. ADR-0001's "one ABS chain per device login, never shared" therefore describes the
-    // newer behaviour only; on 2.26.0 the model degrades to one shared chain per user.
+    // The *per-device* half of that promise needs ABS >= 2.35.1, which is why it is asserted
+    // conditionally below. Before that release ABS built the refresh token from second-precision JWT
+    // timestamps with no per-session claim, so two sign-ins of one user inside the same second — which
+    // is exactly what this test does — came back with the identical token; the session rows differed,
+    // the token naming them at POST /logout did not (advplyr/audiobookshelf#5253). Probed: 2.26.0,
+    // 2.29.0, 2.31.0 and 2.35.0 collide, 2.35.1 does not. ADR-0001 carries the amended fact.
     it('ends the Audiobookshelf chain upstream, and only that one where ABS keeps them apart', async () => {
       const v1Login = async () =>
         (await (
@@ -311,9 +311,9 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       // That chain is dead — sign-out was not merely local forgetting. Holds on every version.
       expect((await absRefresh(doomed.refreshToken)).status).toBe(401)
 
-      // Only meaningful where the two logins actually got different chains (see above). Guarded on
-      // the upstream property itself rather than on a version string, so this starts asserting the
-      // moment the minimum ABS gains per-login sessions, and never asserts something ABS cannot do.
+      // Only meaningful where the two logins actually got distinct tokens (see above). Guarded on the
+      // upstream property itself rather than on a version string, so this starts asserting the moment
+      // the minimum ABS carries the fix, and never asserts something ABS cannot do.
       if (control.refreshToken !== doomed.refreshToken) {
         expect((await absRefresh(control.refreshToken)).ok).toBe(true)
       }
