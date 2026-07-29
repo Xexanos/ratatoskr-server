@@ -1,6 +1,8 @@
 import { AbsClient } from './abs/client.js'
 import { buildAbsDispatcher } from './abs/transport.js'
 import { buildApp } from './api/app.js'
+import { SessionStoreError } from './auth/errors.js'
+import { SessionStore } from './auth/sessionStore.js'
 import { ConfigError, loadConfig } from './config/index.js'
 import { SonosClient } from './sonos/client.js'
 
@@ -53,6 +55,23 @@ async function main(): Promise<void> {
       process.exit(1)
     }
   }
+  // The encrypted session store (SPEC section 8) is opened as part of startup rather than on first
+  // use: a missing directory, an unwritable volume, a wrong key and a corrupt file must all stop the
+  // boot while the operator is watching, instead of surfacing hours later as one user's failed
+  // sign-in. Opening it *is* that check — the store creates its file when absent, so an unwritable
+  // volume shows up here too. Same fail-loud shape as the ABS_URL probe above.
+  // The handle is deliberately not retained: no request path reads the store yet, so this call is
+  // here for its boot-time effect alone.
+  try {
+    await SessionStore.open({ path: config.sessionStorePath, key: config.sessionStoreKey })
+  } catch (err) {
+    if (err instanceof SessionStoreError) {
+      console.error(err.message)
+      process.exit(1)
+    }
+    throw err
+  }
+
   const app = await buildApp(config, { absClient: abs, sonosClient: sonos })
   // Handle the listen rejection explicitly: on a bind failure (e.g. EADDRINUSE) Fastify
   // rejects and does not log it itself, so without this the process would die with a raw

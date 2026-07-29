@@ -48,6 +48,22 @@ export class SessionStoreIoError extends SessionStoreError {
   }
 }
 
+// The file could not be written. Separate from the read failure because the remedy is about the
+// *directory*, not the file — and because this is what a mistyped SESSION_STORE_PATH or an
+// unwritable volume looks like. Wrapped rather than left raw so it reaches the operator as an
+// actionable line at boot (main.ts) instead of a stack trace.
+export class SessionStoreWriteError extends SessionStoreError {
+  constructor(path: string, options: { cause: unknown }) {
+    super(
+      `The session store at ${path} could not be written. Check that its directory exists and is ` +
+        'writable by the user this server runs as (SESSION_STORE_PATH; in the container, the /data ' +
+        'volume). Refusing to continue.',
+      options,
+    )
+    this.name = 'SessionStoreWriteError'
+  }
+}
+
 // The file is not a session store this build can read: foreign content, a truncated write,
 // an unknown format version, or a payload that survived decryption but is not the expected
 // shape. Distinct from SessionStoreKeyError because the remedy differs — a wrong key is

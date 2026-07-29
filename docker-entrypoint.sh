@@ -29,6 +29,35 @@ if [ -z "$SESSION_STORE_PATH" ]; then
   export SESSION_STORE_PATH="/data/sessions.enc"
 fi
 
+# ...and that directory has to be a real mount, not merely a writable path. An operator upgrading
+# with a compose.yaml older than the /data volume has no such mount: the store would land in the
+# container's writable layer and vanish on the next `docker compose up` — every device signed out,
+# silently, on an ordinary image update. The application cannot detect this (the directory IS
+# writable), so the probe belongs here. Unlike the /tls probe below this one does not test
+# writability — the store's own first write does that, and reports it (see SessionStoreWriteError);
+# what is untestable from inside the process is persistence, which is all this checks.
+#
+# A mount has a different device number than the image's root filesystem. Compared on the directory,
+# since that is what the store writes into — except that a file bind-mounted straight onto the store
+# path is persistent too while its directory is not, so that case is accepted as well.
+SESSION_STORE_DIR="$(dirname "$SESSION_STORE_PATH")"
+if ! mkdir -p "$SESSION_STORE_DIR" 2>/dev/null; then
+  echo "ratatoskr: cannot create $SESSION_STORE_DIR for the session store (SESSION_STORE_PATH=$SESSION_STORE_PATH)." >&2
+  exit 1
+fi
+ROOT_DEV="$(stat -c %d /)"
+if [ "$(stat -c %d "$SESSION_STORE_DIR")" = "$ROOT_DEV" ] &&
+  { [ ! -e "$SESSION_STORE_PATH" ] || [ "$(stat -c %d "$SESSION_STORE_PATH")" = "$ROOT_DEV" ]; }; then
+  echo "ratatoskr: $SESSION_STORE_DIR is not a mounted volume, so the session store would be lost" >&2
+  echo "ratatoskr: on the next container recreation — signing every device out. Mount a volume there:" >&2
+  echo "ratatoskr:   volumes:" >&2
+  echo "ratatoskr:     - ./data:$SESSION_STORE_DIR" >&2
+  echo "ratatoskr: (create the host directory first and make it writable by uid $(id -u), e.g." >&2
+  echo "ratatoskr: 'mkdir -p data && chown $(id -u):$(id -g) data'). Upgrading from an older" >&2
+  echo "ratatoskr: compose.yaml? Copy the volumes block from the current one." >&2
+  exit 1
+fi
+
 if [ -z "$TLS_CERT_PATH" ] && [ -z "$TLS_KEY_PATH" ] && [ "$ALLOW_PLAIN_HTTP" != "true" ]; then
   if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
     # Fail with an actionable message rather than a raw openssl/permission error. A bind-mounted

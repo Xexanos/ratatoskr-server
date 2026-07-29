@@ -1,8 +1,10 @@
 # docker compose deployment for the Ratatoskr server.
 #
 # Quick start:
-#   1. Set ABS_URL and ABS_STREAMER_API_KEY in the `environment:` block below.
-#   2. docker compose up -d
+#   1. Set ABS_URL, ABS_STREAMER_API_KEY and SESSION_STORE_KEY in the `environment:` block below
+#      (`openssl rand -base64 32` generates the last one — keep a copy of it).
+#   2. mkdir -p tls data   — both are bind-mounted below and must be writable by uid 1000.
+#   3. docker compose up -d
 #
 # Everything is configured in this one file — no separate .env needed. Each variable is documented
 # inline; SPEC sections 7 and 14 carry the deeper rationale. Missing or invalid values are reported
@@ -45,7 +47,7 @@ services:
     stop_grace_period: 15s
 
     environment:
-      # ─────────────────────────── Required — edit these two ───────────────────────────
+      # ─────────────────────────── Required — edit these three ───────────────────────────
       # Your Audiobookshelf base URL. Use https:// so credentials and tokens are not sent in
       # cleartext (SPEC section 14); for an http:// URL also uncomment ABS_ALLOW_PLAIN_HTTP below.
       ABS_URL: "https://192.168.1.50:13378"
@@ -53,6 +55,12 @@ services:
       # streamer account"). It is embedded in the media URLs handed to speakers, so it must never
       # be a real listener's account.
       ABS_STREAMER_API_KEY: ""
+      # Key for the encrypted store of signed-in devices (SPEC section 8). Generate it with
+      # `openssl rand -base64 32` and KEEP A COPY: with the wrong key the store refuses to open
+      # rather than throw the file away, and losing it means every device has to sign in again.
+      # Prefer a Docker/Compose secret? Leave this empty and set SESSION_STORE_KEY_FILE below —
+      # never both.
+      SESSION_STORE_KEY: ""
 
       # ─────────── Ratatoskr's own listener / TLS (SPEC section 14) — pick ONE ───────────
       # Default (all three below left commented): the container generates a persistent self-signed
@@ -94,17 +102,14 @@ services:
       #                                                 # vanished speaker fails fast (502) instead of hanging
 
       # ─────────── Encrypted session store (SPEC section 8) ───────────
-      # Key for the file that keeps signed-in devices signed in across a server restart. A 256-bit
-      # key, base64 or hex — generate one with `openssl rand -base64 32` and keep a copy: with the
-      # wrong key the store refuses to open rather than throw the file away, and losing the key
-      # means every device has to sign in again. Set the value directly, OR point at a file (a
-      # Docker/Compose secret) — never both.
-      # SESSION_STORE_KEY: "replace-with-the-output-of-openssl-rand--base64-32"
+      # The key itself is required and lives in the block at the top. Alternative to setting it
+      # there: mount it as a Docker/Compose secret and name the file here instead (never both).
       # SESSION_STORE_KEY_FILE: "/run/secrets/session_store_key"
       # Where the store file lives (file mode 0600). Leave it unset and the container puts it in the
-      # ./data volume below. Only ever point ONE running Ratatoskr at a given store file: a second
-      # instance sharing it is refused rather than allowed to overwrite the first one's signed-in
-      # devices, so its sign-ins then fail until you give it its own path.
+      # ./data volume below — which must be a real mount, or the container refuses to start rather
+      # than let the store vanish on the next recreation. Only ever point ONE running Ratatoskr at a
+      # given store file: a second instance sharing it is refused rather than allowed to overwrite
+      # the first one's signed-in devices, so its sign-ins then fail until you give it its own path.
       # SESSION_STORE_PATH: "/data/sessions.enc"
 
       # ─────────── Listener port ───────────

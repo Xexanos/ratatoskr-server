@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { open, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { SessionStoreCorruptError, SessionStoreError, SessionStoreKeyError } from './errors.js'
+import { SessionStoreCorruptError, SessionStoreError, SessionStoreKeyError, SessionStoreWriteError } from './errors.js'
 
 // On-disk envelope of the session store (SPEC section 8): a single AES-256-GCM file.
 //
@@ -79,7 +79,17 @@ function describeForeignMagic(magic: Buffer): string {
 // full bytes to a sibling temp file, flush them to disk, then rename over the target. Rename
 // within a directory is atomic, so a crash at any point leaves either the previous store or
 // the new one — never a truncated mix, which would cost every device its session.
+//
+// Every failure here is wrapped, for the reason on SessionStoreWriteError.
 export async function writeFileAtomic(path: string, bytes: Buffer): Promise<void> {
+  try {
+    await writeAndPublish(path, bytes)
+  } catch (cause) {
+    throw new SessionStoreWriteError(path, { cause })
+  }
+}
+
+async function writeAndPublish(path: string, bytes: Buffer): Promise<void> {
   // The temp name is per-process, and no other name in the directory is ever touched. Two
   // processes sharing one name would defeat the atomic replace outright: one unlinks the name
   // the other still holds open, so a rename can publish a file its writer has not finished —

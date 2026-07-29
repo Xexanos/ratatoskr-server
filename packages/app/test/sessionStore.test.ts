@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SessionStoreConflictError, SessionStoreCorruptError, SessionStoreKeyError } from '../src/auth/errors.js'
+import {
+  SessionStoreConflictError,
+  SessionStoreCorruptError,
+  SessionStoreKeyError,
+  SessionStoreWriteError,
+} from '../src/auth/errors.js'
 import { decodeStoreFile, encodeStoreFile } from '../src/auth/sessionFile.js'
 import { SessionStore } from '../src/auth/sessionStore.js'
 
@@ -255,6 +260,21 @@ describe('SessionStore', () => {
     await writeFile(path, full.subarray(0, 20))
 
     await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
+  })
+
+  // The store is opened at boot (main.ts), and open() creates its file when absent — so a
+  // mistyped SESSION_STORE_PATH or a volume this user cannot write to surfaces here, as a
+  // SessionStoreError with an actionable message, rather than as a raw ENOENT stack.
+  it('refuses to open when its file cannot be written, naming the path and its directory', async () => {
+    const failure = await SessionStore.open({ path: join(dir, 'not-a-directory', 'sessions.enc'), key: KEY }).catch(
+      (err: unknown) => err,
+    )
+
+    expect(failure).toBeInstanceOf(SessionStoreWriteError)
+    expect((failure as Error).message).toContain(join(dir, 'not-a-directory', 'sessions.enc'))
+    expect((failure as Error).message).toContain('SESSION_STORE_PATH')
+    // The underlying errno is kept as the cause, so the log still says which syscall failed.
+    expect((failure as Error).cause).toBeDefined()
   })
 
   // These payloads authenticate under the right key but are not a store — reachable only by a

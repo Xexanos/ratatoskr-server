@@ -1,7 +1,16 @@
 import { once } from 'node:events'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { FakeSonos } from '@ratatoskr/fake-sonos'
-import { assertServerBuilt, cleanEnv, freePort, spawnServer, stopServer, waitUntilReady, type SpawnedServer } from './helpers.js'
+import {
+  assertServerBuilt,
+  cleanEnv,
+  freePort,
+  sessionStoreEnv,
+  spawnServer,
+  stopServer,
+  waitUntilReady,
+  type SpawnedServer,
+} from './helpers.js'
 import { createAbsUser, createStreamerApiKey } from './absSeed.js'
 
 // Graceful shutdown (SPEC §5): on SIGTERM the compiled server must stop the active session — writing
@@ -65,6 +74,7 @@ describe.skipIf(abs === null || process.platform === 'win32')('graceful shutdown
         RESUME_REWIND_SECONDS: '0',
         WRITE_POSITION_BACKOFF_SECONDS: '0',
         PORT: String(port),
+        ...sessionStoreEnv(),
       }),
     )
     await waitUntilReady(server, port)

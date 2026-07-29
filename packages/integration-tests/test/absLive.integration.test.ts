@@ -4,6 +4,7 @@ import {
   cleanEnv,
   contractValidator,
   freePort,
+  sessionStoreEnv,
   spawnServer,
   stopServer,
   waitUntilReady,
@@ -56,6 +57,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
         ABS_STREAMER_API_KEY: streamerApiKey,
         ALLOW_PLAIN_HTTP: 'true',
         PORT: String(port),
+        ...sessionStoreEnv(),
       }),
     )
     await waitUntilReady(server, port)

@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { AddressInfo, createServer as createNetServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { load } from 'js-yaml'
 import { Ajv, type ValidateFunction } from 'ajv'
@@ -44,12 +47,36 @@ export const CONFIG_KEYS = [
   'TLS_KEY_PATH',
   'ALLOW_PLAIN_HTTP',
   'VALIDATE_RESPONSES',
+  'SESSION_STORE_KEY',
+  'SESSION_STORE_KEY_FILE',
+  'SESSION_STORE_PATH',
 ]
 
 export function cleanEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env }
   for (const key of CONFIG_KEYS) delete env[key]
   return { ...env, ...overrides }
+}
+
+// The encrypted session store every spawned server opens at boot (SPEC section 8). A fresh file
+// and key per server on purpose: two instances sharing one store is exactly the misconfiguration
+// the store refuses to tolerate, so sharing one here would make tests fight each other. Spread it
+// into cleanEnv() for any test that expects the server to come up.
+const storeDirs: string[] = []
+process.once('exit', () => {
+  for (const dir of storeDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // a leftover temp dir is not worth failing a test run over
+    }
+  }
+})
+
+export function sessionStoreEnv(): { SESSION_STORE_KEY: string; SESSION_STORE_PATH: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'rtk-it-store-'))
+  storeDirs.push(dir)
+  return { SESSION_STORE_KEY: randomBytes(32).toString('base64'), SESSION_STORE_PATH: join(dir, 'sessions.enc') }
 }
 
 export async function freePort(): Promise<number> {
