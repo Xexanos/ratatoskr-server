@@ -1,0 +1,86 @@
+name: Contract tag
+
+# Freezes every contract version under an immutable git tag. contract/openapi.yaml is the single
+# source of truth for the client API (SPEC section 6); each info.version is a distinct, permanent
+# contract text that clients pin against — the Android app generates its client types from a
+# contract-<x.y.z> tag, and a superseded major is served frozen directly from one — the tag itself
+# is the freeze (ADR-0001). This workflow makes that tag appear on its own: the bump is the human
+# decision, made
+# on a PR and gated by the contract-version job in ci.yml; the tag is its mechanical, byte-exact
+# consequence once the version lands on main.
+#
+# Not gated on a green CI run, unlike the server image's v<x.y.z> tags (promote.yml). Those certify
+# that bytes passed E2E, so they must hang behind validation. A contract tag is an *identity*
+# statement — "this is the text of version x.y.z" — which no test makes truer, and its consumers
+# (a client generating types, a frozen major served from the tagged text) never ask if the server runs.
+# The validation a contract tag does need — the forward-bump guard and oasdiff — has already run on
+# the PR; hanging it on CI would only couple it to the deliberately unpinned abs-latest drift canary.
+#
+# Tags pushed with GITHUB_TOKEN do not trigger other workflows, so cutting the tag starts no loop.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - contract/openapi.yaml
+  # Manual healing: if a version reaches main without this running for it — a merge that lands the
+  # bump indirectly, or a merge order that dodged the path filter — dispatch it by hand. It only ever
+  # ensures the tag for whatever version main currently holds, so a redundant run is a safe no-op.
+  workflow_dispatch:
+
+permissions:
+  # Push the contract-<x.y.z> tag.
+  contents: write
+
+concurrency:
+  # Two pushes in quick succession would both create/verify the same tag; serialize, never cancel.
+  group: contract-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    # A contract tag only ever names the version main holds, so refuse to run against any other ref —
+    # a workflow_dispatch mistakenly aimed at a feature branch would otherwise tag that branch's HEAD.
+    # Push is main-only already; this guards the manual trigger.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history + tags: the tag is created on HEAD, and an already-existing one is compared
+          # blob-for-blob against HEAD's contract.
+          fetch-depth: 0
+      - name: Ensure contract-<info.version> tags this contract, verbatim
+        run: |
+          set -euo pipefail
+          # No `exit` in the awk — an early exit would SIGPIPE `git show` under pipefail; the `inside`
+          # guard already limits it to the one version under info:.
+          version=$(git show HEAD:contract/openapi.yaml |
+            awk '/^info:/ { inside = 1; next } /^[^[:space:]]/ { inside = 0 } inside && $1 == "version:" { print $2 }')
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=contract/openapi.yaml::info.version '$version' is not a plain x.y.z semver; refusing to tag"
+            exit 1
+          fi
+          tag="contract-$version"
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            # The tag exists and is immutable, so HEAD's contract must match it byte-for-byte. If it
+            # does, this run is redundant (a no-op). If it does not, the contract was changed without
+            # bumping the version — which the ci.yml guard prevents on PRs, so this is the backstop
+            # for a push that bypassed it (e.g. an admin override of branch protection).
+            tagged=$(git rev-parse "$tag:contract/openapi.yaml")
+            current=$(git rev-parse "HEAD:contract/openapi.yaml")
+            if [ "$tagged" = "$current" ]; then
+              echo "$tag already tags this contract ($tagged) — nothing to do."
+              exit 0
+            fi
+            echo "::error file=contract/openapi.yaml::$tag exists and points at a different contract ($tagged) than HEAD ($current). A released contract version is immutable — bump info.version instead of editing $version in place."
+            exit 1
+          fi
+
+          echo "Tagging $tag at $(git rev-parse --short HEAD)."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "contract $version" HEAD
+          # No-op if the remote already has it identical; fails loudly if it points elsewhere.
+          git push origin "$tag"
