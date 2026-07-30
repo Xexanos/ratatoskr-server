@@ -6,9 +6,9 @@ import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 // The clients are never touched: the bearer preHandler and the not-found handler both run before
-// any ApiService method. (The NotImplementedError fallback is reachable through a route again now
-// that /v2 declares login and logout without implementing them — majorMounts.test.ts covers that;
-// errorHandler.test.ts covers the mapping as a unit.)
+// any ApiService method. (Both majors currently implement everything they declare, so the
+// NotImplementedError fallback is not reachable through a mounted route; errorHandler.test.ts
+// covers its mapping as a unit.)
 async function buildTestApp() {
   return buildApp(testConfig(), {
     absClient: {} as AbsClient,

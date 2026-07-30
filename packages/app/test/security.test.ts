@@ -23,6 +23,12 @@ describe.each([
       MissingBearerError,
     )
   })
+
+  // RFC 7235: the auth-scheme is case-insensitive, so a client sending "bearer"/"BEARER" is not
+  // malformed and must still authenticate.
+  it.each(['bearer tok-123', 'BEARER tok-123'])('accepts a case-insensitive scheme (%s)', (authorization) => {
+    expect(() => handlers.bearerAuth?.(requestWith({ authorization }), reply, [])).not.toThrow()
+  })
 })
 
 describe('the credential each major stashes', () => {
