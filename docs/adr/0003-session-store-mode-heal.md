@@ -1,10 +1,15 @@
 # Session store file mode: heal to 0600 at open, warn, never block boot
 
 Decided in issue [#167](https://github.com/Xexanos/ratatoskr-server/issues/167) (2026-07).
+`SessionStore.open` re-asserts the store file's mode 0600 at boot - the **mode heal** (see
+CONTEXT.md) - instead of trusting the mode the file was created with.
+
+## Context
+
 Mode 0600 on the session store file (ADR-0001, SPEC section 8) was enforced only when the
 atomic-write path created a temp file, so a pre-existing store whose mode had been widened
-stayed group/other-readable until the next mutation rewrote it. `SessionStore.open` now
-re-asserts the mode at boot: the **mode heal** (see CONTEXT.md).
+stayed group/other-accessible until the next mutation rewrote it - a standing invariant
+that was, in fact, only a creation-time property.
 
 ## Decision
 

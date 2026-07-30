@@ -81,7 +81,7 @@ describe('SessionStore', () => {
   })
 
   // The mode heal (ADR-0003): 0600 is a standing invariant re-asserted at open, not a one-time
-  // creation property — a cp/tar-without--p restore is the classic way a live store drifts to the
+  // creation property - a cp/tar-without--p restore is the classic way a live store drifts to the
   // umask. Healed and warned, never a boot blocker.
   it.skipIf(process.platform === 'win32')('heals a widened file back to 0600 at open and says so', async () => {
     await (await open()).create('token-phone', PHONE)
@@ -111,7 +111,7 @@ describe('SessionStore', () => {
   })
 
   // Meaningful on every platform, for opposite reasons: on POSIX a healthy 0600 file has nothing
-  // to heal; on Windows the heal must be a no-op outright — stat there mirrors the owner bits onto
+  // to heal; on Windows the heal must be a no-op outright - stat there mirrors the owner bits onto
   // group/other, so an ungated check would cry wolf on every single boot.
   it('opens an already-owner-only store without a warning', async () => {
     await (await open()).create('token-phone', PHONE)

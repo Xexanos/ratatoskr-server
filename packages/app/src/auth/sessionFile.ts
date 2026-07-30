@@ -77,7 +77,7 @@ function describeForeignMagic(magic: Buffer): string {
 }
 
 // The mode heal (ADR-0003): FILE_MODE is a standing invariant, not a creation-time property, so
-// opening a pre-existing store re-asserts it — a restore (cp, or tar without -p) silently leaves
+// opening a pre-existing store re-asserts it - a restore (cp, or tar without -p) silently leaves
 // the live store at the umask, and until the next mutation rewrote it nothing would have noticed.
 // Heal and warn, never block: the exposure is ciphertext (the key is never on this volume), and
 // refusing to boot would hit hardest on exactly the restore that causes this.
@@ -89,7 +89,7 @@ export async function healStoreFileMode(path: string, warn: (message: string) =>
   try {
     mode = (await stat(path)).mode & 0o777
   } catch {
-    // The file is gone (or unreadable) — nothing left to heal; whoever reads it next reports it.
+    // The file is gone (or unreadable) - nothing left to heal; whoever reads it next reports it.
     return
   }
   // Only group/other bits are a leak. A narrower mode (0400) exposes nothing and stays the
@@ -98,13 +98,13 @@ export async function healStoreFileMode(path: string, warn: (message: string) =>
   const octal = `0${mode.toString(8)}`
   try {
     await chmod(path, FILE_MODE)
-    warn(`session store ${path} was readable by group/others (mode ${octal}); restored mode 0600`)
+    warn(`session store ${path} was accessible to group/others (mode ${octal}); restored mode 0600`)
   } catch (cause) {
     // Classic cause: a root-driven restore left the file owned by root, and chmod is the owner's
-    // privilege. Still not worth blocking boot — the next mutation republishes the store as a
+    // privilege. Still not worth blocking boot - the next mutation republishes the store as a
     // fresh 0600 file owned by this server, which also heals the ownership.
     warn(
-      `session store ${path} is readable by group/others (mode ${octal}), and mode 0600 could not ` +
+      `session store ${path} is accessible to group/others (mode ${octal}), and mode 0600 could not ` +
         `be restored (${(cause as Error).message}); restore its owner and mode 0600 by hand`,
     )
   }

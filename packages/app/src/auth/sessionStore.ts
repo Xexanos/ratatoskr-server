@@ -57,7 +57,7 @@ export function chainRefreshedAt(entry: SessionEntry): number {
 export interface SessionStoreOptions {
   path: string
   key: Buffer
-  // How a boot-time warning reaches the operator — today only the mode heal (ADR-0003) speaks.
+  // How a boot-time warning reaches the operator - today only the mode heal (ADR-0003) speaks.
   // Defaults to console.warn so no caller can turn the heal silent by forgetting to wire it.
   onWarning?: (message: string) => void
 }
@@ -97,7 +97,7 @@ export class SessionStore {
   static async open(options: SessionStoreOptions): Promise<SessionStore> {
     const { path, key, onWarning = console.warn } = options
     const file = await readStoreFile(path)
-    // A pre-existing file has its mode re-asserted before anything else happens to it — even a
+    // A pre-existing file has its mode re-asserted before anything else happens to it - even a
     // wrong-key failure below should not leave the store sitting there widened (ADR-0003).
     if (file !== undefined) await healStoreFileMode(path, onWarning)
     const loaded =

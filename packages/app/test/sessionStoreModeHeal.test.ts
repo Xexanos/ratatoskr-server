@@ -6,8 +6,8 @@ import { SessionStore } from '../src/auth/sessionStore.js'
 
 // The mode heal's failure path (ADR-0003): chmod is the file owner's privilege, so a store left
 // root-owned by a root-driven restore cannot be healed by the server's own uid. That EPERM is not
-// reproducible in a test without root — a file's owner cannot be changed by whoever runs the
-// suite — so the denial is injected at the fs seam instead, the same trick sessionStoreWriteRetry
+// reproducible in a test without root - a file's owner cannot be changed by whoever runs the
+// suite - so the denial is injected at the fs seam instead, the same trick sessionStoreWriteRetry
 // uses one layer up.
 const io = vi.hoisted(() => ({ denyChmod: false }))
 
@@ -45,7 +45,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
-// Both cases below stage a widened file, which on Windows is neither expressible nor checked —
+// Both cases below stage a widened file, which on Windows is neither expressible nor checked -
 // the heal is a deliberate no-op there (see sessionFile.ts).
 describe('SessionStore mode heal', () => {
   it.skipIf(process.platform === 'win32')('boots on a file it cannot chmod, saying the heal failed', async () => {
@@ -56,7 +56,7 @@ describe('SessionStore mode heal', () => {
 
     const store = await SessionStore.open({ path, key: KEY, onWarning: (message) => warnings.push(message) })
 
-    // Boot went through and the store works — the widened mode is worth a warning, not an outage.
+    // Boot went through and the store works - the widened mode is worth a warning, not an outage.
     expect(store.find('token-phone')).toBeDefined()
     expect((await stat(path)).mode & 0o777).toBe(0o644)
     expect(warnings).toHaveLength(1)
