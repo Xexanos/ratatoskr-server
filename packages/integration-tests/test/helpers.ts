@@ -148,6 +148,9 @@ export interface SpawnedServer {
   stderr: () => string
 }
 
+// Servers whose exit stopServer asked for, so the report below stays quiet on ordinary teardown.
+const requestedStop = new WeakSet<ChildProcess>()
+
 export function spawnServer(env: NodeJS.ProcessEnv): SpawnedServer {
   const child = spawn(process.execPath, [DIST_MAIN], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -158,6 +161,19 @@ export function spawnServer(env: NodeJS.ProcessEnv): SpawnedServer {
   let err = ''
   child.stdout?.on('data', (chunk: Buffer) => (out += chunk.toString()))
   child.stderr?.on('data', (chunk: Buffer) => (err += chunk.toString()))
+  // A server that dies *after* becoming ready would otherwise leave no trace: waitUntilReady is the
+  // only other place that prints this stderr, so every test from then on just sees ECONNREFUSED and
+  // the reason is gone by the time anyone reads the log. Worth the noise precisely because Node ends
+  // the process on an unhandled rejection — the crash this cannot afford to lose looks exactly like
+  // this. Printed as it happens, so it lands next to the first failure it caused.
+  child.once('exit', (code, signal) => {
+    if (requestedStop.has(child)) return
+    console.error(
+      `[integration] the spawned server exited unexpectedly (code=${String(code)}, signal=${String(signal)}).\n` +
+        `--- server stderr ---\n${err || '(empty)'}\n` +
+        `--- server stdout (tail) ---\n${out.slice(-2000) || '(empty)'}`,
+    )
+  })
   return { child, stdout: () => out, stderr: () => err }
 }
 
@@ -188,6 +204,8 @@ export async function waitUntilReady(server: SpawnedServer, port: number, deadli
 // the SIGKILL branch only proves the signal was *sent*, not that the process is gone.
 export async function stopServer(server: SpawnedServer): Promise<void> {
   const child = server.child
+  // Marked before the signal, so the exit reporter in spawnServer knows this one was asked for.
+  requestedStop.add(child)
   if (child.exitCode !== null) return
   const exited = once(child, 'exit')
   child.kill('SIGTERM')
