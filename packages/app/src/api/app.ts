@@ -91,7 +91,15 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // cannot be written stops the boot rather than surfacing at some user's first sign-in — the store
   // creates its file when absent, which is what makes the last of those visible (SPEC section 8).
   // main.ts turns the resulting SessionStoreError into one actionable line.
-  const store = options.sessionStore ?? (await SessionStore.open({ path: config.sessionStorePath, key: config.sessionStoreKey }))
+  const store =
+    options.sessionStore ??
+    (await SessionStore.open({
+      path: config.sessionStorePath,
+      key: config.sessionStoreKey,
+      // The mode heal's channel (ADR-0003): boot-time findings about the store file belong in the
+      // server log, next to everything else the operator reads, not on the bare console.
+      onWarning: (message) => app.log.warn(message),
+    }))
   const auth = new AuthService(abs, store)
   // Armed as part of startup wiring, like the store it maintains: from here on every stored chain is
   // renewed daily, the ones that went stale while this server was down are renewed now, and the
