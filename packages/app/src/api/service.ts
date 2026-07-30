@@ -56,7 +56,14 @@ async function checkSonos(sonos: SonosClient): Promise<{ status: DependencyStatu
 // upstream token has nothing behind it to re-read, so its session holds what the request carried —
 // which is exactly the /v1 semantics the frozen major is entitled to (security.ts).
 export function listeningToken(request: FastifyRequest): ListeningToken {
-  return request.absTokenSource ?? (() => Promise.resolve(request.absToken as string))
+  if (request.absTokenSource !== undefined) return request.absTokenSource
+  // Read now, not later. A playback session outlives the request that started it by the length of a
+  // book, so closing over `request` to re-read the decorator off it would keep the whole request
+  // object alive for that long — and read it well after the response was sent. There is nothing to
+  // gain by waiting either: on a surface with no source to re-read, the bearer *is* the upstream
+  // token and cannot change under the session.
+  const token = request.absToken as string
+  return () => Promise.resolve(token)
 }
 
 export interface ApiServiceDeps {
