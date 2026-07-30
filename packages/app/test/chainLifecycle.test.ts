@@ -198,9 +198,10 @@ describe('a chain the keep-alive loop has already marked dead', () => {
     await app.close()
   })
 
-  // The client that re-authenticates *without* offering its old token — its entry is an orphan
-  // nobody can name, and the sign-in is what retires it (SPEC section 8).
-  it('is retired by a re-login that offers no bearer', async () => {
+  // The bonus the shared chain buys (ADR-0004): a re-login of the same user heals the dead chain, so
+  // every device that shared it is revived at once: the stranded device's own token starts working
+  // again without a re-login of its own, even though this sign-in offered no bearer.
+  it('is healed for every device that shared it by a re-login of the same user', async () => {
     const store = await deadDevice()
     const { app } = await appWith(store)
 
@@ -211,8 +212,13 @@ describe('a chain the keep-alive loop has already marked dead', () => {
     })
 
     expect(res.statusCode).toBe(200)
-    expect(store.find(DEVICE_TOKEN)).toBeUndefined()
-    expect(store.list()).toHaveLength(1)
+    // The chain is live again, so the previously dead device resolves and its next request succeeds.
+    expect(store.find(DEVICE_TOKEN)?.deadSince).toBeUndefined()
+    const revived = await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
+    expect(revived.statusCode).toBe(200)
+    // Both devices ride the one healed chain: the stranded one and the one this sign-in created.
+    expect(store.list()).toHaveLength(2)
+    expect(store.listChains()).toHaveLength(1)
     await app.close()
   })
 })

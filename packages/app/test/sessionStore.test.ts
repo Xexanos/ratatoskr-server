@@ -15,8 +15,10 @@ import { chainRefreshedAt, SessionStore } from '../src/auth/sessionStore.js'
 const KEY = Buffer.alloc(32, 0xa1)
 const OTHER_KEY = Buffer.alloc(32, 0xb2)
 
-// Two device logins of the same ABS user — the "one ABS chain per device, never shared"
-// invariant (SPEC section 8) is what most of these tests are about.
+// Two device logins of the same ABS user - the "one chain per user, shared by every device"
+// invariant (SPEC section 8, ADR-0004) is what most of these tests are about. Each supplies its own
+// freshly minted chain, but only the first user's install takes: the second device rides the chain
+// already there, and the chain it brought is ignored (a throwaway the caller ends upstream).
 const PHONE = {
   absUserId: 'usr-1',
   absUsername: 'listener',
@@ -26,6 +28,12 @@ const TABLET = {
   absUserId: 'usr-1',
   absUsername: 'listener',
   chain: { accessToken: 'abs-access-tablet', refreshToken: 'abs-refresh-tablet' },
+}
+// A second ABS user, so a test that wants two genuinely distinct chains can have them.
+const OTHER = {
+  absUserId: 'usr-2',
+  absUsername: 'other',
+  chain: { accessToken: 'abs-access-other', refreshToken: 'abs-refresh-other' },
 }
 
 let dir: string
@@ -44,7 +52,7 @@ function open(key: Buffer = KEY): Promise<SessionStore> {
   return SessionStore.open({ path, key })
 }
 
-// The plaintext as it sits inside the encrypted file — used to assert what is (and is not)
+// The plaintext as it sits inside the encrypted file - used to assert what is (and is not)
 // persisted, which is the store's central security property.
 async function storedPayload(): Promise<string> {
   return decodeStoreFile(KEY, await readFile(path), path).toString('utf8')
@@ -55,13 +63,26 @@ async function writePayload(payload: unknown): Promise<void> {
   await writeFile(path, encodeStoreFile(KEY, Buffer.from(JSON.stringify(payload), 'utf8')))
 }
 
-// One entry exactly as it is persisted.
-const STORED = {
+// One device and its chain exactly as they are persisted (the two-list on-disk shape of ADR-0004).
+const STORED_DEVICE = {
   tokenHash: 'a'.repeat(64),
   absUserId: 'usr-1',
-  absUsername: 'listener',
   createdAt: '2026-07-28T09:00:00.000Z',
+}
+const STORED_CHAIN = {
+  absUserId: 'usr-1',
+  absUsername: 'listener',
   chain: { accessToken: 'abs-access-phone', refreshToken: 'abs-refresh-phone' },
+  chainRefreshedAt: '2026-07-28T09:00:00.000Z',
+}
+// The joined entry the store reads those two back as.
+const STORED_ENTRY = {
+  tokenHash: STORED_DEVICE.tokenHash,
+  absUserId: 'usr-1',
+  absUsername: 'listener',
+  createdAt: STORED_DEVICE.createdAt,
+  chain: STORED_CHAIN.chain,
+  chainRefreshedAt: STORED_CHAIN.chainRefreshedAt,
 }
 
 describe('SessionStore', () => {
@@ -149,20 +170,74 @@ describe('SessionStore', () => {
     expect(store.find('token-tablet')).toBeUndefined()
   })
 
-  it('keeps one chain per device, so signing one device out leaves the other untouched', async () => {
+  // The heart of ADR-0004: two devices of one user share a single chain, so there is only ever one
+  // for the keep-alive loop to refresh - and the invariant that removes the ABS < 2.35.1 collision.
+  it('shares one chain across every device of a user', async () => {
+    const store = await open()
+    const phone = await store.create('token-phone', PHONE)
+    const tablet = await store.create('token-tablet', TABLET)
+
+    // The tablet rides the chain the phone already installed; the chain it brought is ignored.
+    expect(tablet.chain).toEqual(PHONE.chain)
+    expect(phone.chain).toEqual(PHONE.chain)
+    expect(store.listChains()).toHaveLength(1)
+    // list() is still per device: two logins, two entries, one shared chain behind them.
+    expect(store.list()).toHaveLength(2)
+  })
+
+  it('refreshing a user’s chain moves every device of that user to the new pair at once', async () => {
+    const store = await open()
+    const phone = await store.create('token-phone', PHONE)
+    await store.create('token-tablet', TABLET)
+    const rotated = { accessToken: 'abs-access-2', refreshToken: 'abs-refresh-2' }
+
+    expect(await store.updateChain(phone, rotated)).toBe(true)
+
+    expect(store.find('token-phone')?.chain).toEqual(rotated)
+    expect(store.find('token-tablet')?.chain).toEqual(rotated)
+  })
+
+  it('keeps a shared chain alive until its last device signs out, ending it upstream only then', async () => {
     const store = await open()
     await store.create('token-phone', PHONE)
     await store.create('token-tablet', TABLET)
 
-    expect(await store.delete('token-phone')).toBe(true)
+    // Signing one device out leaves the other listening on the still-live chain - nothing to end
+    // upstream yet.
+    const first = await store.delete('token-phone')
+    expect(first).toEqual({ removed: true })
+    expect(store.find('token-tablet')?.chain).toEqual(PHONE.chain)
+    expect(store.listChains()).toHaveLength(1)
+
+    // The last device takes the chain with it, handed back so its ABS session can be ended.
+    const last = await store.delete('token-tablet')
+    expect(last).toEqual({ removed: true, endedChain: PHONE.chain })
+    expect(store.listChains()).toHaveLength(0)
+    expect((await open()).list()).toHaveLength(0)
+  })
+
+  it('ends a solo device’s chain upstream the moment it signs out', async () => {
+    const store = await open()
+    await store.create('token-phone', PHONE)
+
+    expect(await store.delete('token-phone')).toEqual({ removed: true, endedChain: PHONE.chain })
     expect(store.find('token-phone')).toBeUndefined()
-    expect(store.find('token-tablet')?.chain).toEqual(TABLET.chain)
-    expect((await open()).list()).toHaveLength(1)
+  })
+
+  it('leaves another user’s chain untouched when one user’s device signs out', async () => {
+    const store = await open()
+    await store.create('token-phone', PHONE)
+    await store.create('token-other', OTHER)
+
+    await store.delete('token-phone')
+
+    expect(store.find('token-other')?.chain).toEqual(OTHER.chain)
+    expect(store.listChains()).toHaveLength(1)
   })
 
   it('reports an unknown token on delete, so sign-out can stay idempotent', async () => {
     const store = await open()
-    expect(await store.delete('token-phone')).toBe(false)
+    expect(await store.delete('token-phone')).toEqual({ removed: false })
   })
 
   it('replaces a stored chain in place when it is refreshed', async () => {
@@ -174,7 +249,7 @@ describe('SessionStore', () => {
     expect((await open()).find('token-phone')?.chain).toEqual(rotated)
   })
 
-  it('does not resurrect an entry whose device signed out mid-refresh', async () => {
+  it('does not resurrect a chain whose last device signed out mid-refresh', async () => {
     const store = await open()
     const entry = await store.create('token-phone', PHONE)
     await store.delete('token-phone')
@@ -195,28 +270,23 @@ describe('SessionStore', () => {
     expect(chainRefreshedAt(refreshed!)).toBeGreaterThanOrEqual(chainRefreshedAt(entry))
   })
 
-  // An entry written before the field existed still has to say how stale its chain is; its creation
-  // time is when that chain was minted, so it is the honest answer.
-  it('dates a chain no earlier version stamped from the entry it belongs to', async () => {
-    await writePayload({ revision: 1, entries: [STORED] })
-
-    expect(chainRefreshedAt((await open()).list()[0]!)).toBe(Date.parse(STORED.createdAt))
-  })
-
-  // The keep-alive loop's rare-and-loud failure (SPEC section 8): the chain is gone, but the entry
-  // stays so the device's next request can be told *which* 401 this is.
-  it('marks a chain dead while keeping the entry, across a reopen', async () => {
+  // The keep-alive loop's rare-and-loud failure (SPEC section 8): the chain is gone, but its devices
+  // stay so their next request can be told *which* 401 this is. Marking is per chain, so every device
+  // of the user sees the death at once (ADR-0004).
+  it('marks a chain dead while keeping its devices, across a reopen', async () => {
     const store = await open()
     const entry = await store.create('token-phone', PHONE)
+    await store.create('token-tablet', TABLET)
 
     expect(await store.markDead(entry)).toBe(true)
 
-    const dead = (await open()).find('token-phone')
-    expect(dead).toBeDefined()
-    expect(Date.parse(dead!.deadSince!)).not.toBeNaN()
+    const reopened = await open()
+    expect(reopened.find('token-phone')?.deadSince).toEqual(expect.any(String))
+    expect(reopened.find('token-tablet')?.deadSince).toEqual(expect.any(String))
+    expect(Date.parse(reopened.find('token-phone')!.deadSince!)).not.toBeNaN()
   })
 
-  it('does not resurrect an entry whose device signed out before it was marked dead', async () => {
+  it('does not resurrect a chain whose last device signed out before it was marked dead', async () => {
     const store = await open()
     const entry = await store.create('token-phone', PHONE)
     await store.delete('token-phone')
@@ -225,31 +295,11 @@ describe('SessionStore', () => {
     expect((await open()).list()).toEqual([])
   })
 
-  // Retiring the dead entries of a re-authenticating user (authService.ts): the caller holds the
-  // entry, not the raw token — only the device that signed in ever had that.
-  it('removes an entry the caller holds without knowing its token', async () => {
-    const store = await open()
-    const entry = await store.create('token-phone', PHONE)
-    await store.create('token-tablet', TABLET)
-
-    expect(await store.remove(entry)).toBe(true)
-    expect(store.find('token-phone')).toBeUndefined()
-    expect((await open()).list()).toHaveLength(1)
-  })
-
-  it('reports an entry that is already gone on remove', async () => {
-    const store = await open()
-    const entry = await store.create('token-phone', PHONE)
-    await store.delete('token-phone')
-
-    expect(await store.remove(entry)).toBe(false)
-  })
-
   it('serializes concurrent writes so no login is lost to a racing write', async () => {
     const store = await open()
     await Promise.all([
       store.create('token-1', PHONE),
-      store.create('token-2', TABLET),
+      store.create('token-2', OTHER),
       store.create('token-3', PHONE),
     ])
 
@@ -286,8 +336,8 @@ describe('SessionStore', () => {
   })
 
   it('is unaffected by a temp file left at the old fixed name by a crashed peer', async () => {
-    // The temp name is unique per write now (sessionFile.ts), so a file at the pre-fix fixed name —
-    // what a peer sharing the volume left when it crashed mid-write, same PID in a container — is
+    // The temp name is unique per write now (sessionFile.ts), so a file at the pre-fix fixed name -
+    // what a peer sharing the volume left when it crashed mid-write, same PID in a container - is
     // neither reused nor removed. It must not block or corrupt the next write; it is a harmless
     // orphan, the accepted cost of never reaching for another writer's temp file.
     const leftover = `${path}.${process.pid}.tmp`
@@ -301,11 +351,11 @@ describe('SessionStore', () => {
   })
 
   // Two SessionStore instances on one path are exactly what two server processes are: each loads
-  // its own copy of every entry, so whichever writes second would drop the other's sessions.
+  // its own copy of every row, so whichever writes second would drop the other's sessions.
   it('refuses to overwrite a store another writer has advanced, keeping that writer’s entry', async () => {
     const first = await open()
     const second = await open()
-    await second.create('token-tablet', TABLET)
+    await second.create('token-tablet', OTHER)
 
     await expect(first.create('token-phone', PHONE)).rejects.toBeInstanceOf(SessionStoreConflictError)
     expect(first.find('token-phone')).toBeUndefined()
@@ -316,7 +366,7 @@ describe('SessionStore', () => {
 
   it('points at SESSION_STORE_PATH in the conflict error, since sharing one file is the cause', async () => {
     const first = await open()
-    await (await open()).create('token-tablet', TABLET)
+    await (await open()).create('token-tablet', OTHER)
     await expect(first.create('token-phone', PHONE)).rejects.toThrow(/another process|SESSION_STORE_PATH/)
   })
 
@@ -336,10 +386,10 @@ describe('SessionStore', () => {
   })
 
   it('treats a payload without a revision as untouched, not as somebody else’s work', async () => {
-    await writePayload({ entries: [STORED] })
+    await writePayload({ devices: [STORED_DEVICE], chains: [STORED_CHAIN] })
     const store = await open()
 
-    await expect(store.create('token-phone', PHONE)).resolves.toBeDefined()
+    await expect(store.create('token-other', OTHER)).resolves.toBeDefined()
     expect((await open()).list()).toHaveLength(2)
   })
 
@@ -359,7 +409,7 @@ describe('SessionStore', () => {
   })
 
   // GCM authenticates the ciphertext (and the format header, via AAD), so a single flipped byte in
-  // an otherwise-valid file fails the tag check — indistinguishable from a wrong key, and refused
+  // an otherwise-valid file fails the tag check - indistinguishable from a wrong key, and refused
   // the same way rather than read back as partially valid.
   it('refuses a file whose ciphertext was modified, the same as a wrong key', async () => {
     await (await open()).create('token-phone', PHONE)
@@ -384,7 +434,7 @@ describe('SessionStore', () => {
     await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
   })
 
-  // The store is opened at boot (main.ts), and open() creates its file when absent — so a
+  // The store is opened at boot (main.ts), and open() creates its file when absent - so a
   // mistyped SESSION_STORE_PATH or a volume this user cannot write to surfaces here, as a
   // SessionStoreError with an actionable message, rather than as a raw ENOENT stack.
   it('refuses to open when its file cannot be written, naming the path and its directory', async () => {
@@ -399,32 +449,46 @@ describe('SessionStore', () => {
     expect((failure as Error).cause).toBeDefined()
   })
 
-  // These payloads authenticate under the right key but are not a store — reachable only by a
-  // format change or a bug on the write side (see asEntry for why the shape is checked at all).
+  // These payloads authenticate under the right key but are not a store - reachable only by a
+  // format change or a bug on the write side (see asDevice/asChain for why the shape is checked).
   it('refuses a decrypted payload that is not JSON', async () => {
     await writeFile(path, encodeStoreFile(KEY, Buffer.from('not json at all', 'utf8')))
     await expect(open()).rejects.toThrow(/not valid JSON/)
   })
 
-  it('refuses a decrypted payload without an entry list', async () => {
+  it('refuses a decrypted payload without the device and chain lists', async () => {
     await writePayload({ sessions: [] })
-    await expect(open()).rejects.toThrow(/no entry list/)
+    await expect(open()).rejects.toThrow(/no device and chain lists/)
+  })
+
+  it('refuses a device that references a chain the store does not hold', async () => {
+    await writePayload({ revision: 1, devices: [STORED_DEVICE], chains: [] })
+    await expect(open()).rejects.toThrow(/device with no chain/)
   })
 
   it.each([
     ['not an object', 'nope'],
-    ['a missing field', { ...STORED, absUsername: undefined }],
-    ['an empty field', { ...STORED, tokenHash: '' }],
-    ['no chain', { ...STORED, chain: null }],
-    ['half a chain', { ...STORED, chain: { accessToken: 'abs-access' } }],
-  ])('refuses an entry with %s', async (_case, entry) => {
-    await writePayload({ entries: [entry] })
+    ['a missing field', { ...STORED_DEVICE, absUserId: undefined }],
+    ['an empty field', { ...STORED_DEVICE, tokenHash: '' }],
+  ])('refuses a device that is %s', async (_case, device) => {
+    await writePayload({ devices: [device], chains: [STORED_CHAIN] })
     await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
   })
 
-  it('loads a hand-written entry, pinning the on-disk shape the store reads back', async () => {
-    await writePayload({ entries: [STORED] })
-    expect((await open()).list()).toEqual([STORED])
+  it.each([
+    ['not an object', 'nope'],
+    ['a missing field', { ...STORED_CHAIN, absUsername: undefined }],
+    ['no refreshed stamp', { ...STORED_CHAIN, chainRefreshedAt: undefined }],
+    ['no chain', { ...STORED_CHAIN, chain: null }],
+    ['half a chain', { ...STORED_CHAIN, chain: { accessToken: 'abs-access' } }],
+  ])('refuses a chain that has %s', async (_case, chain) => {
+    await writePayload({ devices: [STORED_DEVICE], chains: [chain] })
+    await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
+  })
+
+  it('loads a hand-written store, pinning the on-disk shape the store reads back', async () => {
+    await writePayload({ devices: [STORED_DEVICE], chains: [STORED_CHAIN] })
+    expect((await open()).list()).toEqual([STORED_ENTRY])
   })
 
   it('reports a store path that cannot be read at all', async () => {
@@ -434,7 +498,7 @@ describe('SessionStore', () => {
 
   it('rolls back an entry whose write failed, so memory never claims an unpersisted session', async () => {
     const store = await open()
-    // Take the store's directory out from under it, so persisting the next change cannot proceed — a
+    // Take the store's directory out from under it, so persisting the next change cannot proceed - a
     // stand-in for a volume that filled up or vanished. (The old injection pre-created the temp file
     // at a fixed per-process name; the name is randomised now, so break the directory instead.)
     await rm(dir, { recursive: true, force: true })

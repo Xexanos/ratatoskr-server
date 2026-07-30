@@ -105,8 +105,8 @@ function open() {
 
 async function storedTokenHashes(): Promise<string[]> {
   const payload = decodeStoreFile(KEY, await readFile(path), path).toString('utf8')
-  const { entries } = JSON.parse(payload) as { entries: { tokenHash: string }[] }
-  return entries.map((entry) => entry.tokenHash)
+  const { devices } = JSON.parse(payload) as { devices: { tokenHash: string }[] }
+  return devices.map((device) => device.tokenHash)
 }
 
 describe('SessionStore in-flight visibility', () => {
