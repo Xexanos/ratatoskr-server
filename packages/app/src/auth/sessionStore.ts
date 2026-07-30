@@ -6,7 +6,7 @@ import {
   SessionStoreIoError,
   SessionStoreWriteError,
 } from './errors.js'
-import { decodeStoreFile, encodeStoreFile, writeFileAtomic } from './sessionFile.js'
+import { decodeStoreFile, encodeStoreFile, healStoreFileMode, writeFileAtomic } from './sessionFile.js'
 
 // One device login's private Audiobookshelf session: the access token in use plus the refresh
 // token that continues its chain. Never shared between devices (SPEC section 8) — two consumers
@@ -57,6 +57,9 @@ export function chainRefreshedAt(entry: SessionEntry): number {
 export interface SessionStoreOptions {
   path: string
   key: Buffer
+  // How a boot-time warning reaches the operator — today only the mode heal (ADR-0003) speaks.
+  // Defaults to console.warn so no caller can turn the heal silent by forgetting to wire it.
+  onWarning?: (message: string) => void
 }
 
 // The persisted half of the Ratatoskr-native session model (SPEC section 8): one entry per
@@ -92,8 +95,11 @@ export class SessionStore {
   }
 
   static async open(options: SessionStoreOptions): Promise<SessionStore> {
-    const { path, key } = options
+    const { path, key, onWarning = console.warn } = options
     const file = await readStoreFile(path)
+    // A pre-existing file has its mode re-asserted before anything else happens to it — even a
+    // wrong-key failure below should not leave the store sitting there widened (ADR-0003).
+    if (file !== undefined) await healStoreFileMode(path, onWarning)
     const loaded =
       file === undefined
         ? { entries: new Map<string, SessionEntry>(), revision: 0 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -78,6 +78,48 @@ describe('SessionStore', () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600)
     await store.create('token-phone', PHONE)
     expect((await stat(path)).mode & 0o777).toBe(0o600)
+  })
+
+  // The mode heal (ADR-0003): 0600 is a standing invariant re-asserted at open, not a one-time
+  // creation property — a cp/tar-without--p restore is the classic way a live store drifts to the
+  // umask. Healed and warned, never a boot blocker.
+  it.skipIf(process.platform === 'win32')('heals a widened file back to 0600 at open and says so', async () => {
+    await (await open()).create('token-phone', PHONE)
+    await chmod(path, 0o644)
+    const warnings: string[] = []
+
+    const healed = await SessionStore.open({ path, key: KEY, onWarning: (message) => warnings.push(message) })
+
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(healed.find('token-phone')).toBeDefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain(path)
+    expect(warnings[0]).toContain('0600')
+  })
+
+  // Only group/other bits are a leak. Owner-only-narrower is the operator's business: the atomic
+  // replace never opens this file for writing, so even 0400 costs the server nothing.
+  it.skipIf(process.platform === 'win32')('leaves a file narrowed below 0600 alone', async () => {
+    await (await open()).create('token-phone', PHONE)
+    await chmod(path, 0o400)
+    const warnings: string[] = []
+
+    await SessionStore.open({ path, key: KEY, onWarning: (message) => warnings.push(message) })
+
+    expect((await stat(path)).mode & 0o777).toBe(0o400)
+    expect(warnings).toEqual([])
+  })
+
+  // Meaningful on every platform, for opposite reasons: on POSIX a healthy 0600 file has nothing
+  // to heal; on Windows the heal must be a no-op outright — stat there mirrors the owner bits onto
+  // group/other, so an ungated check would cry wolf on every single boot.
+  it('opens an already-owner-only store without a warning', async () => {
+    await (await open()).create('token-phone', PHONE)
+    const warnings: string[] = []
+
+    await SessionStore.open({ path, key: KEY, onWarning: (message) => warnings.push(message) })
+
+    expect(warnings).toEqual([])
   })
 
   it('survives a reopen with the chain and metadata intact', async () => {

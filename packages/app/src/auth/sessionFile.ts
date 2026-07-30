@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
-import { open, rename } from 'node:fs/promises'
+import { chmod, open, rename, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { SessionStoreCorruptError, SessionStoreError, SessionStoreKeyError, SessionStoreWriteError } from './errors.js'
 
@@ -74,6 +74,40 @@ function describeForeignMagic(magic: Buffer): string {
     return `it was written in format version "${text.slice(MAGIC_PREFIX.length)}", which this build cannot read`
   }
   return 'it is not a Ratatoskr session store (unexpected file header)'
+}
+
+// The mode heal (ADR-0003): FILE_MODE is a standing invariant, not a creation-time property, so
+// opening a pre-existing store re-asserts it — a restore (cp, or tar without -p) silently leaves
+// the live store at the umask, and until the next mutation rewrote it nothing would have noticed.
+// Heal and warn, never block: the exposure is ciphertext (the key is never on this volume), and
+// refusing to boot would hit hardest on exactly the restore that causes this.
+export async function healStoreFileMode(path: string, warn: (message: string) => void): Promise<void> {
+  // File modes are a POSIX concept. Windows ignores the mode argument on creation and mirrors the
+  // owner bits onto group/other, so the check below would cry wolf on every boot there.
+  if (process.platform === 'win32') return
+  let mode: number
+  try {
+    mode = (await stat(path)).mode & 0o777
+  } catch {
+    // The file is gone (or unreadable) — nothing left to heal; whoever reads it next reports it.
+    return
+  }
+  // Only group/other bits are a leak. A narrower mode (0400) exposes nothing and stays the
+  // operator's business: the atomic replace never opens this file for writing anyway.
+  if ((mode & 0o077) === 0) return
+  const octal = `0${mode.toString(8)}`
+  try {
+    await chmod(path, FILE_MODE)
+    warn(`session store ${path} was readable by group/others (mode ${octal}); restored mode 0600`)
+  } catch (cause) {
+    // Classic cause: a root-driven restore left the file owned by root, and chmod is the owner's
+    // privilege. Still not worth blocking boot — the next mutation republishes the store as a
+    // fresh 0600 file owned by this server, which also heals the ownership.
+    warn(
+      `session store ${path} is readable by group/others (mode ${octal}), and mode 0600 could not ` +
+        `be restored (${(cause as Error).message}); restore its owner and mode 0600 by hand`,
+    )
+  }
 }
 
 // Replace the store's contents without ever leaving a half-written file behind: write the
