@@ -316,6 +316,19 @@ describe('SessionStore', () => {
     await expect(open(OTHER_KEY)).rejects.toThrow(/SESSION_STORE_KEY/)
   })
 
+  // GCM authenticates the ciphertext (and the format header, via AAD), so a single flipped byte in
+  // an otherwise-valid file fails the tag check — indistinguishable from a wrong key, and refused
+  // the same way rather than read back as partially valid.
+  it('refuses a file whose ciphertext was modified, the same as a wrong key', async () => {
+    await (await open()).create('token-phone', PHONE)
+    const file = await readFile(path)
+    const last = file.length - 1
+    file[last] = (file[last] ?? 0) ^ 1 // flip the last ciphertext byte
+    await writeFile(path, file)
+
+    await expect(open()).rejects.toBeInstanceOf(SessionStoreKeyError)
+  })
+
   it('refuses to open a file that is not a session store', async () => {
     await writeFile(path, Buffer.alloc(200, 0x7))
     await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
