@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
-import { open, rename, rm } from 'node:fs/promises'
+import { open, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { SessionStoreCorruptError, SessionStoreError, SessionStoreKeyError, SessionStoreWriteError } from './errors.js'
 
@@ -90,15 +90,16 @@ export async function writeFileAtomic(path: string, bytes: Buffer): Promise<void
 }
 
 async function writeAndPublish(path: string, bytes: Buffer): Promise<void> {
-  // The temp name is per-process, and no other name in the directory is ever touched. Two
-  // processes sharing one name would defeat the atomic replace outright: one unlinks the name
-  // the other still holds open, so a rename can publish a file its writer has not finished —
-  // the exact truncated store this function exists to prevent. Distinct names degrade a second
-  // writer to a lost update instead (see the single-writer note on SessionStore).
-  const tmp = `${path}.${process.pid}.tmp`
-  // A temp file left by an earlier crash of this process is never read (only `path` is), but it
-  // may carry the wrong mode, and 'wx' below would refuse to reuse it — so drop it first.
-  await rm(tmp, { force: true })
+  // A temp name unique to THIS write, so no other writer's name is ever touched. Unique per write,
+  // not per process: two containers sharing one /data volume both run as PID 1, so a process-id
+  // suffix would not tell them apart — and two writers on one temp name defeat the atomic replace
+  // outright, one unlinking or overwriting the name the other still holds open, publishing a file
+  // its writer has not finished. The random suffix gives every writer its own name, so a concurrent
+  // writer degrades to a lost update (caught by the store's revision check) rather than a torn file.
+  // The name cannot pre-exist, so 'wx' never collides and there is nothing to remove first; a temp
+  // left by a crash between here and the rename is a rare, tiny orphan that is never read (only
+  // `path` is) — not worth a directory sweep that could race another writer's in-flight temp.
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   const handle = await open(tmp, 'wx', FILE_MODE)
   try {
     await handle.writeFile(bytes)
