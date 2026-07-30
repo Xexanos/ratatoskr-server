@@ -344,7 +344,12 @@ re-login.
 
   Renewals are serialized, and the one for a given entry is shared by everyone waiting on it:
   ABS rotates the refresh token on use, so two concurrent renewals of one chain would spend
-  the same token twice and kill the chain they were renewing. A chain now dies only if
+  the same token twice and kill the chain they were renewing. They are also **spaced**,
+  whichever schedule started them: every renewal waits out the same over-a-second gap against
+  the last one, so two devices whose access tokens expire together cannot refresh inside one
+  second from the request path either (the same ABS < 2.35.1 collision; decided in issue
+  #165). A request pays at most one gap, and only in the very case that would otherwise
+  collide the chains it is asking for. A chain now dies only if
   server↔ABS contact is lost for the entire ABS refresh window (≥ 7 days by default) or on an
   ABS username change. Operator guidance: raise ABS's `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days)
   if longer outages are expected.

@@ -89,7 +89,18 @@ occasional rather than reproducible, which is the worst shape for it to have.*
   take another's upstream chain with it: the other device stays signed in as far as Ratatoskr is
   concerned — its token and store entry are untouched — but its ABS calls fail until it
   re-authenticates. What the keep-alive loop must not do on such a version is refresh several stored
-  chains inside one second, or it collides them itself; the daily refresh has to space its writes.*
+  chains inside one second, or it collides them itself; every schedule has to space its renewals,
+  not only the daily refresh. Issue
+  [#165](https://github.com/Xexanos/ratatoskr-server/issues/165) settled the last open corner of
+  that: on-demand renewals from the request path wait out the gap too. Two devices of one user meet
+  that gap whenever their access tokens expire together, and the correlation is the system's own
+  doing, since the sweep renews a user's chains seconds apart every day and the tokens it leaves
+  behind expire seconds apart in turn. The request path pays at most one gap (1.5 s), and only in
+  the very case that would otherwise collide the chains. Documenting the hole as an accepted edge
+  was rejected: it would trade a bounded, rare wait for an occasional, timing-dependent forced
+  re-login on a supported ABS version, the shape of failure the amendment above calls the worst one
+  to have, and it would leave the sweep spacing renewals against a request path that does not space
+  itself against anything.*
 - **The app stores only the Ratatoskr token** (Keystore-backed), plus server URL, TLS
   fingerprint, and display username. ABS tokens and the entire adoption logic of app SPEC
   section 5 drop. The user's ABS password is never stored — on either side.

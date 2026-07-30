@@ -22,6 +22,16 @@ _Avoid_: session, playback session — "session" alone means the one active play
 codebase, which is a different thing entirely; qualify it (`device session`, `auth session`)
 whenever both could be meant.
 
+**Chain spacing**:
+The gap (`CHAIN_SPACING_MS`, over a second) every ABS chain renewal leaves against the renewal
+before it, whichever of the keep-alive's three schedules started either one: sweep, boot pass, or
+the request path (issue #165, decided against documenting the request-path hole as an accepted
+edge). Exists because ABS below 2.35.1 mints the identical refresh token for two renewals of one
+user inside one second, which collides the chains (ADR-0001's amendment). The sweep pays the gap
+before enqueueing, so a request never queues behind a store's worth of waits; the request path
+pays at most one gap, and only when another renewal just landed.
+_Avoid_: rate limit, throttle (the gap protects ABS token minting, not ABS load)
+
 **Token guard**:
 The one place (`packages/app/src/api/tokenGuard.ts`) that enforces the invariant *every
 bearer-protected operation proves the caller's bearer before acting*. Wraps each resolved
