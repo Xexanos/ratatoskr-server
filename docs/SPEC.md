@@ -148,6 +148,19 @@ must build on:
   optional ones; introduce breaking changes only under a new major version and path.
 - A CI job runs oasdiff against the previous tagged contract and fails the build on an
   unflagged breaking change.
+- **`info.version` names the contract text, one-to-one.** Any change to `contract/openapi.yaml`
+  must move `info.version` strictly forward, to a version that has never been tagged. The
+  `contract-version` CI job enforces this on every PR: oasdiff (above) decides whether the *shape*
+  of a change forces a major bump, this decides that its *identity* is a new, higher version. The
+  *height* of a compatible bump (minor vs patch) stays a human judgement.
+- **Each version is frozen under an immutable `contract-<x.y.z>` git tag, cut automatically.** When a
+  version lands on `main`, `contract-tag.yml` tags that commit `contract-<version>` and pushes it; the
+  same job re-verifies an existing tag byte-for-byte, so a released version's text can never drift.
+  Clients pin against these tags — the app generates its types from one, and a frozen major is served
+  from the tagged document itself (ADR-0001; the tag *is* the freeze). The tag is therefore an *identity*
+  statement, not a build certificate, and is cut on push rather than gated on a green run — unlike the
+  server image's `v<x.y.z>` tags, which certify tested bytes and hang behind E2E (`promote.yml`).
+  See [ADR-0002](./adr/0002-automatic-contract-version-tagging.md).
 - Any operation whose request is validated — a bounded or typed query param, a required body, a
   path param — must declare `400: BadRequest` in the contract. Fastify rejects an invalid request
   with a 400 before the handler runs (mapped to the contract's error shape, section 12), so an

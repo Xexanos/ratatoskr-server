@@ -25,3 +25,15 @@ that list is **guarded**: the token guard runs `validateToken` (a cheap authenti
 call) before dispatch.
 _Avoid_: unguarded (a self-validating operation still validates — just not via the guard),
 allowlisted
+
+### Versioning
+
+**Contract tag**:
+The immutable git tag `contract-<x.y.z>` naming the byte-exact text of one contract version
+(`info.version` in `contract/openapi.yaml`). An *identity* statement — what a client pins against,
+and what a frozen major is served from — cut automatically on push to `main` (`contract-tag.yml`)
+and never moved.
+_Avoid_: release tag, version tag — those name the `v<x.y.z>` **image release**, a *certificate*
+that bytes passed E2E, cut by a different pipeline (`promote.yml`). A `contract-*` tag certifies
+nothing about a running server; conflating the two is why a client once pinned `v1.4.0` (the image)
+where it meant `contract-1.4.0` (the contract).
