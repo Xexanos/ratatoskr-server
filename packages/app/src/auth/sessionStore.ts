@@ -187,19 +187,19 @@ export class SessionStore {
     return this.mutate((entries) => entries.delete(entry.tokenHash))
   }
 
-  // Every mutation funnels through here: queued behind the previous write, and rolled back if
-  // the write fails. Memory must never hold a session the file does not, or the next restart
-  // would sign that device out with nobody having seen an error.
+  // Every mutation funnels through here: queued behind the previous write, applied to a copy, and
+  // swapped in only once the write has landed. Memory must never hold a session the file does not,
+  // or the next restart would sign that device out with nobody having seen an error — and because
+  // find() reads this.entries synchronously and unqueued, "after the write" has to mean the map it
+  // reads is never the half-written one. So the live map is replaced in a single assignment after
+  // flush() succeeds; a failed write (including one the bounded retry could not rescue) leaves the
+  // original in place and never became visible, so there is nothing to roll back.
   private mutate(change: (entries: Map<string, SessionEntry>) => boolean): Promise<boolean> {
     return this.enqueue(async () => {
-      const snapshot = new Map(this.entries)
-      if (!change(this.entries)) return false
-      try {
-        await this.flush()
-      } catch (err) {
-        this.entries = snapshot
-        throw err
-      }
+      const next = new Map(this.entries)
+      if (!change(next)) return false
+      await this.flush(next)
+      this.entries = next
       return true
     })
   }
@@ -214,10 +214,14 @@ export class SessionStore {
     return run
   }
 
-  private async flush(): Promise<void> {
+  // Persist a set of entries, defaulting to the live map for the boot-time create in open(). mutate()
+  // passes the pending copy so the file is written from it before it ever becomes this.entries — the
+  // revision is bumped only once the bytes have landed, so a failed write leaves both the file and
+  // the counter as they were.
+  private async flush(entries: Map<string, SessionEntry> = this.entries): Promise<void> {
     await this.assertNobodyElseWrote()
     const revision = this.revision + 1
-    const payload = Buffer.from(JSON.stringify({ revision, entries: [...this.entries.values()] }), 'utf8')
+    const payload = Buffer.from(JSON.stringify({ revision, entries: [...entries.values()] }), 'utf8')
     await writeWithRetry(this.path, encodeStoreFile(this.key, payload))
     this.revision = revision
   }
