@@ -152,13 +152,21 @@ export class ChainKeepAlive {
   // stale means exactly "was due for a sweep this server was not up for", so the two must not be
   // able to disagree.
   async refreshStale(): Promise<void> {
-    const cutoff = Date.now() - this.refreshIntervalMs
-    const stale = this.store
-      .list()
-      .filter((entry) => isLive(entry) && chainRefreshedAt(entry) <= cutoff)
-      .sort((a, b) => chainRefreshedAt(a) - chainRefreshedAt(b))
-    if (stale.length > 0) this.logger?.info({ chains: stale.length }, 'renewing stale Audiobookshelf chains')
-    await this.refreshEach(stale)
+    // Held under the same skip flag as sweep(): at a test-shortened interval the first scheduled
+    // sweep can come due while this boot pass is still walking, and stacking the two would refresh
+    // every chain twice back-to-back — the pile-up the flag exists to prevent.
+    this.sweeping = true
+    try {
+      const cutoff = Date.now() - this.refreshIntervalMs
+      const stale = this.store
+        .list()
+        .filter((entry) => isLive(entry) && chainRefreshedAt(entry) <= cutoff)
+        .sort((a, b) => chainRefreshedAt(a) - chainRefreshedAt(b))
+      if (stale.length > 0) this.logger?.info({ chains: stale.length }, 'renewing stale Audiobookshelf chains')
+      await this.refreshEach(stale)
+    } finally {
+      this.sweeping = false
+    }
   }
 
   // The chain to act with right now, for a request that has resolved this entry. Renews the access
@@ -225,9 +233,10 @@ export class ChainKeepAlive {
     return this.lastRefreshAt + this.chainSpacingMs - Date.now()
   }
 
-  // Join the refresh already running for this entry, or start one (see inFlight). The completion
-  // time is stamped here rather than inside refreshOnce, so a renewal from *any* schedule is what
-  // the next sweep's spacing measures from.
+  // Join the refresh already running for this entry, or start one (see inFlight). refreshOnce
+  // stamps the spacing clock itself, and only when it actually reached Audiobookshelf — a renewal
+  // from *any* schedule is what the next sweep's spacing measures from, but a `gone`/already-dead
+  // no-op that never called ABS is not.
   private refreshChain(entry: SessionEntry): Promise<RefreshOutcome> {
     const running = this.inFlight.get(entry.tokenHash)
     if (running !== undefined) return running
@@ -235,7 +244,6 @@ export class ChainKeepAlive {
       try {
         return await this.enqueue(() => this.refreshOnce(entry))
       } finally {
-        this.lastRefreshAt = Date.now()
         this.inFlight.delete(entry.tokenHash)
       }
     })()
@@ -256,9 +264,18 @@ export class ChainKeepAlive {
     if (current === undefined) return { kind: 'gone' }
     if (!isLive(current)) return { kind: 'dead' }
 
-    let pair
+    // Past the early returns this call spends a refresh token upstream, so this — not a `gone` or
+    // already-dead no-op that touched ABS not at all — is what advances the spacing clock. Stamped
+    // in the finally so an outage we still reached ABS for counts too, and so the next chain waits
+    // out CHAIN_SPACING_MS only when a real refresh was just spent.
     try {
-      pair = await this.abs.refresh(current.chain.refreshToken)
+      const pair = await this.abs.refresh(current.chain.refreshToken)
+      const chain = { accessToken: pair.accessToken, refreshToken: pair.refreshToken }
+      // A false return from updateChain means the device signed out during the call. The chain still
+      // goes back to the caller: its request is already running on this entry, and the upstream
+      // session it names outlives the local entry either way.
+      await this.store.updateChain(current, chain)
+      return { kind: 'renewed', chain }
     } catch (err) {
       if (!(err instanceof AbsAuthError)) throw err
       await this.store.markDead(current)
@@ -267,13 +284,9 @@ export class ChainKeepAlive {
         'Audiobookshelf refused a stored refresh token; this device must sign in again',
       )
       return { kind: 'dead' }
+    } finally {
+      this.lastRefreshAt = Date.now()
     }
-    const chain = { accessToken: pair.accessToken, refreshToken: pair.refreshToken }
-    // A false return means the device signed out during the call. The chain still goes back to the
-    // caller: its request is already running on this entry, and the upstream session it names
-    // outlives the local entry either way.
-    await this.store.updateChain(current, chain)
-    return { kind: 'renewed', chain }
   }
 
   // Every refresh runs alone, chained on both settlements so one failure cannot wedge the rest.

@@ -61,9 +61,10 @@ export function decodeStoreFile(key: Buffer, file: Buffer, path: string): Buffer
   decipher.setAuthTag(tag)
   try {
     return Buffer.concat([decipher.update(ciphertext), decipher.final()])
-  } catch {
-    // GCM cannot distinguish a wrong key from a modified file — both fail the tag check.
-    throw new SessionStoreKeyError(path)
+  } catch (cause) {
+    // GCM cannot distinguish a wrong key from a modified file — both fail the tag check. The
+    // underlying tag-check failure is kept as the cause so the log still shows what actually threw.
+    throw new SessionStoreKeyError(path, { cause })
   }
 }
 

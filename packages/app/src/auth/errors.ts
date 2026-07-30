@@ -38,11 +38,12 @@ export class SessionStoreError extends Error {
 // operator rotated or lost it) or the file was tampered with. AES-GCM cannot tell the two
 // apart, so the message covers both and, above all, insists on data preservation.
 export class SessionStoreKeyError extends SessionStoreError {
-  constructor(path: string) {
+  constructor(path: string, options?: { cause?: unknown }) {
     super(
       `The session store at ${path} cannot be decrypted with the configured SESSION_STORE_KEY ` +
         '(wrong key, or the file was modified). Refusing to continue so no session data is lost: ' +
         'restore the matching key, or delete the file to sign every device out and start over.',
+      options,
     )
     this.name = 'SessionStoreKeyError'
   }

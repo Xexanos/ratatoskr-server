@@ -17,7 +17,9 @@ const PREFIX = 'Bearer '
 
 export function bearerToken(request: FastifyRequest): string {
   const header = request.headers.authorization
-  if (typeof header === 'string' && header.startsWith(PREFIX)) {
+  // RFC 7235: the auth-scheme is case-insensitive, so "bearer "/"BEARER " are the same scheme.
+  // Only the scheme is matched loosely; the token after it is taken verbatim.
+  if (typeof header === 'string' && header.slice(0, PREFIX.length).toLowerCase() === 'bearer ') {
     const token = header.slice(PREFIX.length).trim()
     if (token !== '') return token
   }
