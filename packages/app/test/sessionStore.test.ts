@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -176,14 +176,19 @@ describe('SessionStore', () => {
     expect((await open()).find('token-phone')).toBeDefined()
   })
 
-  it('cleans up its own temporary file left behind by a crash mid-write', async () => {
-    const own = `${path}.${process.pid}.tmp`
+  it('is unaffected by a temp file left at the old fixed name by a crashed peer', async () => {
+    // The temp name is unique per write now (sessionFile.ts), so a file at the pre-fix fixed name —
+    // what a peer sharing the volume left when it crashed mid-write, same PID in a container — is
+    // neither reused nor removed. It must not block or corrupt the next write; it is a harmless
+    // orphan, the accepted cost of never reaching for another writer's temp file.
+    const leftover = `${path}.${process.pid}.tmp`
     const store = await open()
-    await writeFile(own, 'half-written garbage')
+    await writeFile(leftover, 'half-written garbage')
+
     await store.create('token-phone', PHONE)
 
-    expect(await readdir(dir)).toEqual(['sessions.enc'])
     expect((await open()).find('token-phone')).toBeDefined()
+    expect((await readFile(leftover)).toString()).toBe('half-written garbage')
   })
 
   // Two SessionStore instances on one path are exactly what two server processes are: each loads
@@ -292,9 +297,10 @@ describe('SessionStore', () => {
 
   it('rolls back an entry whose write failed, so memory never claims an unpersisted session', async () => {
     const store = await open()
-    // A directory where the temp file has to go: the revision check passes and the store file is
-    // intact, but the write itself cannot proceed — a stand-in for a full or read-only volume.
-    await mkdir(`${path}.${process.pid}.tmp`)
+    // Take the store's directory out from under it, so persisting the next change cannot proceed — a
+    // stand-in for a volume that filled up or vanished. (The old injection pre-created the temp file
+    // at a fixed per-process name; the name is randomised now, so break the directory instead.)
+    await rm(dir, { recursive: true, force: true })
 
     await expect(store.create('token-phone', PHONE)).rejects.toThrow()
     expect(store.find('token-phone')).toBeUndefined()
