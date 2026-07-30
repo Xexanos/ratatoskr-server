@@ -106,8 +106,8 @@ The strategy above is the target. Current state:
   shared container is per-file ABS users**: root is seeding-only, and every test file
   creates its own end user + a stream-only streamer account whose ABS API key it embeds in the
   media URLs (progress in ABS is per-user) and spawns its own compiled server. `absLive.integration.test.ts` drives the ABS-backed endpoints
-  (library list/detail) with Ajv contract-conformance, authenticating straight against ABS
-  while `/auth/login` is still unimplemented. **Version
+  (library list/detail) with Ajv contract-conformance, and exercises sign-in through the server's
+  own `/v1/auth/login` and `/v2/auth/login` against the live ABS. **Version
   coverage lives in CI:** the `integration` job is a two-leg blocking matrix — the pinned
   2.26.0 minimum and the deliberately **unpinned `:latest`** tag as a drift canary for new
   ABS releases — selected via `ABS_IT_IMAGE`; locally the default is the pinned current
