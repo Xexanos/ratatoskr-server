@@ -148,6 +148,30 @@ describe('ChainKeepAlive.sweep', () => {
     expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(TEST_SPACING_MS)
   })
 
+  // The gap is measured from the last renewal of ANY schedule, including one that lands while the
+  // sweep is already waiting. Computed once, before the sleep, it would let a sweep fire in the same
+  // second as an on-demand renewal it never saw start — the ABS < 2.35.1 identical-token collision
+  // CHAIN_SPACING_MS exists to avoid. Re-checking after the wait is what closes that.
+  it('re-checks the spacing gap after waiting, so a renewal during the wait still spaces the sweep', async () => {
+    const SPACING = 200
+    const abs = fakeAbs()
+    await store.create('token-fresh', { ...LISTENER, chain: chainOf('fresh') }) // refreshed first, no wait
+    const stale = await store.create('token-stale', { ...LISTENER, chain: chainOf('stale', -60) }) // second, after the gap
+    const keepAlive = build(abs, { chainSpacingMs: SPACING })
+
+    const sweep = keepAlive.sweep()
+    // Halfway through the gap the sweep leaves before its second refresh, sneak an on-demand renewal
+    // of that same chain in (its access token is already expired, so usableChain renews it).
+    await new Promise((resolve) => setTimeout(resolve, SPACING / 2))
+    await keepAlive.usableChain(stale)
+    await sweep
+
+    // refreshedAt: [0] fresh (sweep), [1] stale (on-demand, mid-wait), [2] stale (sweep) — and [2]
+    // must clear the gap from [1], not from the sweep's own first refresh.
+    expect(abs.refresh).toHaveBeenCalledTimes(3)
+    expect(abs.refreshedAt[2]! - abs.refreshedAt[1]!).toBeGreaterThanOrEqual(SPACING)
+  })
+
   it('abandons a sweep in progress when it is stopped, so shutdown is not held up', async () => {
     const abs = fakeAbs()
     await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
@@ -161,6 +185,50 @@ describe('ChainKeepAlive.sweep', () => {
     // The one already in flight finishes — abandoning it mid-rotation would leave the store naming
     // a token ABS has replaced — but the sweep goes no further.
     expect(abs.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  // stop() halts the schedule, but the refresh already in flight has to land its store write before
+  // the process exits: main.ts calls process.exit the instant app.close() settles, so a SIGTERM
+  // between abs.refresh (token already rotated upstream) and the write would lose it, and the next
+  // boot — seeing the spent token — would mark a live chain dead. drained() is what onClose awaits.
+  it('drains the write already in flight before drained() resolves', async () => {
+    const abs = fakeAbs()
+    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    const keepAlive = build(abs)
+
+    // Hold the store write open, so stop() lands while a rotation sits between ABS and disk.
+    let releaseWrite = (): void => {}
+    const writing = new Promise<void>((resolve) => {
+      releaseWrite = resolve
+    })
+    const realUpdate = store.updateChain.bind(store)
+    const writeStarted = new Promise<void>((resolve) => {
+      vi.spyOn(store, 'updateChain').mockImplementation(async (entry, chain) => {
+        resolve()
+        await writing
+        return realUpdate(entry, chain)
+      })
+    })
+
+    const sweep = keepAlive.sweep()
+    await writeStarted // abs.refresh has resolved; the rotated pair is not yet on disk
+
+    keepAlive.stop()
+    const drained = keepAlive.drained()
+    let drainedSettled = false
+    void drained.then(() => {
+      drainedSettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20)) // give a premature resolve a chance
+    expect(drainedSettled, 'drained() resolved before the in-flight write finished').toBe(false)
+
+    releaseWrite()
+    await drained
+    await sweep
+
+    expect(drainedSettled).toBe(true)
+    // The rotated pair actually landed — not the pre-rotation token the next boot would reject.
+    expect(store.find('token-phone')?.chain.refreshToken).toBe('refresh-phone-1')
   })
 
   // The rare-and-loud failure (SPEC section 8): ABS refused the refresh token, so the chain is gone

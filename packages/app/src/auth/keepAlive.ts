@@ -113,8 +113,8 @@ export class ChainKeepAlive {
 
   // Stops the schedule *and* whatever it is in the middle of: a paced sweep of a large store runs
   // for minutes, and shutdown must not keep renewing chains and writing the store behind a server
-  // that is closing (app.ts's onClose). The refresh already in flight is allowed to finish, so the
-  // store is never left describing a chain that was rotated away.
+  // that is closing (app.ts's onClose). Returns at once; the refresh already in flight is left to
+  // finish, and drained() is how the caller waits for it.
   stop(): void {
     this.running = false
     this.aborted = true
@@ -122,6 +122,17 @@ export class ChainKeepAlive {
       clearTimeout(this.timer)
       this.timer = undefined
     }
+  }
+
+  // Resolves once the refresh in flight has finished its store write. onClose awaits this after
+  // stop(), because main.ts calls process.exit the instant app.close() settles: a SIGTERM landing
+  // between abs.refresh (the token already rotated upstream) and the write would otherwise lose the
+  // write, and the next boot — presenting the spent token — would mark a live chain dead, the exact
+  // restart-sign-out this loop exists to prevent. Nothing new can enqueue behind it by then: stop()
+  // has aborted the sweep, and Fastify has stopped accepting the requests that drive on-demand
+  // renewals — so the current tail is the whole of what is left. main.ts's drain timeout bounds it.
+  drained(): Promise<void> {
+    return this.queue.then(() => undefined)
   }
 
   // Renew every live chain in the store, paced (see CHAIN_SPACING_MS).
@@ -193,15 +204,25 @@ export class ChainKeepAlive {
   private async refreshEach(entries: readonly SessionEntry[]): Promise<void> {
     for (const entry of entries) {
       if (this.aborted) return
-      const gap = this.lastRefreshAt + this.chainSpacingMs - Date.now()
-      if (gap > 0) await delay(gap)
-      if (this.aborted) return
+      // Re-checked after every wait, not computed once: an on-demand renewal of the same ABS user
+      // can land while this sleeps and advance lastRefreshAt, and firing in the same second as it
+      // would be the ABS < 2.35.1 identical-token collision the gap exists to prevent (refreshOnce).
+      for (let gap = this.gapSinceLastRefresh(); gap > 0; gap = this.gapSinceLastRefresh()) {
+        await delay(gap)
+        if (this.aborted) return
+      }
       try {
         await this.refreshChain(entry)
       } catch (err) {
         this.logger?.warn({ err, absUserId: entry.absUserId }, 'could not renew an Audiobookshelf chain; will retry')
       }
     }
+  }
+
+  // How much of the spacing gap is still owed since the last renewal of any schedule. Non-positive
+  // means the gap is clear and the next refresh may go.
+  private gapSinceLastRefresh(): number {
+    return this.lastRefreshAt + this.chainSpacingMs - Date.now()
   }
 
   // Join the refresh already running for this entry, or start one (see inFlight). The completion

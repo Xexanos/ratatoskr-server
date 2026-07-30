@@ -105,6 +105,9 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
   // the Sonos subscription. Best-effort and optional-chained so injected Partial fakes are fine.
   app.addHook('onClose', async () => {
     keepAlive.stop()
+    // Wait out a chain refresh caught mid-rotation before the process exits, so its store write is
+    // not lost to process.exit (keepAlive.drained). Bounded by main.ts's drain timeout.
+    await keepAlive.drained()
     try {
       if (sessions.hasSession?.()) await sessions.stop()
     } catch {
