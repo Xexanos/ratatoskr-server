@@ -128,6 +128,16 @@ export async function createAbsUser(
   if (!exists) throw new Error(failure)
 }
 
+// Resolve an ABS user's id by username through the admin user list — the lookup createStreamerApiKey
+// and deleteAbsUser both need. Returns undefined when no such user exists, so each caller can phrase
+// its own "not found" the way its context wants.
+async function findAbsUserId(absBase: string, adminAccessToken: string, username: string): Promise<string | undefined> {
+  const res = await fetch(`${absBase}/api/users`, { headers: { authorization: `Bearer ${adminAccessToken}` } })
+  if (!res.ok) throw new Error(`ABS list users failed: ${res.status} ${await res.text()}`)
+  const list = (await res.json()) as { users?: { id?: string; username?: string }[] }
+  return list.users?.find((user) => user.username === username)?.id
+}
+
 // Create a stream-only-style ABS API key for a (freshly created, active) per-file user and return
 // the key string. This is what the media URLs carry (SPEC §14): an ABS API key works as `?token=`
 // on the file endpoint when created `isActive: true`. The account here is a plain per-file user;
@@ -139,13 +149,10 @@ export async function createStreamerApiKey(
   password: string,
 ): Promise<string> {
   await createAbsUser(absBase, adminAccessToken, username, password)
-  const authHeader = { authorization: `Bearer ${adminAccessToken}` }
-  const usersRes = await fetch(`${absBase}/api/users`, { headers: authHeader })
-  if (!usersRes.ok) throw new Error(`ABS list users failed: ${usersRes.status} ${await usersRes.text()}`)
-  const users = (await usersRes.json()) as { users?: { id?: string; username?: string }[] }
-  const userId = users.users?.find((user) => user.username === username)?.id
+  const userId = await findAbsUserId(absBase, adminAccessToken, username)
   if (userId === undefined) throw new Error(`streamer user ${username} not found after creation`)
 
+  const authHeader = { authorization: `Bearer ${adminAccessToken}` }
   const keyRes = await seedFetch(`ABS create api key ${username}`, `${absBase}/api/api-keys`, {
     method: 'POST',
     headers: { ...authHeader, 'content-type': 'application/json' },
@@ -156,6 +163,22 @@ export async function createStreamerApiKey(
   const key = body.apiKey?.apiKey
   if (typeof key !== 'string') throw new Error('ABS create api key returned no key string')
   return key
+}
+
+// Delete a per-file ABS user through the admin API, to force a stored chain's death upstream: with
+// the account gone, the keep-alive sweep's next refresh of that chain earns a 401 and marks it dead
+// (SPEC section 8) — the process-level way to provoke the UPSTREAM_SESSION_LOST path that otherwise
+// lives only in unit tests. Verified against 2.26.0 and current: a deleted user's refresh token is
+// refused with 401 (not a 404/5xx), so the loop marks the chain dead rather than retrying it.
+export async function deleteAbsUser(absBase: string, adminAccessToken: string, username: string): Promise<void> {
+  const userId = await findAbsUserId(absBase, adminAccessToken, username)
+  if (userId === undefined) throw new Error(`user ${username} not found for deletion`)
+
+  const res = await seedFetch(`ABS delete user ${username}`, `${absBase}/api/users/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    headers: { authorization: `Bearer ${adminAccessToken}` },
+  })
+  if (!res.ok) throw new Error(`ABS delete user ${username} failed: ${res.status} ${await res.text()}`)
 }
 
 export interface SeededAbs {
