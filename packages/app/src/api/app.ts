@@ -4,6 +4,7 @@ import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
 import { versionPrefix, type ContractDocument } from './apiPrefix.js'
+import { AbsAuthError } from '../abs/errors.js'
 import { AbsClient } from '../abs/client.js'
 import { buildAbsDispatcher } from '../abs/transport.js'
 import { AuthService } from '../auth/authService.js'
@@ -186,10 +187,14 @@ function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>, keepAlive: Chai
       prefix: v2Prefix,
       service: new V2ApiService({ ...deps, apiPrefix: v2Prefix }),
       securityHandlers: ratatoskrBearerHandlers,
-      guardOperation: createTokenGuard(
-        openapiDocument,
-        resolveDeviceSession(deps.auth, keepAlive),
-        UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
+      guardOperation: withUpstreamSessionLoss(
+        createTokenGuard(
+          openapiDocument,
+          resolveDeviceSession(deps.auth, keepAlive),
+          UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
+        ),
+        deps.auth,
+        keepAlive,
       ),
     },
   ]
@@ -215,6 +220,38 @@ function resolveDeviceSession(auth: AuthService, keepAlive: ChainKeepAlive): (re
     const currentAccessToken = async (): Promise<string> => (await keepAlive.usableChain(auth.resolve(token))).accessToken
     request.absTokenSource = currentAccessToken
     request.absToken = await currentAccessToken()
+  }
+}
+
+// Wraps a major's guard so a proxied Audiobookshelf 401 raised by a handler — for a token that
+// still names a live device session — surfaces as UPSTREAM_SESSION_LOST with the chain marked dead,
+// not the generic `unauthorized` the raw AbsAuthError maps to (#163, SPEC section 8). This is the
+// request-path twin of the refresh that proves a chain dead (keepAlive.refreshOnce): usableChain
+// only refreshes, and thereby only discovers death, when the access token is near expiry — a
+// revocation ahead of that window is invisible until a handler's own upstream call is rejected.
+//
+// /v2 only: the wrap re-resolves the caller's Ratatoskr token, which /v1 has no notion of, and /v1's
+// bearer *is* an Audiobookshelf token, so a 401 there is a genuine `unauthorized`.
+function withUpstreamSessionLoss(guard: GuardOperation, auth: AuthService, keepAlive: ChainKeepAlive): GuardOperation {
+  return (operationId, handler) => {
+    const guarded = guard(operationId, handler)
+    return async (request, reply) => {
+      try {
+        return await guarded(request, reply)
+      } catch (error) {
+        if (!(error instanceof AbsAuthError)) throw error
+        // No Ratatoskr token means an unauthenticated operation (login): its 401 is a genuine
+        // credential rejection this must not touch. Only a call made on a resolved device session
+        // can be an upstream revocation.
+        const token = request.ratatoskrToken
+        if (token === undefined) throw error
+        // Re-resolve rather than trust the entry the guard saw: the request may have outlived its
+        // session. A live entry means the revocation landed ahead of expiry — bury the chain and
+        // raise the lost-session 401. A token now unknown or already dead throws its own (correct)
+        // 401 from resolve() and never reaches loseChain, superseding this raw rejection.
+        return await keepAlive.loseChain(auth.resolve(token))
+      }
+    }
   }
 }
 
