@@ -133,17 +133,38 @@ jobs:
       # someone then has to remember to remove — and every break that does not bump the major, which
       # is the case the job exists for, still fails. Only the top-level info.version counts; a failure
       # to read it is fatal rather than a silent skip.
+      #
+      # Two things the major must survive to be trusted as the skip key. A quoted `version: "2.0.0"`
+      # must parse to 2, not "2 — otherwise merely quoting the version reads as base != head and the
+      # breaking check silently skips itself. And info.version's major must match the major in
+      # servers.url (/vN): the skip trusts the version as a proxy for "a new served surface", so a PR
+      # that bumps info.version to 3 while leaving servers.url at /v2 would skip the check while /v2
+      # itself takes an unflagged break. Both are enforced below rather than trusted.
       - id: contract-major
         run: |
           contract_major() {
             git show "$1:contract/openapi.yaml" |
-              awk '/^info:/ { inside = 1; next } /^[^[:space:]]/ { inside = 0 } inside && $1 == "version:" { print $2; exit }' |
+              awk '/^info:/ { inside = 1; next } /^[^[:space:]]/ { inside = 0 } inside && $1 == "version:" { gsub(/"/, "", $2); print $2; exit }' |
               cut -d. -f1
+          }
+          served_major() {
+            git show "$1:contract/openapi.yaml" |
+              awk '/^servers:/ { inside = 1; next } /^[^[:space:]]/ { inside = 0 } inside && $1 == "-" && $2 == "url:" { print $3; exit }' |
+              grep -oE '/v[0-9]+' | head -1 | tr -cd '0-9'
           }
           base=$(contract_major "origin/${{ github.base_ref }}")
           head=$(contract_major HEAD)
           if [ -z "$base" ] || [ -z "$head" ]; then
             echo "could not read info.version from contract/openapi.yaml (base='$base', head='$head')" >&2
+            exit 1
+          fi
+          served=$(served_major HEAD)
+          if [ -z "$served" ]; then
+            echo "could not read the served major from servers.url in contract/openapi.yaml" >&2
+            exit 1
+          fi
+          if [ "$head" != "$served" ]; then
+            echo "::error::info.version major ($head) does not match the served prefix /v$served in servers.url. A new major must bump both, or clients on /v$served take an unflagged breaking change." >&2
             exit 1
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
