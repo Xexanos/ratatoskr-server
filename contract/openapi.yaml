@@ -321,6 +321,7 @@ paths:
               schema: { $ref: "#/components/schemas/Session" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NoActiveSession" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
 
   /sessions/current/resume:
     post:
@@ -335,6 +336,7 @@ paths:
               schema: { $ref: "#/components/schemas/Session" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NoActiveSession" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
 
   /sessions/current/seek:
     post:
@@ -358,6 +360,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NoActiveSession" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
 
 components:
   securitySchemes:
@@ -387,8 +390,9 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
       description: |
-        The request carried no usable credential. The body's `code` separates the two cases a
-        client must handle differently — see UnauthorizedError.
+        The credential was rejected. On the bearer-protected endpoints that is the bearer token; on
+        `login` (which takes no bearer) it is the Audiobookshelf username and password. The body's
+        `code` separates the cases a client must handle differently — see UnauthorizedError.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/UnauthorizedError" }
@@ -617,8 +621,9 @@ components:
               enum: [unauthorized, UPSTREAM_SESSION_LOST]
               description: |
                 `unauthorized` — no token, or one this server does not know (it was never
-                issued, or sign-out revoked it): the device is signed out, and the client
-                asks for credentials as a fresh sign-in.
+                issued, or sign-out revoked it); at `login`, the Audiobookshelf credentials
+                were refused. The device is signed out, and the client asks for credentials as
+                a fresh sign-in.
 
                 `UPSTREAM_SESSION_LOST` — the token is valid, but the Audiobookshelf session
                 Ratatoskr held for it has died (server↔Audiobookshelf contact lost for longer
