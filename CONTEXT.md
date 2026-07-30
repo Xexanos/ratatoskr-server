@@ -47,6 +47,14 @@ Currently only sign-out, which the contract makes idempotent so a client can alw
 sign-out locally.
 _Avoid_: unguarded, allowlisted, public (it still requires a bearer — just not a live one)
 
+**Mode heal**:
+The boot-time re-assertion of the session store file's owner-only mode: when a pre-existing
+store has any group/other permission bit set, `SessionStore.open` chmods it back to 0600 and
+warns - never a boot blocker, and a failed chmod only warns too (ADR-0003). POSIX-only; a
+no-op on Windows, where the mode does not apply.
+_Avoid_: permission enforcement, chmod guard - both suggest refusing to boot, which this
+deliberately is not.
+
 ### Versioning
 
 **Contract tag**:
