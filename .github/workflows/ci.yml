@@ -108,3 +108,54 @@ jobs:
           flatten-allof: true
           fail-on: WARN
           github-token: ${{ github.token }}
+
+  # SPEC section 6: each contract version is frozen under an immutable contract-<x.y.z> git tag the
+  # moment it lands on main (contract-tag.yml). For those tags to stay honest — the app generates its
+  # client types from one, and a superseded major is served frozen against one — a version must name
+  # exactly one contract text. So any change to contract/openapi.yaml must move info.version strictly
+  # forward, to a version that has never been tagged. oasdiff (above) governs the *shape* of a change
+  # (no break without a major bump); this governs its *identity* (a changed contract is a new, higher,
+  # not-yet-taken version). Runs on every PR, unfiltered, so it is safe as a required status check: an
+  # unchanged contract passes in the first step rather than leaving the check forever pending.
+  contract-version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: git fetch --depth=1 origin ${{ github.base_ref }}
+      - name: A changed contract must bump info.version to a new, higher, untagged version
+        run: |
+          set -euo pipefail
+          # Read the top-level info.version. No `exit` in the awk: an early exit closes the pipe while
+          # `git show` is still writing, and under pipefail the SIGPIPE would fail the command
+          # substitution. The `inside` guard already limits it to the one version under info:.
+          read_version() {
+            git show "$1:contract/openapi.yaml" |
+              awk '/^info:/ { inside = 1; next } /^[^[:space:]]/ { inside = 0 } inside && $1 == "version:" { print $2 }'
+          }
+
+          base_ref="origin/${{ github.base_ref }}"
+          if [ "$(git rev-parse "$base_ref:contract/openapi.yaml")" = "$(git rev-parse HEAD:contract/openapi.yaml)" ]; then
+            echo "contract/openapi.yaml unchanged — nothing to check."
+            exit 0
+          fi
+
+          base=$(read_version "$base_ref")
+          head=$(read_version HEAD)
+          echo "contract/openapi.yaml changed: info.version ${base:-<none>} -> ${head:-<none>}"
+
+          if ! printf '%s' "$head" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=contract/openapi.yaml::info.version '$head' is not a plain x.y.z semver"
+            exit 1
+          fi
+          # Strictly greater than base: unequal, and the higher of the two under version sort.
+          if [ "$head" = "$base" ] || [ "$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -n1)" != "$head" ]; then
+            echo "::error file=contract/openapi.yaml::a changed contract must bump info.version forward ($base -> $head is not an increase)"
+            exit 1
+          fi
+          # The tag is cut once and never moved; a version may not be reused for a second contract text.
+          if git ls-remote --exit-code --tags origin "refs/tags/contract-$head" >/dev/null 2>&1; then
+            echo "::error file=contract/openapi.yaml::contract-$head is already tagged and immutable — bump to a version that has not been released"
+            exit 1
+          fi
+          echo "OK: $head is a forward bump and contract-$head is not yet taken."
