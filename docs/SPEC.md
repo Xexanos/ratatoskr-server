@@ -304,17 +304,23 @@ explicit sign-out.** Server restarts and arbitrarily long usage pauses must neve
 re-login.
 
 - **Sign-in**: the client posts Audiobookshelf credentials to `POST /v2/auth/login`.
-  Ratatoskr validates them against ABS — creating its own, private ABS session chain for
-  this device login — and returns an opaque Ratatoskr token plus the identified user. The
-  password is never stored, on either side; the client never sees ABS tokens.
+  Ratatoskr validates them against ABS and returns an opaque Ratatoskr token plus the
+  identified user. The password is never stored, on either side; the client never sees ABS
+  tokens. Validating against ABS mints an ABS session chain, but Ratatoskr keeps **one chain
+  per ABS user** (ADR-0004): the mint is installed only when the user had no chain, or heals a
+  dead one; when the user already has a live chain, that one is kept and the freshly minted
+  chain is a throwaway ended upstream. So the sign-in the login route serves is per device, but
+  the ABS chain behind it is the user's single shared one.
 - **The Ratatoskr token** is an opaque 256-bit random value, sent as a bearer token on
   every request. It does not expire and is never rotated — it is valid until explicit
   sign-out, and revocable at any moment by deleting its session entry. The server stores
   only its **hash**; validation is an in-process lookup. (Rationale and the security
   comparison against expiring/rotating alternatives: ADR-0001.)
-- **Session store**: one entry per device login — the token hash, that device's own ABS
-  chain, and metadata. **One ABS chain per device, never shared**; no two consumers of a
-  rotating chain ever exist again. The store is a single AES-256-GCM-encrypted file on its
+- **Session store**: one entry per device login (the token hash, the ABS user id, metadata)
+  plus **one ABS chain per ABS user**, shared by every device of that user (ADR-0004): the
+  chain is created with the user's first device and ended with the last. No two consumers of a
+  rotating chain ever exist again, and no two chains of one user exist to collide. The store is
+  a single AES-256-GCM-encrypted file on its
   own mounted volume (`/data` in the container), file mode 0600, non-root — deliberately not
   the certificate's volume, revising ADR-0001's "existing mounted volume": the two share no
   lifecycle, since a certificate can be regenerated at the price of re-confirming its
@@ -328,11 +334,12 @@ re-login.
   which is what makes the last of those visible at all.
 - **Keep-alive**: the server renews every stored ABS chain on three schedules, which between
   them answer three different ways of losing one.
-  - **Daily, jittered**: one sweep a day, at a jittered offset, renewing every stored chain.
-    Within a sweep the chains are **spaced by over a second** each — below ABS 2.35.1 two
-    refreshes of the same user inside one second come back with the identical token (see the
-    sign-out note below), so a sweep that renewed the whole store at once would be the most
-    reliable way to collide the very chains it is keeping alive.
+  - **Daily, jittered**: one sweep a day, at a jittered offset, renewing every stored chain
+    (one per user, so one refresh per user). No inter-refresh spacing is needed: below ABS
+    2.35.1 two refreshes of the same user inside one second collide (see the sign-out note
+    below), but with one chain per user the loop never refreshes a user twice, so the collision
+    cannot arise. The jitter still spreads a fleet's sweeps so they do not all reach ABS at
+    once.
   - **On boot**: the chains that missed a sweep because the server was down, stalest first —
     those are the ones nearest the refresh window's edge, and the order is what decides which
     survive a recovery that only gets halfway. Never blocking: a slow or unreachable ABS may
@@ -342,18 +349,21 @@ re-login.
     refresh token and says nothing about the access one, so without this a device returning
     after a pause would meet a 401 the server could have avoided.
 
-  Renewals are serialized, and the one for a given entry is shared by everyone waiting on it:
-  ABS rotates the refresh token on use, so two concurrent renewals of one chain would spend
-  the same token twice and kill the chain they were renewing. A chain now dies only if
+  Renewals are serialized, and the one for a given user's chain is shared by everyone waiting
+  on it (the in-flight dedup is keyed by ABS user, so several devices of one user share the
+  single refresh their single chain needs): ABS rotates the refresh token on use, so two
+  concurrent renewals of one chain would spend the same token twice and kill the chain they
+  were renewing. A chain now dies only if
   server↔ABS contact is lost for the entire ABS refresh window (≥ 7 days by default) or on an
   ABS username change. Operator guidance: raise ABS's `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days)
   if longer outages are expected.
 - **Dead chain, valid token**: the keep-alive loop marks a dead chain but keeps the entry,
   so the user's next request answers **401 with the machine-readable
   `code: "UPSTREAM_SESSION_LOST"`** in the error body instead of a generic "unknown
-  token". The app reacts with a targeted password prompt; re-login creates a fresh chain
-  and a **new** token and deletes the old entry (no in-place repair). This failure is rare
-  and loud — the inverse of the old model's frequent silent re-logins.
+  token". The app reacts with a targeted password prompt; re-login mints a **new** token,
+  heals or reuses the user's chain, and deletes the old entry (no in-place repair of the
+  token). This failure is rare and loud — the inverse of the old model's frequent silent
+  re-logins.
   The keep-alive loop is the usual place a chain is proved dead, but not the only one. A
   session revoked upstream while its access token is not yet near expiry is refreshed by
   nothing, so the revocation stays invisible until a proxied request is rejected. That 401,
@@ -368,35 +378,37 @@ re-login.
   sign-in over a stale entry would lose a credential that does work. An offered token this
   server does not know is ignored — the route must never turn a valid sign-in into a 401 —
   and only the holder of a token can retire it this way, so no device can sign another out.
-  The half no client can do is the server's: a device whose chain died before it could offer
-  the token it is replacing leaves an entry **nobody can name**, since the login route is
-  unauthenticated. Marking the chain dead is what closes that too — a sign-in retires the
-  *dead* entries of the same ABS user, who has just proved the password, while their other
-  devices' live chains are untouched. Nothing goes upstream for those: the chain being retired
-  is gone, which is what "dead" records. What this cannot do is tell one dead entry of a user
-  from another, and the dominant death cause — an outage past the window — kills all of that
-  user's chains at once. So the first device back retires its siblings' entries too, and those
-  siblings then get the ordinary "signed out" 401 instead of the targeted prompt. Accepted
-  deliberately: both answers end with the same person typing the same password, while keeping
-  dead entries until each device happens to return would leave the store accumulating
-  credentials that can never work again.
-- **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
-  immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
-  killing exactly this device's ABS session; other devices and other ABS clients are
-  untouched. Idempotent and best-effort: unknown token or unreachable ABS still answers
-  204 (an orphaned ABS session expires on its own, since nobody refreshes it).
-  **Requires ABS ≥ 2.35.1 to be per device.** Before that release ABS minted the refresh
-  token from second-precision JWT timestamps with no per-session claim, so two sign-ins (or
-  two refreshes) of the same user inside the same second came back with the *identical*
-  token — the session rows were distinct, but the token that names a session at `POST
-  /logout` is not, so ending one chain ends the other
-  ([advplyr/audiobookshelf#5253](https://github.com/advplyr/audiobookshelf/issues/5253),
-  fixed in 2.35.1). Verified by probe: 2.26.0, 2.29.0, 2.31.0 and 2.35.0 collide, 2.35.1
-  does not. The affected device stays signed in as far as Ratatoskr is concerned — its token
-  and store entry are untouched — but its upstream calls fail until it re-authenticates.
-  Timing-dependent, so occasional rather than reproducible on an older ABS. Nothing here can
-  repair it; ADR-0001 carries the amended grounding fact and what it costs the keep-alive
-  loop.
+  Because the chain is one per user (ADR-0004), a sign-in that heals it revives **every**
+  device of that user at once: the dead chain is one entry in the store, and replacing it with
+  the fresh mint clears the death for the phone, the tablet and the browser tab together, each
+  of which resumes on the new pair at its next request without a re-login of its own. This is
+  the dominant recovery path, since the dominant death cause (an outage past the refresh window
+  or a rename) kills the user's one chain, and one sign-in brings it back. A well-behaved app
+  offers its old bearer on the re-login so its own stale device entry is retired in the same
+  step; a re-login that offers no bearer leaves that one entry behind, revived but unreferenced,
+  a bounded orphan a later operator session-list feature (section 16) can clear. The old model's
+  per-device retire-the-dead-siblings dance is gone with the per-device chain: there are no
+  dead sibling entries to retire, only one shared chain to heal.
+- **Sign-out** (`POST /v2/auth/logout`): delete the device's session entry (the token is dead
+  immediately) and, **only when it was the user's last device**, fire a best-effort ABS `POST
+  /logout` with the shared chain's refresh token, ending that user's ABS session; while another
+  device still rides the chain, the entry goes but the chain stays (ADR-0004). Other users and
+  other ABS clients are untouched. Idempotent and best-effort: unknown token or unreachable ABS
+  still answers 204 (an orphaned ABS session expires on its own, since nobody refreshes it).
+  **The ABS < 2.35.1 collision, and the residual risk that stays.** Before 2.35.1 ABS minted the
+  refresh token from second-precision JWT timestamps with no per-session claim, so two sign-ins
+  (or two refreshes) of the same user inside the same second came back with the *identical*
+  token ([advplyr/audiobookshelf#5253](https://github.com/advplyr/audiobookshelf/issues/5253),
+  fixed in 2.35.1; verified by probe: 2.26.0, 2.29.0, 2.31.0 and 2.35.0 collide, 2.35.1 does
+  not). One chain per user removes the refresh-versus-refresh case entirely, since the loop
+  never refreshes a user twice. What remains, and is accepted, is the throwaway a sign-in mints
+  when the user already has a live chain: if that mint lands in the same second as a refresh of
+  the user's chain, or as a second simultaneous sign-in of the same user, the throwaway token
+  can equal the live one, and ending the throwaway would then end the live chain. This needs two
+  events of one user within one second on an ABS older than 2.35.1, which is vanishingly rare
+  and self-limited to outdated servers; the failure, if it happens, is the ordinary dead-chain
+  one and the next sign-in heals it. ADR-0004 records why spacing the login path to close even
+  this was rejected.
 - All endpoints require a valid Ratatoskr token except `/health`, `/auth/login`, and
   `GET /speakers`. The **token guard** is now an in-process hash lookup — no per-request
   ABS roundtrip — but keeps deriving the protected set from the contract, so a new
@@ -588,8 +600,8 @@ ratatoskr-server/
 │   │
 │   ├── app/                   # @ratatoskr/app — the service (all I/O); depends on the two above
 │   │   ├── config/             #   load and validate environment variables at startup
-│   │   ├── auth/               #   the encrypted session store: one entry per device login
-│   │   │                       #   (token hash + that device's ABS chain), AES-256-GCM on the volume
+│   │   ├── auth/               #   the encrypted session store: one entry per device login plus
+│   │   │                       #   one ABS chain per user (shared), AES-256-GCM on the volume
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
@@ -706,7 +718,7 @@ Decisions (binding for the implementation):
   cannot gain a response: there the status is served undeclared, as a consequence of the freeze rather
   than a choice. A `/v1` client that reads an unexpected `4xx` on login as "credentials rejected" will
   prompt again instead of waiting — the one behaviour this costs.
-- **The session store is encrypted, keyed by the operator.** The per-device ABS chains and
+- **The session store is encrypted, keyed by the operator.** The per-user ABS chains and
   Ratatoskr token hashes (section 8) persist as a single AES-256-GCM file on the mounted
   volume, key from `SESSION_STORE_KEY` (mandatory — no key, no boot). A foreign container
   mounting the volume reads only ciphertext. Honest boundary: compromise of *this*
@@ -762,7 +774,8 @@ Known accepted risks / open points:
   `Session.rotatedTokens`) proved structurally fragile — repeated silent re-logins and
   second-order bugs — and is replaced by Ratatoskr-native sessions under `/v2`
   ([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), section 8): the server
-  is the sole holder of ABS chains, one per device, so no rotating token ever has two
+  is the sole holder of ABS chains, one per ABS user
+  ([ADR-0004](./adr/0004-one-abs-chain-per-user.md)), so no rotating token ever has two
   consumers again. The handover protocol remains live on the frozen `/v1` surface until
   its sunset.
 - `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
