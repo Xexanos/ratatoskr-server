@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { load } from 'js-yaml'
 import { Ajv, type ValidateFunction } from 'ajv'
+import { decodeStoreFile } from '../../app/dist/auth/sessionFile.js'
 
 // Shared harness for the process-level integration tests: they spawn the real compiled
 // server (packages/app/dist/main.js) and talk to it over real HTTP — no fetch stubbing.
@@ -87,6 +88,34 @@ export function sessionStoreEnv(): { SESSION_STORE_KEY: string; SESSION_STORE_PA
   const dir = mkdtempSync(join(tmpdir(), 'rtk-it-store-'))
   storeDirs.push(dir)
   return { SESSION_STORE_KEY: randomBytes(32).toString('base64'), SESSION_STORE_PATH: join(dir, 'sessions.enc') }
+}
+
+// One stored device login, as it sits on disk. A structural mirror of the server's SessionEntry —
+// re-declared here rather than imported so the test names only the fields it reads, and so a private
+// field the store adds later cannot silently change what this asserts.
+export interface StoredEntry {
+  tokenHash: string
+  absUserId: string
+  absUsername: string
+  chain: { accessToken: string; refreshToken: string }
+  createdAt: string
+  // When the chain was last minted or refreshed; advances on every keep-alive renewal (sessionStore).
+  chainRefreshedAt?: string
+  // Set once a refresh proved the chain gone — the keep-alive loop's dead-chain mark (sessionStore).
+  deadSince?: string
+}
+
+// Decrypt and parse a spawned server's encrypted session store off disk, using the very key the test
+// handed it (sessionStoreEnv). The only external window onto the keep-alive loop's work: a renewal
+// rotates the stored chain and advances its stamp, and a death marks the entry — neither shows on the
+// /v2 surface, so a process-level test can watch them only here. Reuses the server's own
+// decodeStoreFile (built dist) rather than re-implementing the AES-GCM envelope, so the two cannot
+// drift. Throws on a wrong key or a torn read; call it inside a poll so a read racing the atomic
+// rename simply retries.
+export function readSessionStore(path: string, keyBase64: string): StoredEntry[] {
+  const plaintext = decodeStoreFile(Buffer.from(keyBase64, 'base64'), readFileSync(path), path)
+  const payload = JSON.parse(plaintext.toString('utf8')) as { entries?: StoredEntry[] }
+  return payload.entries ?? []
 }
 
 // Sign in through the spawned server and return the opaque Ratatoskr token, the way a /v2 client does
