@@ -1,6 +1,7 @@
 import type { FastifyError } from 'fastify'
 import { InvalidCursorError } from '../abs/cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from '../abs/errors.js'
+import { UnknownTokenError, UpstreamSessionLostError } from '../auth/errors.js'
 import { NoActiveSessionError } from '../playback/errors.js'
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
@@ -11,6 +12,19 @@ export class NotImplementedError extends Error {
   constructor() {
     super('This operation is not implemented yet')
     this.name = 'NotImplementedError'
+  }
+}
+
+// Handed to the error handler when a credential endpoint's rate limit is exhausted (rateLimit.ts).
+// An error rather than a ready-made body because @fastify/rate-limit passes what its
+// errorResponseBuilder returns into the error handler, and this API has exactly one place that turns
+// a thrown value into a response — bypassing it would give this one refusal a body shaped unlike
+// every other error. The message says nothing about counts or the window: a caller only needs to know
+// to wait, and `Retry-After` (set by the plugin) says how long.
+export class TooManyRequestsError extends Error {
+  constructor() {
+    super('Too many attempts. Please wait and try again.')
+    this.name = 'TooManyRequestsError'
   }
 }
 
@@ -38,8 +52,21 @@ export function mapError(error: unknown): MappedError {
   if (isGlueSecurityError(error)) {
     return mapError(error.errors[0] ?? new MissingBearerError())
   }
-  if (error instanceof MissingBearerError) {
-    return { statusCode: 401, code: 'unauthorized', message: 'A valid Audiobookshelf token is required' }
+  // No bearer, or one naming no session: both mean "signed out" to a client, and the contract gives
+  // them one code deliberately (see UnknownTokenError) — hence one arm.
+  if (error instanceof MissingBearerError || error instanceof UnknownTokenError) {
+    return { statusCode: 401, code: 'unauthorized', message: 'A valid bearer token is required' }
+  }
+  // The one 401 a client must not read as "signed out": the token is fine, the upstream chain is
+  // gone, and only a password can rebuild it. Spelled as the contract declares it (SPEC section 8),
+  // and placed above the AbsAuthError arm below, which is the generic upstream rejection this
+  // deliberately displaces on the /v2 session path.
+  if (error instanceof UpstreamSessionLostError) {
+    return {
+      statusCode: 401,
+      code: 'UPSTREAM_SESSION_LOST',
+      message: 'The Audiobookshelf session for this device has been lost; sign in again',
+    }
   }
   if (error instanceof AbsAuthError) {
     return { statusCode: 401, code: 'unauthorized', message: 'Audiobookshelf rejected the credentials' }
@@ -64,6 +91,9 @@ export function mapError(error: unknown): MappedError {
   }
   if (error instanceof NotImplementedError) {
     return { statusCode: 404, code: 'not_found', message: 'This operation is not implemented yet' }
+  }
+  if (error instanceof TooManyRequestsError) {
+    return { statusCode: 429, code: 'too_many_requests', message: error.message }
   }
   // Fastify's own errors: schema validation and other client-side (4xx) failures.
   const fastifyError = error as FastifyError

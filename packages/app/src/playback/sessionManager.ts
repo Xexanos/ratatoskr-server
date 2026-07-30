@@ -1,5 +1,6 @@
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
 import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
+import { jwtExpSeconds } from '../abs/jwt.js'
 import type { LibraryBook } from '../abs/library.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
@@ -31,6 +32,14 @@ export interface PlaybackSession {
   rotatedTokens: RotatedTokenPair | undefined
 }
 
+// Where the sync loop reads the listening user's Audiobookshelf access token, asked afresh at each
+// use instead of captured once at start(). The indirection is what lets a chain renewed *during*
+// playback reach a session that is already running (SPEC section 8): under /v2 this reads the
+// device session's stored chain, which the keep-alive loop renews under it, so a session that
+// outlives its access token keeps writing progress. Under /v1 the pair is the manager's own to
+// rotate, so its supplier is a constant that this class replaces on each rotation.
+export type ListeningToken = () => Promise<string>
+
 // How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds
 // is about seek accuracy) so that raising the seek tolerance for a flaky speaker does not silently
 // widen the end-of-book window.
@@ -48,10 +57,13 @@ interface ActiveSession {
   itemId: string
   speakerId: string
   // The listening user's tokens — used for ABS progress read/write so progress is per-user. Never
-  // embedded in media URLs (those carry the streamer token). The sync loop renews both proactively
-  // before the access token expires (SPEC section 8); refreshToken is undefined when the client did
-  // not hand one to startSession, in which case no renewal happens.
-  listeningToken: string
+  // embedded in media URLs (those carry the streamer token). `listeningToken` is asked for the
+  // current access token at each use (see ListeningToken), so a chain renewed elsewhere reaches
+  // this session. `refreshToken` is the /v1 rotation handover's own: the sync loop renews the pair
+  // proactively before expiry (SPEC section 8) and replaces the supplier with the result. It is
+  // undefined on /v2 and whenever the client handed none to startSession, and then no rotation
+  // happens here — on /v2 because renewing the chain is the keep-alive loop's job, not this one's.
+  listeningToken: ListeningToken
   refreshToken: string | undefined
   trackDurations: number[]
   totalDurationSeconds: number
@@ -94,8 +106,14 @@ export class SessionManager {
   // Start (or replace) playback: build the queue from ABS track metadata + the streamer token, play
   // it, and resume from the position stored in ABS. Throws ItemNotPlayableError (400) / AbsAuthError
   // (401) for a bad book or an invalid token — validated BEFORE any active session is touched.
-  async start(userToken: string, refreshToken: string | undefined, itemId: string, speakerId: string): Promise<PlaybackSession> {
+  async start(
+    listeningToken: ListeningToken,
+    refreshToken: string | undefined,
+    itemId: string,
+    speakerId: string,
+  ): Promise<PlaybackSession> {
     return this.serialize(async () => {
+      const userToken = await listeningToken()
       // Validate the token and confirm the book is playable first: getPlaybackManifest presents the
       // token to ABS (401s an invalid one) and rejects an unplayable book. Only after this is known
       // viable do we tear down any active session — so a bad/unauthenticated request, or an
@@ -136,7 +154,7 @@ export class SessionManager {
       this.session = {
         itemId,
         speakerId,
-        listeningToken: userToken,
+        listeningToken,
         refreshToken,
         trackDurations: [...plan.trackDurations],
         totalDurationSeconds: plan.totalDurationSeconds,
@@ -263,9 +281,9 @@ export class SessionManager {
     this.stopLoop()
     if (write !== undefined) {
       try {
-        await this.deps.abs.writeProgress(session.listeningToken, session.itemId, write)
+        await this.deps.abs.writeProgress(await session.listeningToken(), session.itemId, write)
       } catch {
-        // best-effort
+        // best-effort — including a chain that has died under us, which leaves nothing to write with
       }
     }
     try {
@@ -397,13 +415,14 @@ export class SessionManager {
     // (so the delivery gate can't be outrun by back-to-back rotations).
     if (this.pendingRotatedTokens !== undefined) return
     if (session.refreshToken === undefined) return
-    const exp = jwtExpSeconds(session.listeningToken)
+    const current = await session.listeningToken()
+    const exp = jwtExpSeconds(current)
     if (exp === undefined) return
     if (Date.now() / 1000 < exp - this.deps.config.listeningTokenRefreshMarginSeconds) return
     try {
       const rotated = await this.deps.abs.refresh(session.refreshToken)
-      this.preRotationToken = session.listeningToken // the token the owner still holds until it expires
-      session.listeningToken = rotated.accessToken
+      this.preRotationToken = current // the token the owner still holds until it expires
+      session.listeningToken = () => Promise.resolve(rotated.accessToken)
       session.refreshToken = rotated.refreshToken
       this.pendingRotatedTokens = { accessToken: rotated.accessToken, refreshToken: rotated.refreshToken }
     } catch {
@@ -417,7 +436,7 @@ export class SessionManager {
   // tracked on the true read position; only the persisted value is backed off (see persistedPosition).
   private async writeBack(session: ActiveSession, absolute: number): Promise<void> {
     try {
-      await this.deps.abs.writeProgress(session.listeningToken, session.itemId, {
+      await this.deps.abs.writeProgress(await session.listeningToken(), session.itemId, {
         currentTimeSeconds: this.persistedPosition(absolute),
         durationSeconds: session.totalDurationSeconds,
         isFinished: false,
@@ -535,20 +554,6 @@ export class SessionManager {
     const base = this.deps.config.absUrl.replace(/\/$/, '')
     const key = this.deps.config.absStreamerApiKey
     return `${base}/api/items/${encodeURIComponent(itemId)}/file/${encodeURIComponent(ino)}?token=${encodeURIComponent(key)}`
-  }
-}
-
-// Read a JWT's `exp` (seconds since the epoch) WITHOUT verifying the signature — only the timing is
-// needed, to renew before expiry, and ABS is the authority on validity. Returns undefined for a
-// non-JWT / unparseable token, so the caller degrades to "no proactive renewal".
-function jwtExpSeconds(token: string): number | undefined {
-  const parts = token.split('.')
-  if (parts.length !== 3) return undefined
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1] as string, 'base64url').toString('utf8')) as { exp?: unknown }
-    return typeof payload.exp === 'number' ? payload.exp : undefined
-  } catch {
-    return undefined
   }
 }
 

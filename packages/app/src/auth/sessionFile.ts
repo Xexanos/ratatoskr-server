@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { open, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { SessionStoreCorruptError, SessionStoreError, SessionStoreKeyError } from './errors.js'
+import { SessionStoreCorruptError, SessionStoreError, SessionStoreKeyError, SessionStoreWriteError } from './errors.js'
 
 // On-disk envelope of the session store (SPEC section 8): a single AES-256-GCM file.
 //
@@ -61,9 +61,10 @@ export function decodeStoreFile(key: Buffer, file: Buffer, path: string): Buffer
   decipher.setAuthTag(tag)
   try {
     return Buffer.concat([decipher.update(ciphertext), decipher.final()])
-  } catch {
-    // GCM cannot distinguish a wrong key from a modified file — both fail the tag check.
-    throw new SessionStoreKeyError(path)
+  } catch (cause) {
+    // GCM cannot distinguish a wrong key from a modified file — both fail the tag check. The
+    // underlying tag-check failure is kept as the cause so the log still shows what actually threw.
+    throw new SessionStoreKeyError(path, { cause })
   }
 }
 
@@ -79,7 +80,17 @@ function describeForeignMagic(magic: Buffer): string {
 // full bytes to a sibling temp file, flush them to disk, then rename over the target. Rename
 // within a directory is atomic, so a crash at any point leaves either the previous store or
 // the new one — never a truncated mix, which would cost every device its session.
+//
+// Every failure here is wrapped, for the reason on SessionStoreWriteError.
 export async function writeFileAtomic(path: string, bytes: Buffer): Promise<void> {
+  try {
+    await writeAndPublish(path, bytes)
+  } catch (cause) {
+    throw new SessionStoreWriteError(path, { cause })
+  }
+}
+
+async function writeAndPublish(path: string, bytes: Buffer): Promise<void> {
   // A temp name unique to THIS write, so no other writer's name is ever touched. Unique per write,
   // not per process: two containers sharing one /data volume both run as PID 1, so a process-id
   // suffix would not tell them apart — and two writers on one temp name defeat the atomic replace

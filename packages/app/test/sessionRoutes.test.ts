@@ -5,6 +5,7 @@ import { buildApp } from '../src/api/app.js'
 import { NoActiveSessionError } from '../src/playback/errors.js'
 import type { SessionManager } from '../src/playback/sessionManager.js'
 import type { SonosClient } from '../src/sonos/client.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
@@ -35,11 +36,12 @@ const SESSION = {
 }
 
 // A valid-by-default token validator; override `abs` to simulate an invalid token.
-function appWith(sessions: Partial<SessionManager>, abs: Partial<AbsClient> = {}) {
+async function appWith(sessions: Partial<SessionManager>, abs: Partial<AbsClient> = {}) {
   return buildApp(testConfig(), {
     sessionManager: sessions as SessionManager,
     absClient: { validateToken: vi.fn().mockResolvedValue(undefined), ...abs } as AbsClient,
     sonosClient: {} as SonosClient,
+    sessionStore: await tempSessionStore(),
   })
 }
 
@@ -58,7 +60,11 @@ describe('PUT /v1/sessions/current', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual(SESSION)
-    expect(start).toHaveBeenCalledWith('user-token', 'refresh-1', 'li_1', 'RINCON_1')
+    // The listening token reaches the manager as a supplier, not a value (sessionManager.ts): on
+    // /v1 it is a constant, because the caller's bearer *is* the upstream token and nothing behind
+    // this route renews it.
+    expect(start).toHaveBeenCalledWith(expect.any(Function), 'refresh-1', 'li_1', 'RINCON_1')
+    await expect((start.mock.calls[0] as [() => Promise<string>])[0]()).resolves.toBe('user-token')
     await app.close()
   })
 

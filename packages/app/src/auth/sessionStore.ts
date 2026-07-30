@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { SessionStoreConflictError, SessionStoreCorruptError, SessionStoreIoError } from './errors.js'
+import {
+  SessionStoreConflictError,
+  SessionStoreCorruptError,
+  SessionStoreIoError,
+  SessionStoreWriteError,
+} from './errors.js'
 import { decodeStoreFile, encodeStoreFile, writeFileAtomic } from './sessionFile.js'
 
 // One device login's private Audiobookshelf session: the access token in use plus the refresh
@@ -11,9 +16,12 @@ export interface AbsChain {
   refreshToken: string
 }
 
-// What a sign-in supplies: the identified ABS user plus the chain created for this device. The
-// ABS username is kept because ABS invalidates a chain when the username changes, so the
-// keep-alive path needs to recognize the account it is refreshing for.
+// What a sign-in supplies: the identified ABS user plus the chain created for this device. The ABS
+// username is kept because a renamed account is one of the two ways a chain dies (SPEC section 8),
+// and the keep-alive loop reports the death by the name the operator knows the account under — the
+// user id alone would leave them matching opaque ids by hand. Identity itself is the id: a rename
+// leaves this field stale until the device signs in again, which is harmless, because nothing
+// branches on it.
 export interface SessionRecord {
   absUserId: string
   absUsername: string
@@ -25,6 +33,25 @@ export interface SessionRecord {
 export interface SessionEntry extends SessionRecord {
   tokenHash: string
   createdAt: string
+  // When this chain was last minted or refreshed — what the keep-alive loop orders its boot sweep
+  // by, so the chains nearest Audiobookshelf's refresh-window edge are renewed first (SPEC
+  // section 8). Optional so a file written before the field existed stays readable; read it through
+  // chainRefreshedAt(), which supplies the answer for those.
+  chainRefreshedAt?: string
+  // Set when a refresh proved the chain gone (SPEC section 8). The entry deliberately survives:
+  // the token is still the one this device holds, and keeping it is what lets the next request
+  // answer 401 `UPSTREAM_SESSION_LOST` — "re-authenticate" — instead of a generic unknown-token
+  // 401 that reads as "signed out". Terminal: a dead chain is never refreshed and never repaired
+  // in place, only replaced by a fresh sign-in.
+  deadSince?: string
+}
+
+// When the entry's chain was last minted or refreshed, as epoch milliseconds. An entry from before
+// the stamp existed is dated from its creation, which is when its chain was minted; an unparseable
+// stamp reads as the epoch, so a damaged entry is refreshed first rather than skipped forever.
+export function chainRefreshedAt(entry: SessionEntry): number {
+  const stamp = Date.parse(entry.chainRefreshedAt ?? entry.createdAt)
+  return Number.isNaN(stamp) ? 0 : stamp
 }
 
 export interface SessionStoreOptions {
@@ -89,13 +116,24 @@ export class SessionStore {
     return [...this.entries.values()]
   }
 
+  // The entry as it stands now, for a caller holding one from an earlier list()/find(). Entries are
+  // frozen snapshots, so anything that acts on a *held* one — the keep-alive sweep, which may reach
+  // an entry minutes after listing it — has to re-read first: acting on a chain that has since been
+  // refreshed would spend a token Audiobookshelf already rotated away. Undefined means the device
+  // signed out in the meantime.
+  current(entry: SessionEntry): SessionEntry | undefined {
+    return this.entries.get(entry.tokenHash)
+  }
+
   async create(token: string, record: SessionRecord): Promise<SessionEntry> {
+    const createdAt = new Date().toISOString()
     const entry = freezeEntry({
       tokenHash: hashToken(token),
       absUserId: record.absUserId,
       absUsername: record.absUsername,
       chain: { ...record.chain },
-      createdAt: new Date().toISOString(),
+      createdAt,
+      chainRefreshedAt: createdAt,
     })
     await this.mutate((entries) => {
       entries.set(entry.tokenHash, entry)
@@ -111,16 +149,42 @@ export class SessionStore {
     return this.mutate((entries) => entries.delete(tokenHash))
   }
 
-  // Record a refreshed ABS chain against an entry obtained from find()/list(). False means the
-  // entry is gone — the device signed out while its chain was being refreshed, and re-adding it
-  // would resurrect a revoked token.
+  // Record a refreshed ABS chain against an entry obtained from find()/list(), stamped with the
+  // moment it was refreshed. False means the entry is gone — the device signed out while its chain
+  // was being refreshed, and re-adding it would resurrect a revoked token.
+  //
+  // Deliberately does not clear `deadSince`: death is terminal (SPEC section 8 — no in-place
+  // repair), so the keep-alive loop never refreshes a dead chain in the first place.
   async updateChain(entry: SessionEntry, chain: AbsChain): Promise<boolean> {
     return this.mutate((entries) => {
       const current = entries.get(entry.tokenHash)
       if (current === undefined) return false
-      entries.set(entry.tokenHash, freezeEntry({ ...current, chain: { ...chain } }))
+      entries.set(
+        entry.tokenHash,
+        freezeEntry({ ...current, chain: { ...chain }, chainRefreshedAt: new Date().toISOString() }),
+      )
       return true
     })
+  }
+
+  // The chain behind this entry is gone and cannot be renewed (see SessionEntry.deadSince). The
+  // entry is kept, so the device's next request can be answered with the 401 that asks for a
+  // password rather than the one that reads as "signed out". False means the device signed out
+  // first, which needs no marking — it has no token left to answer.
+  async markDead(entry: SessionEntry): Promise<boolean> {
+    return this.mutate((entries) => {
+      const current = entries.get(entry.tokenHash)
+      if (current === undefined) return false
+      entries.set(entry.tokenHash, freezeEntry({ ...current, deadSince: new Date().toISOString() }))
+      return true
+    })
+  }
+
+  // Delete an entry the caller holds rather than one it has the token for — the raw token exists
+  // only on the device that signed in, so retiring somebody else's stale entry (authService.ts)
+  // can only be expressed this way. False means it was already gone.
+  async remove(entry: SessionEntry): Promise<boolean> {
+    return this.mutate((entries) => entries.delete(entry.tokenHash))
   }
 
   // Every mutation funnels through here: queued behind the previous write, and rolled back if
@@ -154,7 +218,7 @@ export class SessionStore {
     await this.assertNobodyElseWrote()
     const revision = this.revision + 1
     const payload = Buffer.from(JSON.stringify({ revision, entries: [...this.entries.values()] }), 'utf8')
-    await writeFileAtomic(this.path, encodeStoreFile(this.key, payload))
+    await writeWithRetry(this.path, encodeStoreFile(this.key, payload))
     this.revision = revision
   }
 
@@ -179,6 +243,35 @@ export class SessionStore {
       throw new SessionStoreConflictError(this.path, this.revision, revision)
     }
   }
+}
+
+// A transient IO failure on the store write — a momentary ENOSPC/EIO blip — is retried a few times
+// before it is allowed to fail. It matters most right after a successful ABS refresh: losing that
+// write discards the pair Audiobookshelf just rotated to, mutate() rolls memory back to the token
+// ABS has already spent, and the next refresh presents it and earns a 401 that marks a live chain
+// dead — a silent sign-out from one disk hiccup. Only the write is retried: assertNobodyElseWrote
+// ran before it and the revision is bumped only on success, so a retry is idempotent and cannot
+// manufacture a conflict; a real conflict is not transient and must surface at once. Bounded tight
+// so the shutdown drain, which awaits the write tail (app.ts onClose), is never held up for long.
+const WRITE_ATTEMPTS = 3
+const WRITE_RETRY_BACKOFF_MS = 50
+
+async function writeWithRetry(path: string, bytes: Buffer): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await writeFileAtomic(path, bytes)
+      return
+    } catch (err) {
+      if (attempt >= WRITE_ATTEMPTS || !(err instanceof SessionStoreWriteError)) throw err
+      await delay(WRITE_RETRY_BACKOFF_MS * attempt)
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms).unref?.()
+  })
 }
 
 // Only the hash of the Ratatoskr token is ever stored (SPEC section 8), so even a full store +
@@ -233,17 +326,23 @@ function parsePayload(plaintext: Buffer, path: string): { entries: Map<string, S
 // carried over, so anything added here later must be optional to stay readable both ways.
 function asEntry(candidate: unknown): SessionEntry | undefined {
   if (typeof candidate !== 'object' || candidate === null) return undefined
-  const { tokenHash, absUserId, absUsername, createdAt, chain } = candidate as Record<string, unknown>
+  const { tokenHash, absUserId, absUsername, createdAt, chainRefreshedAt, deadSince, chain } =
+    candidate as Record<string, unknown>
   if (![tokenHash, absUserId, absUsername, createdAt].every(isNonEmptyString)) return undefined
   if (typeof chain !== 'object' || chain === null) return undefined
   const { accessToken, refreshToken } = chain as Record<string, unknown>
   if (!isNonEmptyString(accessToken) || !isNonEmptyString(refreshToken)) return undefined
+  // The two optional stamps are spread in only when present: an explicit `undefined` is not the
+  // same as an absent property under exactOptionalPropertyTypes, and writing one back out would
+  // put a null into the file for every entry that has neither.
   return freezeEntry({
     tokenHash: tokenHash as string,
     absUserId: absUserId as string,
     absUsername: absUsername as string,
     createdAt: createdAt as string,
     chain: { accessToken, refreshToken },
+    ...(isNonEmptyString(chainRefreshedAt) ? { chainRefreshedAt } : {}),
+    ...(isNonEmptyString(deadSince) ? { deadSince } : {}),
   })
 }
 

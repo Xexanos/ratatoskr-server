@@ -141,7 +141,9 @@ export class AbsClient {
   // --- Authentication (proxied; SPEC section 8) ---
 
   // POST /login with `x-return-tokens: true` so a non-browser client gets the refresh
-  // token in the body rather than only as an httpOnly cookie (ABS 2.26+).
+  // token in the body rather than only as an httpOnly cookie (ABS 2.26+). Each call opens a NEW
+  // Audiobookshelf session, which is what makes one private chain per device login possible
+  // (SPEC section 8).
   async login(username: string, password: string): Promise<AbsTokenPair> {
     const data = await this.postJson('/login', { 'x-return-tokens': 'true' }, { username, password })
     return toAbsTokenPair(data)
@@ -151,6 +153,23 @@ export class AbsClient {
   async refresh(refreshToken: string): Promise<AbsTokenPair> {
     const data = await this.postJson('/auth/refresh', { 'x-refresh-token': refreshToken }, {})
     return toAbsTokenPair(data)
+  }
+
+  // End one chain upstream (POST /logout): the refresh token names the Audiobookshelf session to
+  // close — the same header /auth/refresh continues it with — and the access token authenticates
+  // the call, since /logout sits behind ABS's auth middleware. Both come from one stored chain, so
+  // exactly this device's session dies and every other one is untouched (SPEC section 8). The
+  // response body is discarded: nothing about it is actionable to the caller.
+  //
+  // Takes the token pair rather than the store's AbsChain, which is the same shape: this layer knows
+  // Audiobookshelf, not how sessions are persisted, and the dependency must not run that way.
+  async logout(chain: Pick<AbsTokenPair, 'accessToken' | 'refreshToken'>): Promise<void> {
+    const result = await this.request('/logout', {
+      method: 'POST',
+      headers: { 'x-refresh-token': chain.refreshToken, authorization: `Bearer ${chain.accessToken}` },
+    })
+    if (result.kind === 'notFound') throw new AbsNotFoundError()
+    await result.res.body?.cancel()
   }
 
   // --- Library projection (SPEC section 2) ---

@@ -3,8 +3,15 @@ import type { AbsClient, PlaybackManifest } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
 import type { Config } from '../src/config/index.js'
 import type { SonosClient } from '../src/sonos/client.js'
-import { SessionManager } from '../src/playback/sessionManager.js'
+import { SessionManager, type ListeningToken } from '../src/playback/sessionManager.js'
 import { NoActiveSessionError } from '../src/playback/errors.js'
+
+// The manager asks where its listening token is *now* at each use (ListeningToken) rather than
+// holding the one it started with. Almost every test below is about what the manager does with that
+// token, not about where it comes from, so they hand it one that never changes.
+function held(token: string): ListeningToken {
+  return () => Promise.resolve(token)
+}
 
 // The book the manifest carries for li_1 — the same domain shape the library endpoints project
 // (id/title/author/durationSeconds/hasCover). durationSeconds here is ABS's whole-book duration
@@ -107,7 +114,7 @@ describe('SessionManager', () => {
 
   describe('start', () => {
     it('builds media URLs with the streamer API key and plays the queue', async () => {
-      await ctx.manager.start('user-tok', 'refresh-tok', 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), 'refresh-tok', 'li_1', 'RINCON_1')
 
       const [speakerId, plan] = ctx.sonos.startPlayback.mock.calls[0] as [string, { tracks: { url: string }[] }]
       expect(speakerId).toBe('RINCON_1')
@@ -118,7 +125,7 @@ describe('SessionManager', () => {
     })
 
     it('resumes from the stored ABS position (seek to track + offset)', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       // 150s into [100,200] -> track index 1, offset 50.
       const [, seekPlan] = ctx.sonos.seek.mock.calls[0] as [string, { trackIndex: number; offsetSeconds: number }]
       expect(seekPlan.trackIndex).toBe(1)
@@ -126,7 +133,7 @@ describe('SessionManager', () => {
     })
 
     it('returns a Session reflecting the resume position', async () => {
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(session).toMatchObject({
         itemId: 'li_1',
         speakerId: 'RINCON_1',
@@ -139,13 +146,13 @@ describe('SessionManager', () => {
 
     it('does not seek when there is no stored progress', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(ctx.sonos.seek).not.toHaveBeenCalled()
     })
 
     it('stops and writes back a previous session before starting a new one', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
-      await ctx.manager.start('user-tok', undefined, 'li_2', 'RINCON_2')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_2', 'RINCON_2')
       // The first session's progress was written on replacement.
       expect(ctx.abs.writeProgress).toHaveBeenCalledTimes(1)
       expect(ctx.sonos.stop).toHaveBeenCalledTimes(1)
@@ -154,18 +161,18 @@ describe('SessionManager', () => {
     it('restarts a finished book from the beginning instead of seeking to the end', async () => {
       // A finished book's stored position is the total; naively resuming would seek to the very end.
       ctx = build({ positionSeconds: 300, isFinished: true })
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(session.positionSeconds).toBe(0)
       expect(ctx.sonos.seek).not.toHaveBeenCalled()
     })
 
     it('leaves the active session untouched when a replacing start is rejected upstream', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.stop.mockClear()
       // The new start's token is invalid: getPlaybackManifest rejects before any teardown.
       ctx.abs.getPlaybackManifest.mockRejectedValueOnce(new AbsAuthError())
-      await expect(ctx.manager.start('bad-tok', undefined, 'li_2', 'RINCON_2')).rejects.toBeInstanceOf(AbsAuthError)
+      await expect(ctx.manager.start(held('bad-tok'), undefined, 'li_2', 'RINCON_2')).rejects.toBeInstanceOf(AbsAuthError)
       // The original session is preserved — not stopped, not overwritten, still current.
       expect(ctx.sonos.stop).not.toHaveBeenCalled()
       expect(ctx.abs.writeProgress).not.toHaveBeenCalled()
@@ -174,8 +181,8 @@ describe('SessionManager', () => {
 
     it('serializes concurrent starts so the single-session invariant holds', async () => {
       const [, second] = await Promise.all([
-        ctx.manager.start('t', undefined, 'li_1', 'RINCON_1'),
-        ctx.manager.start('t', undefined, 'li_2', 'RINCON_2'),
+        ctx.manager.start(held('t'), undefined, 'li_1', 'RINCON_1'),
+        ctx.manager.start(held('t'), undefined, 'li_2', 'RINCON_2'),
       ])
       // Serialized: both played, and the second replaced the first (one stop+write) rather than
       // both starting with no session tracking one of the speakers.
@@ -188,12 +195,12 @@ describe('SessionManager', () => {
 
   describe('item summary on session responses (#107)', () => {
     it('populates item with the playing book summary on start', async () => {
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(session.item).toEqual(ITEM_BOOK)
     })
 
     it('echoes item on current, pause, resume, and seek', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect((await ctx.manager.current('user-tok')).item).toEqual(ITEM_BOOK)
       expect((await ctx.manager.pause('user-tok')).item).toEqual(ITEM_BOOK)
       expect((await ctx.manager.resume('user-tok')).item).toEqual(ITEM_BOOK)
@@ -202,12 +209,12 @@ describe('SessionManager', () => {
 
     it('carries hasCover false through to the session when the book has no cover', async () => {
       ctx.abs.getPlaybackManifest.mockResolvedValue({ ...MANIFEST, item: { ...ITEM_BOOK, hasCover: false } })
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(session.item.hasCover).toBe(false)
     })
 
     it('keeps item distinct from the session durationSeconds (item carries the whole-book duration)', async () => {
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       // The top-level durationSeconds is the track-sum used for playback; item.durationSeconds is the
       // library projection's whole-book value, matching GET /library/items/{id}.
       expect(session.durationSeconds).toBe(300)
@@ -217,14 +224,14 @@ describe('SessionManager', () => {
 
   describe('current', () => {
     it('reports the live absolute position and state', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       const session = await ctx.manager.current('user-tok')
       // getPosition -> {trackIndex:1, relTimeSeconds:50} -> absolute 150.
       expect(session).toMatchObject({ state: 'playing', positionSeconds: 150 })
     })
 
     it('maps a device-side pause to state paused', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.sonos.getTransportState.mockResolvedValueOnce('PAUSED_PLAYBACK')
       expect((await ctx.manager.current('user-tok')).state).toBe('paused')
     })
@@ -236,7 +243,7 @@ describe('SessionManager', () => {
 
   describe('stop', () => {
     it('writes the final position back to ABS, stops Sonos, and clears the session', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       await ctx.manager.stop()
 
       expect(ctx.abs.writeProgress).toHaveBeenCalledWith('user-tok', 'li_1', {
@@ -249,7 +256,7 @@ describe('SessionManager', () => {
     })
 
     it('marks the item finished when stopped within tolerance of the end', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       // Near the end: track index 1, offset 199 -> absolute 299 (300 total, within the 5s window).
       ctx.sonos.getPosition.mockResolvedValueOnce({ trackIndex: 1, relTimeSeconds: 199, trackUri: OUR_TRACK_URI })
       await ctx.manager.stop()
@@ -265,7 +272,7 @@ describe('SessionManager', () => {
     })
 
     it('does NOT write on a failed position read (would wipe stored progress) but still stops', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.sonos.getPosition.mockRejectedValueOnce(new Error('sonos down'))
       await ctx.manager.stop()
       // No write — writing a fallback 0 would overwrite the user's real stored position.
@@ -276,7 +283,7 @@ describe('SessionManager', () => {
     })
 
     it('does not let a failed ABS write block the stop or leave the session stuck', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       // e.g. the listening token expired mid-book -> writeProgress rejects.
       ctx.abs.writeProgress.mockRejectedValueOnce(new AbsAuthError())
       await ctx.manager.stop() // must not throw
@@ -287,7 +294,7 @@ describe('SessionManager', () => {
 
   describe('pause / resume / seek', () => {
     it('pauses, writes the current position immediately, and reports paused', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       const session = await ctx.manager.pause('user-tok')
       expect(ctx.sonos.pause).toHaveBeenCalledWith('RINCON_1')
@@ -301,14 +308,14 @@ describe('SessionManager', () => {
     })
 
     it('resumes and reports playing', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       const session = await ctx.manager.resume('user-tok')
       expect(ctx.sonos.play).toHaveBeenCalledWith('RINCON_1')
       expect(session.state).toBe('playing')
     })
 
     it('seeks to the target and writes it back', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       const session = await ctx.manager.seek('user-tok', 220)
       // 220 into [100,200] -> track index 1, offset 120
@@ -323,7 +330,7 @@ describe('SessionManager', () => {
     })
 
     it('clamps a seek beyond the end into the book', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect((await ctx.manager.seek('user-tok', 99999)).positionSeconds).toBe(300)
     })
 
@@ -335,7 +342,7 @@ describe('SessionManager', () => {
 
     it('pauses using the last written position (and writes nothing) when the live read fails', async () => {
       ctx = build({ positionSeconds: 42 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1') // lastWritten = 42
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1') // lastWritten = 42
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockRejectedValueOnce(new Error('speaker blip'))
       const session = await ctx.manager.pause('user-tok')
@@ -345,7 +352,7 @@ describe('SessionManager', () => {
     })
 
     it('reports playing after a seek when the transport-state read fails', async () => {
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.sonos.getTransportState.mockRejectedValueOnce(new Error('blip'))
       expect((await ctx.manager.seek('user-tok', 120)).state).toBe('playing')
     })
@@ -357,7 +364,7 @@ describe('SessionManager', () => {
 
     it('writes progress back once the position moves past the threshold', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 80, trackUri: OUR_TRACK_URI }) // absolute 80
       await vi.advanceTimersByTimeAsync(10_000) // one poll interval
@@ -370,7 +377,7 @@ describe('SessionManager', () => {
 
     it('does not write when the position has not moved past the threshold', async () => {
       ctx = build({ positionSeconds: 100 }) // lastWritten starts at 100
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 2, trackUri: OUR_TRACK_URI }) // absolute 102, moved 2 < 5
       await vi.advanceTimersByTimeAsync(10_000)
@@ -379,7 +386,7 @@ describe('SessionManager', () => {
 
     it('marks finished and tears down when the transport stops near the end', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 200, trackUri: OUR_TRACK_URI }) // absolute 300 (end)
       ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
@@ -395,7 +402,7 @@ describe('SessionManager', () => {
 
     it('tears down without finishing on a device-side stop mid-book', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 50, trackUri: OUR_TRACK_URI }) // absolute 50 (mid-book)
       ctx.sonos.getTransportState.mockResolvedValue('STOPPED')
@@ -410,7 +417,7 @@ describe('SessionManager', () => {
 
     it('relinquishes without writing or stopping when the speaker is taken over (foreign track)', async () => {
       ctx = build({ positionSeconds: 100 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.stop.mockClear()
       // A household member started a radio on the speaker: the transport reports a foreign URI. Even
@@ -426,7 +433,7 @@ describe('SessionManager', () => {
 
     it('skips a tick without writing (keeping the session) when the coordinator read fails', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockRejectedValue(new Error('unreachable'))
       await vi.advanceTimersByTimeAsync(10_000)
@@ -436,7 +443,7 @@ describe('SessionManager', () => {
 
     it('relinquishes without wiping when the queue is cleared (empty TrackURI, STOPPED)', async () => {
       ctx = build({ positionSeconds: 100 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.stop.mockClear()
       // The exact zero-write worst case: a cleared queue reports Track 0 / RelTime 0 / STOPPED. The
@@ -451,7 +458,7 @@ describe('SessionManager', () => {
 
     it('retries a failed write-back on the next tick (lastWrittenSeconds does not advance on failure)', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       // Position moved to 80 (past the 5s threshold). The first write fails, the second succeeds.
       ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 0, relTimeSeconds: 80, trackUri: OUR_TRACK_URI })
@@ -466,14 +473,14 @@ describe('SessionManager', () => {
 
     it('a tick that fires while a replace-start() is in flight does not spawn a second poll chain', async () => {
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1') // loop L1, timer T1 pending
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1') // loop L1, timer T1 pending
 
       // Hold the replacing start() mid-flight (mutex held on getPlaybackManifest) so L1's timer fires
       // and queues its tick BEHIND the running start — the exact interleaving that used to orphan a
       // timer and leave two self-perpetuating poll chains.
       const manifestGate = deferred<PlaybackManifest>()
       ctx.abs.getPlaybackManifest.mockReturnValueOnce(manifestGate.promise)
-      const replacing = ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_2')
+      const replacing = ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_2')
       await vi.advanceTimersByTimeAsync(10_000) // T1 fires; its tick's syncOnce waits behind the hung start
       manifestGate.resolve(MANIFEST) // let the replace finish: it tears down L1 and starts L2
       await replacing
@@ -495,7 +502,7 @@ describe('SessionManager', () => {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
       const ownerToken = fakeJwt(Date.now() / 1000 + 100) // < the 300s margin -> refresh on the next tick
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start(ownerToken, 'refresh-0', 'li_1', 'RINCON_1')
+      await ctx.manager.start(held(ownerToken), 'refresh-0', 'li_1', 'RINCON_1')
       return ownerToken
     }
 
@@ -529,7 +536,7 @@ describe('SessionManager', () => {
         refreshToken: 'refresh-next',
         user: { id: 'u', username: 'x' },
       })
-      await ctx.manager.start(fakeJwt(Date.now() / 1000 + 10), 'refresh-0', 'li_1', 'RINCON_1')
+      await ctx.manager.start(held(fakeJwt(Date.now() / 1000 + 10)), 'refresh-0', 'li_1', 'RINCON_1')
       await vi.advanceTimersByTimeAsync(50_000) // many ticks
       expect(ctx.abs.refresh).toHaveBeenCalledTimes(1) // exactly one rotation, awaiting adoption
     })
@@ -537,7 +544,7 @@ describe('SessionManager', () => {
     it('does not rotate without a stored refresh token', async () => {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start(fakeJwt(Date.now() / 1000 + 100), undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held(fakeJwt(Date.now() / 1000 + 100)), undefined, 'li_1', 'RINCON_1')
       await vi.advanceTimersByTimeAsync(10_000)
       expect(ctx.abs.refresh).not.toHaveBeenCalled()
       expect((await ctx.manager.current('x')).rotatedTokens).toBeUndefined()
@@ -546,7 +553,7 @@ describe('SessionManager', () => {
     it('does not rotate while the token is comfortably before expiry', async () => {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start(fakeJwt(Date.now() / 1000 + 100_000), 'refresh-0', 'li_1', 'RINCON_1')
+      await ctx.manager.start(held(fakeJwt(Date.now() / 1000 + 100_000)), 'refresh-0', 'li_1', 'RINCON_1')
       await vi.advanceTimersByTimeAsync(10_000)
       expect(ctx.abs.refresh).not.toHaveBeenCalled()
     })
@@ -558,7 +565,7 @@ describe('SessionManager', () => {
     ])('does not rotate when the access token has no usable exp (%s)', async (_label, token) => {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start(token, 'refresh-0', 'li_1', 'RINCON_1')
+      await ctx.manager.start(held(token), 'refresh-0', 'li_1', 'RINCON_1')
       await vi.advanceTimersByTimeAsync(10_000)
       expect(ctx.abs.refresh).not.toHaveBeenCalled()
     })
@@ -586,7 +593,7 @@ describe('SessionManager', () => {
 
       // A fresh session that never rotated -> stop returns undefined (the 204 path).
       ctx = build({ positionSeconds: 0 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(await ctx.manager.stop('user-tok')).toBeUndefined()
     })
   })
@@ -594,7 +601,7 @@ describe('SessionManager', () => {
   describe('resume rewind + write backoff (§5)', () => {
     it('resumes RESUME_REWIND_SECONDS before the stored position', async () => {
       ctx = build({ positionSeconds: 150, resumeRewindSeconds: 10 })
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(session.positionSeconds).toBe(140)
       // 140 into [100,200] -> track index 1, offset 40.
       const [, seekPlan] = ctx.sonos.seek.mock.calls[0] as [string, { trackIndex: number; offsetSeconds: number }]
@@ -603,19 +610,19 @@ describe('SessionManager', () => {
 
     it('clamps the resume rewind at 0 (and then does not seek)', async () => {
       ctx = build({ positionSeconds: 5, resumeRewindSeconds: 10 })
-      const session = await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      const session = await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       expect(session.positionSeconds).toBe(0)
       expect(ctx.sonos.seek).not.toHaveBeenCalled()
     })
 
     it('does not rewind a finished book (still restarts at 0)', async () => {
       ctx = build({ positionSeconds: 300, isFinished: true, resumeRewindSeconds: 10 })
-      expect((await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')).positionSeconds).toBe(0)
+      expect((await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')).positionSeconds).toBe(0)
     })
 
     it('persists the position minus WRITE_POSITION_BACKOFF_SECONDS, but reports the live position', async () => {
       ctx = build({ positionSeconds: 0, writePositionBackoffSeconds: 3 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       // default getPosition -> track 1, rel 50 -> absolute 150.
       const session = await ctx.manager.pause('user-tok')
@@ -629,7 +636,7 @@ describe('SessionManager', () => {
 
     it('does not back off a finished write (stores the exact end)', async () => {
       ctx = build({ positionSeconds: 0, writePositionBackoffSeconds: 3 })
-      await ctx.manager.start('user-tok', undefined, 'li_1', 'RINCON_1')
+      await ctx.manager.start(held('user-tok'), undefined, 'li_1', 'RINCON_1')
       ctx.abs.writeProgress.mockClear()
       ctx.sonos.getPosition.mockResolvedValue({ trackIndex: 1, relTimeSeconds: 199, trackUri: OUR_TRACK_URI }) // abs 299
       await ctx.manager.stop('user-tok')

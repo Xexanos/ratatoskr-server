@@ -3,9 +3,14 @@ import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SessionStoreConflictError, SessionStoreCorruptError, SessionStoreKeyError } from '../src/auth/errors.js'
+import {
+  SessionStoreConflictError,
+  SessionStoreCorruptError,
+  SessionStoreKeyError,
+  SessionStoreWriteError,
+} from '../src/auth/errors.js'
 import { decodeStoreFile, encodeStoreFile } from '../src/auth/sessionFile.js'
-import { SessionStore } from '../src/auth/sessionStore.js'
+import { chainRefreshedAt, SessionStore } from '../src/auth/sessionStore.js'
 
 const KEY = Buffer.alloc(32, 0xa1)
 const OTHER_KEY = Buffer.alloc(32, 0xb2)
@@ -136,6 +141,68 @@ describe('SessionStore', () => {
     expect((await open()).list()).toEqual([])
   })
 
+  it('stamps a refreshed chain, so the boot sweep can tell how stale each one is', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    // The stamp a fresh sign-in leaves is its creation time: nothing about that chain is older.
+    expect(chainRefreshedAt(entry)).toBe(Date.parse(entry.createdAt))
+
+    await store.updateChain(entry, { accessToken: 'abs-access-2', refreshToken: 'abs-refresh-2' })
+
+    const refreshed = (await open()).find('token-phone')
+    expect(chainRefreshedAt(refreshed!)).toBeGreaterThanOrEqual(chainRefreshedAt(entry))
+  })
+
+  // An entry written before the field existed still has to say how stale its chain is; its creation
+  // time is when that chain was minted, so it is the honest answer.
+  it('dates a chain no earlier version stamped from the entry it belongs to', async () => {
+    await writePayload({ revision: 1, entries: [STORED] })
+
+    expect(chainRefreshedAt((await open()).list()[0]!)).toBe(Date.parse(STORED.createdAt))
+  })
+
+  // The keep-alive loop's rare-and-loud failure (SPEC section 8): the chain is gone, but the entry
+  // stays so the device's next request can be told *which* 401 this is.
+  it('marks a chain dead while keeping the entry, across a reopen', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+
+    expect(await store.markDead(entry)).toBe(true)
+
+    const dead = (await open()).find('token-phone')
+    expect(dead).toBeDefined()
+    expect(Date.parse(dead!.deadSince!)).not.toBeNaN()
+  })
+
+  it('does not resurrect an entry whose device signed out before it was marked dead', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    await store.delete('token-phone')
+
+    expect(await store.markDead(entry)).toBe(false)
+    expect((await open()).list()).toEqual([])
+  })
+
+  // Retiring the dead entries of a re-authenticating user (authService.ts): the caller holds the
+  // entry, not the raw token — only the device that signed in ever had that.
+  it('removes an entry the caller holds without knowing its token', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    await store.create('token-tablet', TABLET)
+
+    expect(await store.remove(entry)).toBe(true)
+    expect(store.find('token-phone')).toBeUndefined()
+    expect((await open()).list()).toHaveLength(1)
+  })
+
+  it('reports an entry that is already gone on remove', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    await store.delete('token-phone')
+
+    expect(await store.remove(entry)).toBe(false)
+  })
+
   it('serializes concurrent writes so no login is lost to a racing write', async () => {
     const store = await open()
     await Promise.all([
@@ -249,6 +316,19 @@ describe('SessionStore', () => {
     await expect(open(OTHER_KEY)).rejects.toThrow(/SESSION_STORE_KEY/)
   })
 
+  // GCM authenticates the ciphertext (and the format header, via AAD), so a single flipped byte in
+  // an otherwise-valid file fails the tag check — indistinguishable from a wrong key, and refused
+  // the same way rather than read back as partially valid.
+  it('refuses a file whose ciphertext was modified, the same as a wrong key', async () => {
+    await (await open()).create('token-phone', PHONE)
+    const file = await readFile(path)
+    const last = file.length - 1
+    file[last] = (file[last] ?? 0) ^ 1 // flip the last ciphertext byte
+    await writeFile(path, file)
+
+    await expect(open()).rejects.toBeInstanceOf(SessionStoreKeyError)
+  })
+
   it('refuses to open a file that is not a session store', async () => {
     await writeFile(path, Buffer.alloc(200, 0x7))
     await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
@@ -260,6 +340,21 @@ describe('SessionStore', () => {
     await writeFile(path, full.subarray(0, 20))
 
     await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
+  })
+
+  // The store is opened at boot (main.ts), and open() creates its file when absent — so a
+  // mistyped SESSION_STORE_PATH or a volume this user cannot write to surfaces here, as a
+  // SessionStoreError with an actionable message, rather than as a raw ENOENT stack.
+  it('refuses to open when its file cannot be written, naming the path and its directory', async () => {
+    const failure = await SessionStore.open({ path: join(dir, 'not-a-directory', 'sessions.enc'), key: KEY }).catch(
+      (err: unknown) => err,
+    )
+
+    expect(failure).toBeInstanceOf(SessionStoreWriteError)
+    expect((failure as Error).message).toContain(join(dir, 'not-a-directory', 'sessions.enc'))
+    expect((failure as Error).message).toContain('SESSION_STORE_PATH')
+    // The underlying errno is kept as the cause, so the log still says which syscall failed.
+    expect((failure as Error).cause).toBeDefined()
   })
 
   // These payloads authenticate under the right key but are not a store — reachable only by a

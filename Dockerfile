@@ -85,7 +85,7 @@ EXPOSE 8080
 
 # Liveness: is the listener accepting connections? A raw TCP connect works regardless of
 # whether the server is serving HTTP or HTTPS (TLS_CERT_PATH/TLS_KEY_PATH). It does not
-# assert ABS/Sonos reachability — /v1/health reports that, but a degraded neighbor must not
+# assert ABS/Sonos reachability — the API's /health reports that, but a degraded neighbor must not
 # mark the container itself unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD \
   node -e "require('net').connect(Number(process.env.PORT||8080),'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})"

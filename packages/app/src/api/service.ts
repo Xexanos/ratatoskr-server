@@ -1,10 +1,10 @@
 import type { components } from '@ratatoskr/contract'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
-import type { SessionManager } from '../playback/sessionManager.js'
+import type { ListeningToken, PlaybackSession, SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 import {
-  toAuthTokens,
+  type MappedSession,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
@@ -14,13 +14,10 @@ import {
 
 type Health = components['schemas']['Health']
 type DependencyStatus = components['schemas']['DependencyStatus']
-type AuthTokens = components['schemas']['AuthTokens']
 type LibraryItemPage = components['schemas']['LibraryItemPage']
 type LibraryItemList = components['schemas']['LibraryItemList']
 type LibraryItem = components['schemas']['LibraryItem']
 type Speaker = components['schemas']['Speaker']
-type LoginRequest = components['schemas']['LoginRequest']
-type RefreshRequest = components['schemas']['RefreshRequest']
 type Session = components['schemas']['Session']
 type StartSessionRequest = components['schemas']['StartSessionRequest']
 type SeekRequest = components['schemas']['SeekRequest']
@@ -54,12 +51,20 @@ async function checkSonos(sonos: SonosClient): Promise<{ status: DependencyStatu
   }
 }
 
+// Where a playback session started by this request reads its Audiobookshelf access token. A major
+// whose guard resolved a re-readable session supplies the live source; one whose bearer *is* the
+// upstream token has nothing behind it to re-read, so its session holds what the request carried —
+// which is exactly the /v1 semantics the frozen major is entitled to (security.ts).
+export function listeningToken(request: FastifyRequest): ListeningToken {
+  return request.absTokenSource ?? (() => Promise.resolve(request.absToken as string))
+}
+
 export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
   sessions: SessionManager
-  // The version-mount prefix this service is served under (see contractMapping.ts's coverPathFor).
-  // Injected rather than read from the constant, so an instance always speaks for its own mount.
+  // The version-mount prefix this instance is served under. Injected, so the URLs its responses carry
+  // resolve against the surface the request arrived on (contractMapping.ts's coverPathFor).
   apiPrefix: string
 }
 
@@ -67,11 +72,15 @@ export interface ApiServiceDeps {
 // each operationId to the matching method and binds `this` to this instance, so the abs/sonos
 // clients are available via constructor injection. Methods return the payload or throw a domain
 // error; the central error handler (errorHandler.ts) maps thrown errors to contract responses.
+//
+// Every served major runs these operations from this one body, so they cannot drift apart by
+// accident — which also means a change here reaches every mount. The members below are protected for
+// the subclass in v1/, not for open extension.
 export class ApiService {
-  private readonly abs: AbsClient
+  protected readonly abs: AbsClient
   private readonly sonos: SonosClient
-  private readonly sessions: SessionManager
-  private readonly apiPrefix: string
+  protected readonly sessions: SessionManager
+  protected readonly apiPrefix: string
 
   constructor(deps: ApiServiceDeps) {
     this.abs = deps.abs
@@ -91,15 +100,9 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  async login(request: FastifyRequest): Promise<AuthTokens> {
-    const { username, password } = request.body as LoginRequest
-    return toAuthTokens(await this.abs.login(username, password))
-  }
-
-  async refresh(request: FastifyRequest): Promise<AuthTokens> {
-    const { refreshToken } = request.body as RefreshRequest
-    return toAuthTokens(await this.abs.refresh(refreshToken))
-  }
+  // No auth operations here: both majors declare `login` at POST /auth/login and mean incompatible
+  // things by it, so each one's auth model lives in its own subclass — see v1/service.ts, which
+  // carries the reasoning.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
@@ -140,51 +143,53 @@ export class ApiService {
 
   // --- Playback (SPEC sections 4 and 5) ---
 
+  // Every session response goes through here, so a surface that puts an extra field on the wire says
+  // so in one place. This mapper cannot produce the rotated Audiobookshelf pair at all: leaving that
+  // to the serializer would make "no upstream credential on the wire" (SPEC section 8) depend on every
+  // response having a declared schema (contractMapping.ts).
+  protected mapSession(session: PlaybackSession): MappedSession {
+    return toSessionResponse(session, this.apiPrefix)
+  }
+
   // The session methods never forward the caller's token to ABS on their own (they act on the
   // session's stored listening token), so the token guard validates it upstream before dispatch —
   // see tokenGuard.ts. startSession is the exception (self-validating): it presents the token to
   // ABS via getPlaybackManifest, which 401s an invalid one.
   async getCurrentSession(request: FastifyRequest): Promise<Session> {
-    return toSessionResponse(await this.sessions.current(request.absToken as string), this.apiPrefix)
+    return this.mapSession(await this.sessions.current(request.absToken as string))
   }
 
+  // No refresh token is passed on: rotating one is the /v1 handover's business (v1/service.ts), and
+  // on /v2 renewing the chain belongs to the keep-alive loop instead. What the session is given is
+  // where to *read* the access token, not the token itself — so the chain that loop renews under it
+  // reaches a session that is already running, and long unattended playback keeps writing progress
+  // past the access token it started with (SPEC section 8).
   async startSession(request: FastifyRequest): Promise<Session> {
-    const { itemId, speakerId, refreshToken } = request.body as StartSessionRequest
-    const session = await this.sessions.start(request.absToken as string, refreshToken, itemId, speakerId)
-    return toSessionResponse(session, this.apiPrefix)
+    const { itemId, speakerId } = request.body as StartSessionRequest
+    const session = await this.sessions.start(listeningToken(request), undefined, itemId, speakerId)
+    return this.mapSession(session)
   }
 
-  // 204 normally; 200 + a final Session when a rotated token pair was still pending at stop, so the
-  // client can adopt it (SPEC section 8) — stop discards the in-memory tokens, so this is the last
-  // chance to deliver the pair.
+  // Always 204: no token pair travels to the client on this surface, so the final Session the manager
+  // returns has nothing left to deliver and is discarded (SPEC section 8, which also records what that
+  // costs when a session is shared with a surface that does deliver one).
   async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const final = await this.sessions.stop(request.absToken as string)
-    if (final === undefined) {
-      await reply.code(204).send()
-      return
-    }
-    // Bound to Session before handing it to send(), which takes `unknown`. Every other operation
-    // returns its body and so has the mapping step enforced by the method's return type; this is the
-    // one response on this surface that does not, and an unmapped domain session would sail through
-    // both the serializer (it drops unknown keys) and response validation (coverUrl is optional).
-    const body: Session = toSessionResponse(final, this.apiPrefix)
-    await reply.code(200).send(body)
+    await this.sessions.stop(request.absToken as string)
+    await reply.code(204).send()
   }
 
   // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).
-  // The caller's token is forwarded so an adopted rotated pair stops being redelivered (SPEC
-  // section 8).
   async pauseSession(request: FastifyRequest): Promise<Session> {
-    return toSessionResponse(await this.sessions.pause(request.absToken as string), this.apiPrefix)
+    return this.mapSession(await this.sessions.pause(request.absToken as string))
   }
 
   async resumeSession(request: FastifyRequest): Promise<Session> {
-    return toSessionResponse(await this.sessions.resume(request.absToken as string), this.apiPrefix)
+    return this.mapSession(await this.sessions.resume(request.absToken as string))
   }
 
   async seekSession(request: FastifyRequest): Promise<Session> {
     const { positionSeconds } = request.body as SeekRequest
     const session = await this.sessions.seek(request.absToken as string, positionSeconds)
-    return toSessionResponse(session, this.apiPrefix)
+    return this.mapSession(session)
   }
 }

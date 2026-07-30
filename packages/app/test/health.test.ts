@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from '../src/api/app.js'
 import type { SonosClient } from '../src/sonos/client.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 // A Sonos fake is always injected so /health never triggers real SSDP discovery.
-function appWith(sonos: Partial<SonosClient>) {
-  return buildApp(testConfig(), { sonosClient: sonos as SonosClient })
+async function appWith(sonos: Partial<SonosClient>) {
+  return buildApp(testConfig(), { sonosClient: sonos as SonosClient, sessionStore: await tempSessionStore() })
 }
 
 // The ABS reachability check probes GET /ping and expects {"success":true}.

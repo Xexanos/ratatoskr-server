@@ -28,6 +28,21 @@ only indefinite ABS credentials are admin-created API keys. No surveyed open-sou
 client stores the password; all force a re-login once the refresh window lapses
 ([#127](https://github.com/Xexanos/ratatoskr-server/issues/127)).
 
+*Amended during implementation ([#134](https://github.com/Xexanos/ratatoskr-server/issues/134)),
+after the live integration suite failed on the supported ABS minimum: the first of those facts
+holds in the database and not on the wire, **before ABS 2.35.1**. ABS did create an independent
+session row per login, but it minted the refresh **token** from second-precision JWT timestamps
+with no per-session claim — no `sessionId`, `jti`, or nonce — so two logins (or two refreshes) of
+the same user landing in the same second came back with the **identical token string**
+([advplyr/audiobookshelf#5253](https://github.com/advplyr/audiobookshelf/issues/5253), fixed by
+[#5255](https://github.com/advplyr/audiobookshelf/pull/5255), released in
+[v2.35.1](https://github.com/advplyr/audiobookshelf/releases/tag/v2.35.1), 2026-05-28). Since the
+token is what names a session at `POST /logout` and `POST /auth/refresh`, colliding tokens make two
+sessions one in every way this design depends on. Verified by probing releases directly: 2.26.0,
+2.29.0, 2.31.0 and 2.35.0 all collide; 2.35.1 does not. The effect is **timing-dependent, not
+constant** — sign-ins more than a second apart are unaffected — so on an older ABS the failure is
+occasional rather than reproducible, which is the worst shape for it to have.*
+
 ## Decision
 
 **Variant A — Ratatoskr-native sessions**
@@ -39,6 +54,10 @@ client stores the password; all force a re-login once the refresh window lapses
   structurally.
 - **One ABS chain per device login, never shared.** Each sign-in creates one store entry:
   Ratatoskr token *hash*, its own ABS chain, metadata.
+  *Constrained upstream below ABS 2.35.1 (see the amendment above): the store side of this holds on
+  every version — one entry per device, never shared — but the ABS chains behind two entries are only
+  genuinely distinct from 2.35.1 on. Below it, two sign-ins in the same second end up holding the same
+  refresh token, and the per-device half of the decision degrades to "per user" for that pair.*
 - **The Ratatoskr credential is an opaque 256-bit token — non-expiring, revocable.** The
   server stores only its hash; validation is an in-process lookup (replacing the token
   guard's per-request ABS roundtrip). No expiry and no rotation: a rotating pair would
@@ -66,6 +85,11 @@ client stores the password; all force a re-login once the refresh window lapses
 - **Sign-out is full-depth and per device**: delete the store entry (token dead
   immediately) plus best-effort ABS `POST /logout` for exactly this device's chain;
   idempotent, still 204 if ABS is unreachable.
+  *"Per device" needs ABS ≥ 2.35.1 (see the amendment above). Below it, signing one device out can
+  take another's upstream chain with it: the other device stays signed in as far as Ratatoskr is
+  concerned — its token and store entry are untouched — but its ABS calls fail until it
+  re-authenticates. What the keep-alive loop must not do on such a version is refresh several stored
+  chains inside one second, or it collides them itself; the daily refresh has to space its writes.*
 - **The app stores only the Ratatoskr token** (Keystore-backed), plus server URL, TLS
   fingerprint, and display username. ABS tokens and the entire adoption logic of app SPEC
   section 5 drop. The user's ABS password is never stored — on either side.
@@ -131,10 +155,16 @@ silent token exfiltration.
 
 ## Contract impact (named, not implemented — decided in [#128](https://github.com/Xexanos/ratatoskr-server/issues/128))
 
-- **Breaking cut: contract 2.0.0 under `/v2`.** The prefix lives in one place
-  (`servers.url`). The oasdiff CI job takes its one-time breaking-change flag at the cut.
-- **`/v1` transition window**: `/v1` stays served in parallel, frozen at the **1.4.0 git
-  tag** (the tag *is* the freeze; no second contract file). It may be removed in the first
+- **Breaking cut: contract 2.0.0 under `/v2`.** The prefix lives in one place per major
+  (`servers.url`), derived per mount. The oasdiff CI job reads the major and skips itself at the
+  cut, so no one-time breaking-change flag has to be set and then remembered.
+- **`/v1` transition window**: `/v1` stays served in parallel, frozen at the **`contract-1.4.0`
+  tag**. This revises the parenthesis that said the tag *is* the freeze with no second contract
+  file: what is mounted is a tracked copy at `contract/v1/openapi.yaml`, held byte-identical to the
+  tag by the `contract-freeze` CI job. Reading the tagged document during the image build would have
+  cost the build its hermetic property — `.git` is deliberately outside the build context — and given
+  the generate step a second code path; one CI gate is the cheaper half of that trade. It may be
+  removed in the first
   release ≥ 1 month after the `/v2` app is published; the removal commit is `feat!:`, so
   the server major falls out automatically. After sunset, every `/v1` route answers from an
   unauthenticated catch-all **410 Gone** with the contract error shape, code

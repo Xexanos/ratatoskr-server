@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { InvalidCursorError } from '../src/abs/cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError } from '../src/abs/errors.js'
 import { MissingBearerError } from '../src/api/bearer.js'
+import { UpstreamSessionLostError } from '../src/auth/errors.js'
 import { mapError, NotImplementedError } from '../src/api/errorHandler.js'
 import { SonosUpstreamError } from '../src/sonos/errors.js'
 
@@ -9,6 +10,13 @@ describe('mapError', () => {
   it('maps each domain error to its contract status and code', () => {
     expect(mapError(new MissingBearerError())).toMatchObject({ statusCode: 401, code: 'unauthorized' })
     expect(mapError(new AbsAuthError())).toMatchObject({ statusCode: 401, code: 'unauthorized' })
+    // The one 401 with a code of its own: the same status as the two above, and the opposite
+    // instruction to the client — the token is fine, and only the password can rebuild the
+    // upstream chain behind it (SPEC section 8).
+    expect(mapError(new UpstreamSessionLostError())).toMatchObject({
+      statusCode: 401,
+      code: 'UPSTREAM_SESSION_LOST',
+    })
     expect(mapError(new AbsNotFoundError())).toMatchObject({ statusCode: 404, code: 'not_found' })
     expect(mapError(new InvalidCursorError())).toMatchObject({ statusCode: 400, code: 'bad_request' })
     expect(mapError(new AbsUpstreamError())).toMatchObject({ statusCode: 502, code: 'upstream_error' })

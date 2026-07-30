@@ -8,6 +8,7 @@ import {
   toLibraryItemSummary,
   toSessionResponse,
   toSpeaker,
+  toV1SessionResponse,
 } from '../src/api/contractMapping.js'
 import type { PlaybackSession } from '../src/playback/sessionManager.js'
 
@@ -191,10 +192,28 @@ describe('domain -> contract mapping', () => {
       })
     })
 
-    it('passes a pending rotated pair through and omits it when there is none', () => {
+    // The rotated pair is 1.4.0's handover field, so the shared mapper must not be able to produce
+    // it. Otherwise keeping an upstream refresh token off the /v2 wire would rest on the serializer
+    // dropping what 2.0.0's schema omits, instead of on nothing ever minting it for that major.
+    it('never carries a rotated pair, even when the session holds one', () => {
       const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-      expect(toSessionResponse(session({ rotatedTokens }), PREFIX).rotatedTokens).toEqual(rotatedTokens)
-      expect(toSessionResponse(session(), PREFIX)).not.toHaveProperty('rotatedTokens')
+      expect(toSessionResponse(session({ rotatedTokens }), PREFIX)).not.toHaveProperty('rotatedTokens')
+    })
+
+    describe('the /v1 variant', () => {
+      it('passes a pending rotated pair through and omits it when there is none', () => {
+        const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
+        expect(toV1SessionResponse(session({ rotatedTokens }), PREFIX).rotatedTokens).toEqual(rotatedTokens)
+        expect(toV1SessionResponse(session(), PREFIX)).not.toHaveProperty('rotatedTokens')
+      })
+
+      it('carries the shared session fields as well', () => {
+        expect(toV1SessionResponse(session(), PREFIX)).toMatchObject({
+          itemId: 'li_1',
+          speakerId: 'sp_1',
+          item: { coverUrl: '/v1/library/items/li_1/cover' },
+        })
+      })
     })
   })
 })

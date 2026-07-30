@@ -21,11 +21,19 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     seekRetries: 2,
     progressWriteThresholdSeconds: 5,
     listeningTokenRefreshMarginSeconds: 300,
+    // The shipped cadence. Route tests build an app and therefore arm the keep-alive loop; a day
+    // means its sweep never fires inside a test, and the chains they create are never stale enough
+    // for the boot pass either — so no test touches ABS by merely building an app.
+    keepAliveRefreshIntervalMs: 24 * 60 * 60 * 1000,
     shutdownTimeoutMs: 5000,
     resumeRewindSeconds: 0,
     writePositionBackoffSeconds: 0,
-    sessionStorePath: undefined,
-    sessionStoreKey: undefined,
+    // Nothing buildApp wires today opens the session store — main.ts does, at boot (SPEC section
+    // 8) — so these only have to satisfy Config's shape. Deliberately a path that cannot be
+    // written: a test that comes to need a real store should open one on a throwaway file rather
+    // than discover it has been writing here.
+    sessionStorePath: '/nonexistent/ratatoskr-test/sessions.enc',
+    sessionStoreKey: Buffer.alloc(32, 0x5a),
     tls: undefined,
     validateResponses: true,
     absCaCert: undefined,

@@ -1,4 +1,7 @@
 import { accessSync, constants, readFileSync } from 'node:fs'
+// The default lives with the loop that owns it (auth/keepAlive.ts), so the documented "daily" cannot
+// drift from what ships. Nothing in auth/ reads config, so this direction adds no cycle.
+import { REFRESH_INTERVAL_MS } from '../auth/keepAlive.js'
 import { ConfigError } from './errors.js'
 
 export interface TlsConfig {
@@ -28,6 +31,11 @@ export interface Config {
   // (SPEC section 8: renew proactively, before expiry, so the client's still-valid old token can
   // authenticate the request that fetches the rotated pair).
   listeningTokenRefreshMarginSeconds: number
+  // How often the keep-alive loop renews every stored Audiobookshelf chain (SPEC section 8). Also
+  // the boot pass's staleness cutoff — a chain is stale when it missed a sweep — which is what makes
+  // this one knob enough to provoke the dead-chain path in a test deployment by restarting the
+  // server instead of waiting out a day.
+  keepAliveRefreshIntervalMs: number
   // Upper bound on the graceful-shutdown drain (SPEC section 5): a hung final write can't hold the
   // process past this before it exits anyway.
   shutdownTimeoutMs: number
@@ -38,11 +46,13 @@ export interface Config {
   // Sonos's reported RelTime runs slightly ahead of the audible output (buffering). 0 disables it.
   writePositionBackoffSeconds: number
   // Where the encrypted session store lives (SPEC section 8) and the operator-supplied key that
-  // encrypts it (decoded by EnvReader's sessionStoreKey). No default for the path: which directory
-  // survives a container recreation is a deployment fact, not something this process can guess, so
-  // the container entrypoint supplies it the same way it supplies TLS_CERT_PATH/TLS_KEY_PATH.
-  sessionStorePath: string | undefined
-  sessionStoreKey: Buffer | undefined
+  // encrypts it (decoded by EnvReader's sessionStoreKey). Both required: the store is what keeps
+  // devices signed in, and it holds every device's Audiobookshelf credentials, so there is no
+  // degraded mode to fall back to. No default for the path: which directory survives a container
+  // recreation is a deployment fact, not something this process can guess, so the container
+  // entrypoint supplies it the same way it supplies TLS_CERT_PATH/TLS_KEY_PATH.
+  sessionStorePath: string
+  sessionStoreKey: Buffer
   tls: TlsConfig | undefined
   // Validate every response against the contract schema at runtime (dev/staging aid). Off in
   // production; the tests turn it on. See src/api/responseValidation.ts.
@@ -166,25 +176,60 @@ class EnvReader {
     return { caCert: pinned?.value, insecure }
   }
 
-  // Key for the encrypted session store (SPEC sections 7 and 8). Undefined means unconfigured —
-  // the store cannot be opened without a key, so whoever opens it is what fails loud.
+  // Key for the encrypted session store (SPEC sections 7 and 8). Required: without it the store
+  // cannot be opened, and every sign-in would fail — so refuse at boot rather than at some user's
+  // first attempt to log in.
   //
   // AES-256-GCM needs exactly 32 bytes; both common encodings of a random key are accepted. The
   // value is trimmed because a key file written by `docker secret` or a shell redirect normally
   // ends in a newline, which would otherwise decode to a wrong-length key.
-  sessionStoreKey(): Buffer | undefined {
+  //
+  // An empty buffer stands in for "unusable" so validation can continue and report every other
+  // problem too; finalize() is what turns the collected problems into the refusal.
+  sessionStoreKey(): Buffer {
     const configured = this.inlineOrFile('SESSION_STORE_KEY', 'SESSION_STORE_KEY_FILE')
-    if (configured === undefined) return undefined
+    if (configured === undefined) {
+      // inlineOrFile has already reported the "set both" and "file unreadable" cases; only the
+      // genuinely unconfigured one is left to name here.
+      if (!this.env.SESSION_STORE_KEY && !this.env.SESSION_STORE_KEY_FILE) {
+        this.problems.push(
+          'SESSION_STORE_KEY (or SESSION_STORE_KEY_FILE) is required: it encrypts the store that ' +
+            'keeps signed-in devices signed in and holds their Audiobookshelf credentials (SPEC ' +
+            'section 8). Generate one with: openssl rand -base64 32 — and keep a copy, because the ' +
+            'store cannot be read back without it.',
+        )
+      }
+      return Buffer.alloc(0)
+    }
     const value = configured.value.trim()
     if (/^[0-9a-fA-F]{64}$/.test(value)) return Buffer.from(value, 'hex')
-    if (/^[A-Za-z0-9+/\-_]{43}=?$/.test(value)) {
+    // One alphabet or the other, never a mix: standard base64 (`+`/`/`) or base64url (`-`/`_`), but
+    // not both `+` and `-` in one value. Node decodes either under 'base64'; the point is to reject
+    // a garbled value that happens to fall in the union rather than accept 32 bytes of nonsense.
+    if (/^(?:[A-Za-z0-9+/]{43}|[A-Za-z0-9_-]{43})=?$/.test(value)) {
       const decoded = Buffer.from(value, 'base64')
       if (decoded.length === 32) return decoded
     }
     this.problems.push(
       `${configured.name} must be a 256-bit key, base64- or hex-encoded (generate one with: openssl rand -base64 32)`,
     )
-    return undefined
+    return Buffer.alloc(0)
+  }
+
+  // Where that store file lives — required, and without a default for the reason on Config's
+  // sessionStorePath. The container entrypoint is what supplies it there.
+  sessionStorePath(): string {
+    const value = this.env.SESSION_STORE_PATH?.trim()
+    if (!value) {
+      this.problems.push(
+        'SESSION_STORE_PATH is required: it is the file that keeps signed-in devices signed in ' +
+          'across a restart (SPEC section 8). It has no default on purpose — point it at a ' +
+          'directory that survives a restart of this process (the container entrypoint sets it to ' +
+          "/data/sessions.enc, on the image's own persistent volume).",
+      )
+      return ''
+    }
+    return value
   }
 
   port(): number {
@@ -253,10 +298,11 @@ export function loadConfig(env: Env = process.env): Config {
     seekRetries: reader.positiveNumber('SEEK_RETRIES', 2),
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
     listeningTokenRefreshMarginSeconds: reader.positiveNumber('LISTENING_TOKEN_REFRESH_MARGIN_SECONDS', 300),
+    keepAliveRefreshIntervalMs: reader.positiveNumber('KEEP_ALIVE_REFRESH_INTERVAL_MS', REFRESH_INTERVAL_MS),
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),
     writePositionBackoffSeconds: reader.nonNegativeNumber('WRITE_POSITION_BACKOFF_SECONDS', 2),
-    sessionStorePath: env.SESSION_STORE_PATH?.trim() || undefined,
+    sessionStorePath: reader.sessionStorePath(),
     sessionStoreKey: reader.sessionStoreKey(),
     tls: reader.tls(),
     validateResponses: reader.boolean('VALIDATE_RESPONSES'),

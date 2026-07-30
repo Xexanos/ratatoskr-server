@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { AddressInfo, createServer as createNetServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { load } from 'js-yaml'
 import { Ajv, type ValidateFunction } from 'ajv'
@@ -11,7 +14,20 @@ import { Ajv, type ValidateFunction } from 'ajv'
 // Both the config/health smoke test and the live-Audiobookshelf tests build on this.
 
 export const DIST_MAIN = fileURLToPath(new URL('../../app/dist/main.js', import.meta.url))
-export const CONTRACT = fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url))
+
+// The documents of the majors the spawned server serves, one per mount (api/app.ts). A response has
+// to be graded against the contract that promised it, and which contract that is follows from the
+// path it came in on: schema names mean different things per major — a /v1 Session may carry the
+// rotation handover, a /v2 one has no such field, and AuthTokens exists only in 1.4.0. Grading
+// everything against one document would check shapes the other never promised, and fail outright on
+// the ones 2.0.0 dropped. Conformance for /v1 is therefore conformance to the frozen copy, which the
+// contract-freeze CI job holds identical to the contract-1.4.0 tag.
+export const CONTRACTS = {
+  '/v1': fileURLToPath(new URL('../../../contract/v1/openapi.yaml', import.meta.url)),
+  '/v2': fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url)),
+} as const
+
+export type ServedMajor = keyof typeof CONTRACTS
 
 // Env keys the config reader consumes — removed from the inherited env so a test is
 // hermetic no matter what the host shell has set. The rest of process.env is inherited
@@ -23,7 +39,10 @@ export const CONFIG_KEYS = [
   'ABS_CA_CERT',
   'ABS_CA_CERT_PATH',
   'ABS_TLS_INSECURE',
+  'ABS_REQUEST_TIMEOUT_MS',
   'SONOS_SEED_HOST',
+  'SONOS_REQUEST_TIMEOUT_MS',
+  'KEEP_ALIVE_REFRESH_INTERVAL_MS',
   'PORT',
   'POLL_INTERVAL_SECONDS',
   'SEEK_SETTLE_MS',
@@ -38,12 +57,49 @@ export const CONFIG_KEYS = [
   'TLS_KEY_PATH',
   'ALLOW_PLAIN_HTTP',
   'VALIDATE_RESPONSES',
+  'SESSION_STORE_KEY',
+  'SESSION_STORE_KEY_FILE',
+  'SESSION_STORE_PATH',
 ]
 
 export function cleanEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env }
   for (const key of CONFIG_KEYS) delete env[key]
   return { ...env, ...overrides }
+}
+
+// The encrypted session store every spawned server opens at boot (SPEC section 8). A fresh file
+// and key per server on purpose: two instances sharing one store is exactly the misconfiguration
+// the store refuses to tolerate, so sharing one here would make tests fight each other. Spread it
+// into cleanEnv() for any test that expects the server to come up.
+const storeDirs: string[] = []
+process.once('exit', () => {
+  for (const dir of storeDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // a leftover temp dir is not worth failing a test run over
+    }
+  }
+})
+
+export function sessionStoreEnv(): { SESSION_STORE_KEY: string; SESSION_STORE_PATH: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'rtk-it-store-'))
+  storeDirs.push(dir)
+  return { SESSION_STORE_KEY: randomBytes(32).toString('base64'), SESSION_STORE_PATH: join(dir, 'sessions.enc') }
+}
+
+// Sign in through the spawned server and return the opaque Ratatoskr token, the way a /v2 client does
+// (SPEC section 8). Every authenticated /v2 test starts here: an Audiobookshelf token of our own is
+// not a usable bearer on that surface, which is the whole point of the model.
+export async function signIn(base: string, username: string, password: string): Promise<string> {
+  const res = await fetch(`${base}/v2/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!res.ok) throw new Error(`sign-in failed: ${res.status} ${await res.text()}`)
+  return ((await res.json()) as { token: string }).token
 }
 
 export async function freePort(): Promise<number> {
@@ -133,14 +189,23 @@ export function assertServerBuilt(): void {
 // its own homework. strict:false because the contract uses OpenAPI-3.0 keywords (nullable,
 // format: double) that plain Ajv rejects; note this *ignores* nullable rather than honoring
 // it, which is fine for the shapes asserted here (their required fields are never null).
-let contractAjv: Ajv | undefined
+//
+// One Ajv per major, built on first use: two documents define different schemas under the same names,
+// so they cannot share a registry.
+//
+// `major` has no default on purpose. It names the mount the response came from, and a wrong answer
+// here does not fail — it grades the response against a different major's idea of the schema and
+// passes. Making every call site say which surface it is testing is the whole safeguard.
+const contractAjvs = new Map<ServedMajor, Ajv>()
 
-export function contractValidator(schemaName: string): ValidateFunction {
-  if (!contractAjv) {
-    contractAjv = new Ajv({ strict: false })
-    contractAjv.addSchema(load(readFileSync(CONTRACT, 'utf8')) as object, 'contract')
+export function contractValidator(schemaName: string, major: ServedMajor): ValidateFunction {
+  let ajv = contractAjvs.get(major)
+  if (!ajv) {
+    ajv = new Ajv({ strict: false })
+    ajv.addSchema(load(readFileSync(CONTRACTS[major], 'utf8')) as object, 'contract')
+    contractAjvs.set(major, ajv)
   }
-  const validate = contractAjv.getSchema(`contract#/components/schemas/${schemaName}`)
-  if (!validate) throw new Error(`${schemaName} schema not found in contract`)
+  const validate = ajv.getSchema(`contract#/components/schemas/${schemaName}`)
+  if (!validate) throw new Error(`${schemaName} schema not found in the ${major} contract`)
   return validate as ValidateFunction
 }

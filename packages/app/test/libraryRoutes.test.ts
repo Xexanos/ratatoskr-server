@@ -3,6 +3,7 @@ import type { AbsClient } from '../src/abs/client.js'
 import { InvalidCursorError } from '../src/abs/cursor.js'
 import { AbsNotFoundError, AbsUpstreamError } from '../src/abs/errors.js'
 import { buildApp } from '../src/api/app.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 const AUTH = { authorization: 'Bearer user-token' }
@@ -14,8 +15,8 @@ const SUMMARY = { id: 'li_1', title: 'Alpha', durationSeconds: 3600, coverUrl: '
 const BOOK_DETAIL = { ...BOOK, progress: { positionSeconds: 0, isFinished: false }, description: undefined, narrator: undefined }
 const ITEM = { ...SUMMARY, progress: { positionSeconds: 0, isFinished: false } }
 
-function appWith(abs: Partial<AbsClient>) {
-  return buildApp(testConfig(), { absClient: abs as AbsClient })
+async function appWith(abs: Partial<AbsClient>) {
+  return buildApp(testConfig(), { absClient: abs as AbsClient, sessionStore: await tempSessionStore() })
 }
 
 describe('GET /v1/library/items', () => {

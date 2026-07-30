@@ -137,17 +137,40 @@ must build on:
 ## 6. API and versioning
 
 - `contract/openapi.yaml` is the single source of truth. Implement it exactly.
-- Everything is mounted under the version prefix, kept in one place (`servers.url`), so two
-  majors can be served side by side. The pending **contract 2.0.0 cut under `/v2`** — the
-  new auth surface, with `/v1` served in parallel frozen at the 1.4.0 tag until its sunset
-  (then an unauthenticated 410 `UPGRADE_REQUIRED` stub) — is decided and recorded in
-  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md).
+- Everything is mounted under a version prefix, and that prefix lives in one place **per major**:
+  each mount derives it from the `servers.url` of the very document it registers. A major's routes
+  and the URLs its responses hand out therefore cannot drift apart, and no build-wide prefix can
+  give one major's answer to both.
+- Two majors are served side by side, from one process, each from its own document:
+  **2.0.0 under `/v2`** — the auth surface of
+  [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step with no
+  deprecation markers, since `/v1` clients read the frozen 1.4.0 tag — and **1.4.0 under `/v1`**,
+  frozen, until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED` stub). One
+  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service,
+  security handlers and contract-derived token guard; assembling that list is the only place that knows
+  there is more than one, so sunsetting `/v1` is removing an entry. The two majors' **auth models are
+  genuinely different**, which is what those per-major slots are for: both name the same bearer scheme
+  and mean a different credential by it — an Audiobookshelf access token proved upstream on `/v1`, an
+  opaque Ratatoskr token resolved in process on `/v2` (section 8) — and each major's guard therefore
+  exempts a different set of operations. Everything a client does *with* its token is shared code, and
+  runs on whichever Audiobookshelf token that major's guard put on the request.
+- `/v1` is frozen at the **`contract-1.4.0`** tag, and what it mounts is a tracked copy of that
+  document at `contract/v1/openapi.yaml`. The `contract-freeze` CI job is what makes that a freeze
+  rather than a duplicate: it holds the copy byte-identical to the tag. The accident it exists for is
+  not a deliberate edit but a sweep — a reformat, a lint rule, a search-and-replace across
+  `contract/**` — silently reshaping the surface installed app versions talk to. The copy exists at
+  all because generating the served artifacts must need no git history: `.git` is deliberately
+  outside the image build context, and keeping that hermetic is worth more than avoiding a copy.
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
-  practice for the server: never remove or repurpose a field within `/v1`, only add
-  optional ones; introduce breaking changes only under a new major version and path.
-- A CI job runs oasdiff against the previous tagged contract and fails the build on an
-  unflagged breaking change.
+  practice for the server: never remove or repurpose a field within a served major, only
+  add optional ones; introduce breaking changes only under a new major version and path.
+- A CI job runs oasdiff between the PR's base and head and fails the build on a breaking
+  change. It reads `info.version` on both sides and skips itself when the major differs,
+  which is exactly the case this rule allows — so a major cut needs no manual flag, and
+  everything else stays gated. It grades the contract under development only: the other served
+  major is frozen rather than versioned, and `contract-freeze` gates that one more strictly than any
+  breaking-change check could.
 - **`info.version` names the contract text, one-to-one.** Any change to `contract/openapi.yaml`
   must move `info.version` strictly forward, to a version that has never been tagged. The
   `contract-version` CI job enforces this on every PR: oasdiff (above) decides whether the *shape*
@@ -203,7 +226,7 @@ if something required is missing:
 - `SONOS_REQUEST_TIMEOUT_MS` (optional, default 4000) — per-request cap on Sonos SOAP/discovery
   I/O. A speaker that vanishes mid-session (powered off / off the network) drops packets rather
   than refusing the connection, so an unbounded read would hang the live topology/transport reads
-  — and with them `GET /v1/sessions/current` — indefinitely. This bounds each call so a dead
+  — and with them `GET /v2/sessions/current` — indefinitely. This bounds each call so a dead
   speaker surfaces promptly as a 502 (section 4) instead of a hung request.
 - `SONOS_LISTENER_HOST`, `SONOS_LISTENER_INTERFACE`, `SONOS_LISTENER_PORT` (optional,
   pass-through) — read directly by the embedded Sonos library, not validated by Ratatoskr's
@@ -219,22 +242,43 @@ if something required is missing:
   `SEEK_RETRIES` (optional, default 2) — tuning knobs for section 4; defaults come from the
   spike findings there.
 - `PROGRESS_WRITE_THRESHOLD_SECONDS` (optional, default 5).
-- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required once the `/v2` auth model lands,
-  mutually exclusive) — key for the encrypted session store (section 8), as a value or a
-  Docker-secret-compatible file path. A 256-bit key, base64- or hex-encoded (`openssl rand
-  -base64 32`); a trailing newline in the file variant is tolerated. Missing key → the server
-  refuses to boot; wrong key → a clear error, never silent data loss.
-- `SESSION_STORE_PATH` — where that store file lives (section 8). Deliberately without a default,
-  like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation is a
-  property of the deployment, and a wrong guess would silently sign every device out on the next
-  restart. The container entrypoint supplies it the same way it supplies the certificate paths,
-  pointing into the image's own `/data` volume (the server's own persistent state, so future
-  additions have somewhere to go without another rename) — separate from the certificate's
-  `/tls`, since the certificate is regenerable and the store is not (see section 8).
+- `SESSION_STORE_KEY` / `SESSION_STORE_KEY_FILE` (required, mutually exclusive) — key for the
+  encrypted session store (section 8), as a value or a Docker-secret-compatible file path. A
+  256-bit key, base64- or hex-encoded (`openssl rand -base64 32`); a trailing newline in the file
+  variant is tolerated. Missing key → the server refuses to boot; wrong key → a clear error, never
+  silent data loss.
+  **A random value, not an operator-chosen passphrase, and deliberately so.** The point of encrypting
+  the store is that a copy of the *file* alone is worthless — a backup pulled off the host, a dataset
+  snapshot, a support bundle. Against that, the attack is offline and unlimited, so the only thing
+  standing in its way is the key's entropy: 256 random bits cannot be guessed, while a memorable
+  phrase realistically carries 40–70. A slow KDF (scrypt, Argon2id) would raise the cost per guess
+  but add no entropy, and what is behind the door is every signed-in device's ABS access *and*
+  refresh token. The ergonomic complaint a passphrase answers — "I have to keep a random string
+  somewhere" — is answered by `SESSION_STORE_KEY_FILE` instead: a password manager or `docker secret`
+  owns the file, and the operator never types or stores the value.
+- `SESSION_STORE_PATH` (required) — where that store file lives (section 8). Deliberately without
+  a default, like `TLS_CERT_PATH`/`TLS_KEY_PATH`: which directory outlives a container recreation
+  is a property of the deployment, and a wrong guess would silently sign every device out on the
+  next restart. The container entrypoint supplies it the same way it supplies the certificate
+  paths, pointing into the image's own `/data` volume (the server's own persistent state, so
+  future additions have somewhere to go without another rename) — separate from the certificate's
+  `/tls`, since the certificate is regenerable and the store is not (see section 8). The
+  entrypoint also refuses to start when that directory is not a mounted volume: it would be
+  writable either way, and the store would then silently disappear on the next container
+  recreation.
 - `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
   user's access token expires the sync loop renews it, so the rotated pair reaches the client while
   its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
   1.4.0 contract, see section 8) and is removed together with `/v1`.
+- `KEEP_ALIVE_REFRESH_INTERVAL_MS` (optional, default 86400000 — a day) — how often the keep-alive
+  loop renews every stored Audiobookshelf chain (section 8), and with it the boot pass's staleness
+  cutoff, since a chain is stale exactly when it missed a sweep. The daily default is what ADR-0001
+  decided and what a deployment should run; the knob exists because it is also the only lever that
+  makes the dead-chain path reachable on demand — a test deployment sets it low, restarts, and the
+  chains it holds count as stale immediately, instead of waiting out a day or pinning Audiobookshelf's
+  own token lifetimes short. Lowering it in production only adds upstream traffic: it buys no
+  resilience, since a chain already survives six missed sweeps. The jitter is not separately
+  configurable — it is a fraction of this interval, so the two cannot drift apart.
 - `SHUTDOWN_TIMEOUT_MS` (optional, default 5000) — upper bound on the graceful-shutdown drain
   (section 5); the process exits after this even if the final write is still hung.
 - `RESUME_REWIND_SECONDS` (optional, default 10) — resume this many seconds before the stored
@@ -248,8 +292,9 @@ Authentication is per-user and backed by Audiobookshelf, so that progress is att
 to the person who is actually listening. The client credential, however, is
 **Ratatoskr-issued**: the server is the sole holder of ABS token pairs
 ([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), decided in
-[#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes
-the target model for contract 2.0.0 under `/v2`; the previous shared-token model and its
+[#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes the
+model of contract 2.0.0 under `/v2` — cut in the contract, with the server-side pieces
+landing in follow-up issues (section 6). The previous shared-token model and its
 rotation-handover protocol stay served under `/v1`, frozen at the 1.4.0 contract tag,
 until the sunset described in the ADR — the old protocol's specification lives in that
 tag, not here.
@@ -276,23 +321,77 @@ re-login.
   fingerprint, while this file is irreplaceable and losing it signs every device out. That
   also makes the backup rule one sentence: back up `/data`, not the cert. The key is
   operator-supplied and mandatory (`SESSION_STORE_KEY`, section 7); without it the server
-  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14).
-- **Keep-alive**: the server refreshes every stored ABS chain daily (jittered), refreshes
-  stale chains on boot, and refreshes on demand when an access token expires mid-use. A
-  chain now dies only if server↔ABS contact is lost for the entire ABS refresh window
-  (≥ 7 days by default) or on an ABS username change. Operator guidance: raise ABS's
-  `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days) if longer outages are expected.
+  refuses to boot, same fail-loud pattern as the ABS-URL probe (section 14). The store is
+  opened during startup, not on first use, so a wrong key, a corrupt file and a directory
+  that cannot be written all stop the boot while the operator is watching rather than
+  surfacing later as one user's failed sign-in — opening it creates the file when absent,
+  which is what makes the last of those visible at all.
+- **Keep-alive**: the server renews every stored ABS chain on three schedules, which between
+  them answer three different ways of losing one.
+  - **Daily, jittered**: one sweep a day, at a jittered offset, renewing every stored chain.
+    Within a sweep the chains are **spaced by over a second** each — below ABS 2.35.1 two
+    refreshes of the same user inside one second come back with the identical token (see the
+    sign-out note below), so a sweep that renewed the whole store at once would be the most
+    reliable way to collide the very chains it is keeping alive.
+  - **On boot**: the chains that missed a sweep because the server was down, stalest first —
+    those are the ones nearest the refresh window's edge, and the order is what decides which
+    survive a recovery that only gets halfway. Never blocking: a slow or unreachable ABS may
+    delay the first request, never the boot.
+  - **On demand**: the request path renews an access token that is at or past its own, much
+    shorter expiry, before the upstream call behind it runs. The daily sweep is about the
+    refresh token and says nothing about the access one, so without this a device returning
+    after a pause would meet a 401 the server could have avoided.
+
+  Renewals are serialized, and the one for a given entry is shared by everyone waiting on it:
+  ABS rotates the refresh token on use, so two concurrent renewals of one chain would spend
+  the same token twice and kill the chain they were renewing. A chain now dies only if
+  server↔ABS contact is lost for the entire ABS refresh window (≥ 7 days by default) or on an
+  ABS username change. Operator guidance: raise ABS's `REFRESH_TOKEN_EXPIRY` (e.g. to 90 days)
+  if longer outages are expected.
 - **Dead chain, valid token**: the keep-alive loop marks a dead chain but keeps the entry,
   so the user's next request answers **401 with the machine-readable
   `code: "UPSTREAM_SESSION_LOST"`** in the error body instead of a generic "unknown
   token". The app reacts with a targeted password prompt; re-login creates a fresh chain
   and a **new** token and deletes the old entry (no in-place repair). This failure is rare
   and loud — the inverse of the old model's frequent silent re-logins.
+  Mechanically, "deletes the old entry" is the client's doing: `POST /v2/auth/login` is
+  unauthenticated, but reads a bearer when one is offered and signs that session out once
+  the new one exists. So a re-authenticating device sends the token it is replacing and ends
+  up with exactly one session, while a first sign-in sends none. The old entry is retired
+  only *after* the new one exists, and only best-effort: a rejected password must not sign a
+  device out of a session that still works, and once the new token is live, failing the
+  sign-in over a stale entry would lose a credential that does work. An offered token this
+  server does not know is ignored — the route must never turn a valid sign-in into a 401 —
+  and only the holder of a token can retire it this way, so no device can sign another out.
+  The half no client can do is the server's: a device whose chain died before it could offer
+  the token it is replacing leaves an entry **nobody can name**, since the login route is
+  unauthenticated. Marking the chain dead is what closes that too — a sign-in retires the
+  *dead* entries of the same ABS user, who has just proved the password, while their other
+  devices' live chains are untouched. Nothing goes upstream for those: the chain being retired
+  is gone, which is what "dead" records. What this cannot do is tell one dead entry of a user
+  from another, and the dominant death cause — an outage past the window — kills all of that
+  user's chains at once. So the first device back retires its siblings' entries too, and those
+  siblings then get the ordinary "signed out" 401 instead of the targeted prompt. Accepted
+  deliberately: both answers end with the same person typing the same password, while keeping
+  dead entries until each device happens to return would leave the store accumulating
+  credentials that can never work again.
 - **Sign-out** (`POST /v2/auth/logout`): delete the session entry — the token is dead
   immediately — and fire a best-effort ABS `POST /logout` with the held refresh token,
   killing exactly this device's ABS session; other devices and other ABS clients are
   untouched. Idempotent and best-effort: unknown token or unreachable ABS still answers
   204 (an orphaned ABS session expires on its own, since nobody refreshes it).
+  **Requires ABS ≥ 2.35.1 to be per device.** Before that release ABS minted the refresh
+  token from second-precision JWT timestamps with no per-session claim, so two sign-ins (or
+  two refreshes) of the same user inside the same second came back with the *identical*
+  token — the session rows were distinct, but the token that names a session at `POST
+  /logout` is not, so ending one chain ends the other
+  ([advplyr/audiobookshelf#5253](https://github.com/advplyr/audiobookshelf/issues/5253),
+  fixed in 2.35.1). Verified by probe: 2.26.0, 2.29.0, 2.31.0 and 2.35.0 collide, 2.35.1
+  does not. The affected device stays signed in as far as Ratatoskr is concerned — its token
+  and store entry are untouched — but its upstream calls fail until it re-authenticates.
+  Timing-dependent, so occasional rather than reproducible on an older ABS. Nothing here can
+  repair it; ADR-0001 carries the amended grounding fact and what it costs the keep-alive
+  loop.
 - All endpoints require a valid Ratatoskr token except `/health`, `/auth/login`, and
   `GET /speakers`. The **token guard** is now an in-process hash lookup — no per-request
   ABS roundtrip — but keeps deriving the protected set from the contract, so a new
@@ -304,9 +403,39 @@ re-login.
   membership; the id is only usable through the authenticated playback endpoints.
 - **Upstream calls** use the session entry's ABS chain — so the library view and playback
   progress remain scoped to the ABS user who signed in, and the sync loop keeps writing
-  progress during long unattended playback without any client involvement. The media URLs
+  progress during long unattended playback without any client involvement. A playback session
+  is bound to the **entry**, not to the chain as it stood when playback started: it reads the
+  access token again on every write-back, so a chain the keep-alive loop renews mid-book
+  reaches a session that is already running. `/v1` keeps the opposite binding, and is entitled
+  to it — there the bearer *is* the upstream token and the sync loop rotates the pair itself. The media URLs
   handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).
+
+**What `/v1` still runs.** The frozen major keeps every part of the old model, unchanged, in
+a service of its own: the `POST /v1/auth/login` and `POST /v1/auth/refresh` proxies that hand
+ABS token pairs to the device, the optional `refreshToken` on `PUT /v1/sessions/current` that
+arms the sync loop's renewal (`LISTENING_TOKEN_REFRESH_MARGIN_SECONDS`, section 7 — that knob
+serves this route alone), and the rotation handover, including the
+`DELETE /v1/sessions/current` that answers 200 with a final `Session` when a rotated pair was
+still owed. Everything else is implemented once and inherited by both majors, so the shared
+operations cannot drift apart by accident — with the consequence that **a change to a shared
+method changes `/v1` too**. `/v2`'s move from the caller's bearer to a session-resolved
+upstream token is exactly such a change, and it is kept out of the shared body by living in
+the **token guard each mount is built with**: `/v2`'s resolves the bearer to a device session,
+renews its chain when the access token is due, and leaves the resulting upstream token — plus
+a way to read it again later, for a playback session that outlives the request — where every
+shared handler already looks. One major's auth model can therefore be replaced without
+touching the other's, and without either appearing in the operations they share.
+
+**The one thing the two majors share.** Not the handover — it cannot be armed or delivered
+under `/v2`, which has no field for it — but the single active playback session, of which there
+is still exactly one. A `/v2` caller presenting the same Audiobookshelf access token a `/v1`
+client is listening with can stop that session, and a rotated pair the `/v1` client had not yet
+collected is discarded with it, because `/v2`'s stop hands nothing back. The `/v1` client then
+re-authenticates. This needs one device speaking both majors with the same upstream token, and
+it stops being expressible once `/v2` bearers are Ratatoskr tokens. It is recorded here, and at
+the `/v2` stop itself, rather than papered over: the alternative would be a `/v2` response
+carrying an upstream credential under a field its own contract does not declare.
 
 The client-side half is specified in the app's SPEC, section 5, and degenerates to:
 attach the token; on 401 + `UPSTREAM_SESSION_LOST` show a targeted re-login prompt; on any
@@ -459,12 +588,16 @@ ratatoskr-server/
 │   │   ├── abs/                #   Audiobookshelf client: library projection, progress read/write
 │   │   ├── sonos/              #   node-sonos-ts wrapper: discovery, transport URI, play/pause/seek, poll
 │   │   ├── playback/           #   session manager (the single in-memory session) + the sync loop
-│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the /v1 mount
-│   │   │                       #   (apiPrefix.ts), and mapping between the domain and the
+│   │   ├── api/                #   Fastify routes, auth hook, error mapping, the credential-endpoint
+│   │   │                       #   rate limit (rateLimit.ts, section 14), the per-major version
+│   │   │                       #   mount (apiPrefix.ts), and mapping between the domain and the
 │   │   │                       #   contract types: contractMapping.ts is the one place
 │   │   │                       #   contract-shaped library and session values are built, and
 │   │   │                       #   the only place a cover URL is minted; domainShapeAssertion.ts
 │   │   │                       #   makes skipping that step a build error rather than a wrong URL
+│   │   │   └── v1/             #   what contract 2.0.0 dropped, served frozen under /v1 until its
+│   │   │                       #   sunset: the credential proxies and the rotation handover. Extends
+│   │   │                       #   the shared service; deleted whole when /v1 goes (section 8)
 │   │   └── main.ts             #   startup wiring
 │   │
 │   ├── fake-sonos/           # @ratatoskr/fake-sonos — the UPnP/SOAP speaker double (test-only):
@@ -504,8 +637,10 @@ tuning knobs from section 7). All of the finicky logic is therefore unit-testabl
 hardware. The sync loop in `playback/` stays thin: poll, convert to absolute seconds via
 `position`, apply the write-back threshold, and write to ABS when warranted.
 
-The single API version prefix (`/v1`) is defined in one place in `api/`, so a future
-`/v2` can be mounted alongside it (section 6).
+The API version prefix is not written down in the server at all: `apiPrefix.ts` derives it from
+the contract's `servers.url`, the one place section 6 puts it, so the mounted routes and the URLs
+the API hands out cannot drift from the contract that documents them. A second major is mounted by
+serving a second document, not by adding a second constant.
 
 ## 14. Security
 
@@ -549,11 +684,23 @@ Decisions (binding for the implementation):
   `Session`, until `/v1` sunsets. The error mapper strips URLs from upstream errors before
   they reach responses or logs. (Also note: ABS and any proxy in between will log
   media-URL query strings — one more reason those URLs carry only the streamer API key.)
-- **Rate-limit the credential endpoints.** `/auth/login` (and `/v1`'s `/auth/refresh`
-  while it is still served) get a conservative per-IP rate limit so Ratatoskr is not a
-  free brute-force funnel in front of ABS. The other unauthenticated endpoints (`/health`,
-  `GET /speakers`) take no credentials and stay unlimited — they serve cached local state
-  and are polled legitimately.
+- **The credential endpoints are rate-limited.** `/auth/login` on every served major, and `/v1`'s
+  `/auth/refresh` while it is still served, carry a conservative per-source-address limit (10
+  attempts per minute) so Ratatoskr is not a free brute-force funnel in front of ABS — which cannot
+  throttle by source itself, since every attempt reaches it from this server. The limited routes are
+  derived from each served document's operationIds, so an operation taking a credential is limited on
+  whichever major declares it. Refusals answer `429` in the contract's error shape, with a
+  `Retry-After`. The other unauthenticated endpoints (`/health`, `GET /speakers`) take no credentials
+  and stay unlimited — they serve cached local state and are polled legitimately, so a limit there
+  would turn a monitoring loop into an outage. Unrouted paths are not counted either: a stranger
+  spraying unknown URLs must not consume a real client's budget.
+  Two consequences worth knowing. The limit keys on the source address, so behind a reverse proxy —
+  which Ratatoskr neither configures nor trusts headers from — every client shares one bucket, so a
+  deployment that needs per-client limits should not put one in front of the credential routes. And
+  `429` is declared by the contract under development but **not** by the frozen `/v1` document, which
+  cannot gain a response: there the status is served undeclared, as a consequence of the freeze rather
+  than a choice. A `/v1` client that reads an unexpected `4xx` on login as "credentials rejected" will
+  prompt again instead of waiting — the one behaviour this costs.
 - **The session store is encrypted, keyed by the operator.** The per-device ABS chains and
   Ratatoskr token hashes (section 8) persist as a single AES-256-GCM file on the mounted
   volume, key from `SESSION_STORE_KEY` (mandatory — no key, no boot). A foreign container
@@ -628,7 +775,7 @@ own change with its own tests.
   the request/response shapes match a live ABS. Added a Docker-gated integration test
   (now `packages/integration-tests/test/absLive.integration.test.ts`) that boots a real,
   digest-pinned Audiobookshelf in a container, seeds it, spawns the compiled server against
-  it, and drives login/refresh and the library projection over `/v1`. It skips cleanly where
+  it, and drives the library projection over the contract's version prefix. It skips cleanly where
   no container runtime is available and runs in CI. This closed the phase-3a open item — a
   smoke test against a live ABS before phase 4 builds playback on top of the projection —
   and on its first run surfaced a real drift bug: the client read the ABS token pair from the

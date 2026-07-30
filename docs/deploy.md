@@ -17,21 +17,33 @@ central E2E stack and **promotes** it to a release channel only after E2E passes
   docker build -t ratatoskr-server .
   ```
 - **Configuration** is entirely via environment variables — documented inline in
-  [`compose.yaml`](../compose.yaml) (the operator reference) and SPEC section 7. `ABS_URL` and
-  `ABS_STREAMER_API_KEY` are required; for the listener transport, the container auto-generates a
-  self-signed certificate unless you set `TLS_CERT_PATH`/`TLS_KEY_PATH` or `ALLOW_PLAIN_HTTP=true`
-  (see "TLS" in the README). Invalid config is reported (all problems at once) and the container
-  exits non-zero at startup.
+  [`compose.yaml`](../compose.yaml) (the operator reference) and SPEC section 7. `ABS_URL`,
+  `ABS_STREAMER_API_KEY` and `SESSION_STORE_KEY` are required; for the listener transport, the
+  container auto-generates a self-signed certificate unless you set `TLS_CERT_PATH`/`TLS_KEY_PATH`
+  or `ALLOW_PLAIN_HTTP=true` (see "TLS" in the README). Invalid config is reported (all problems at
+  once) and the container exits non-zero at startup.
+- **Volumes:** `/tls` for the certificate and `/data` for the encrypted session store. `/data` must
+  be a real mount — the entrypoint refuses to start otherwise, since the store would be writable in
+  the container's own layer and then vanish on the next recreation, signing every device out.
+- **Upstream session lifetime:** the server keeps each signed-in device's Audiobookshelf session
+  alive by renewing it daily, and at start-up for any renewal it slept through, so a restart or a
+  long pause never costs a login. What still ends a session is Ratatoskr being unable to reach
+  Audiobookshelf for longer than Audiobookshelf's *whole* refresh window — `REFRESH_TOKEN_EXPIRY`,
+  **7 days** by default — after which the affected devices are prompted for their password.
+  Deployments that can be offline for longer (a NAS powered down over a holiday, a seasonal
+  server) should raise it on the **Audiobookshelf** side, e.g. `REFRESH_TOKEN_EXPIRY=90d`;
+  nothing on the Ratatoskr side has to match it.
 - **Health:** the image's `HEALTHCHECK` is a raw TCP connect to `PORT` (liveness only — works
   for both HTTP and HTTPS). Application health, including ABS/Sonos reachability, is the
-  unauthenticated `GET /v1/health` endpoint.
+  unauthenticated `GET /v2/health` endpoint.
 - **Shutdown:** `SIGTERM` (what `docker stop` sends) triggers the graceful drain (SPEC section 5)
   — the active session's reached position is written back to ABS before exit.
 
 ### Running
 
-Operators deploy with the single [`compose.yaml`](../compose.yaml) — download it, set `ABS_URL`
-and `ABS_STREAMER_API_KEY` in its `environment:` block, and `docker compose up -d` (full walkthrough
+Operators deploy with the single [`compose.yaml`](../compose.yaml) — download it, set `ABS_URL`,
+`ABS_STREAMER_API_KEY` and `SESSION_STORE_KEY` in its `environment:` block, create the `tls` and
+`data` directories it bind-mounts, and `docker compose up -d` (full walkthrough
 in the [README](../README.md#running-with-docker)). No repository checkout required. Sonos discovery
 and UPnP eventing need the host LAN, so it runs with host networking; where that is not possible,
 switch to the bridge block and set `SONOS_SEED_HOST` (SPEC section 12, "Container networking").
@@ -47,11 +59,12 @@ of app with the same update behavior:
 
 - **Install via YAML** (*Apps → Discover Apps → ⋮ → Install via YAML*): paste
   [`compose.yaml`](../compose.yaml) with two adjustments — set the required variables, and replace
-  the `./tls` bind mount with a named volume (add `ratatoskr-tls: {}` under a top-level `volumes:`
-  and mount it as `ratatoskr-tls:/tls`) or an absolute dataset path.
+  the `./tls` and `./data` bind mounts with named volumes (add `ratatoskr-tls: {}` and
+  `ratatoskr-data: {}` under a top-level `volumes:` and mount them as `ratatoskr-tls:/tls` and
+  `ratatoskr-data:/data`) or absolute dataset paths.
 - **Install Custom App** (form): image repository `ghcr.io/xexanos/ratatoskr-server`, tag
-  `latest`, restart policy *Unless Stopped*, environment variables `ABS_URL` and
-  `ABS_STREAMER_API_KEY`, and a storage mount for `/tls`.
+  `latest`, restart policy *Unless Stopped*, environment variables `ABS_URL`,
+  `ABS_STREAMER_API_KEY` and `SESSION_STORE_KEY`, and storage mounts for `/tls` and `/data`.
 
 Notes that apply either way:
 

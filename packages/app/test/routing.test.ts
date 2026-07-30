@@ -2,14 +2,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
 import { buildApp } from '../src/api/app.js'
 import type { SonosClient } from '../src/sonos/client.js'
+import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 // The clients are never touched: the bearer preHandler and the not-found handler both run before
-// any ApiService method. (Every contract operation is implemented as of the playback slices, so the
-// NotImplementedError fallback is now unreachable via the contract; it is covered as a unit in
-// errorHandler.test.ts.)
-function buildTestApp() {
-  return buildApp(testConfig(), { absClient: {} as AbsClient, sonosClient: {} as SonosClient })
+// any ApiService method. (Both majors currently implement everything they declare, so the
+// NotImplementedError fallback is not reachable through a mounted route; errorHandler.test.ts
+// covers its mapping as a unit.)
+async function buildTestApp() {
+  return buildApp(testConfig(), {
+    absClient: {} as AbsClient,
+    sonosClient: {} as SonosClient,
+    sessionStore: await tempSessionStore(),
+  })
 }
 
 const AUTH = { authorization: 'Bearer user-token' }

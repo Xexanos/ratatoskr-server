@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { REFRESH_INTERVAL_MS } from '../src/auth/keepAlive.js'
 import { ConfigError, loadConfig } from '../src/config/index.js'
 
 const CERT = fileURLToPath(new URL('./fixtures/tls/cert.pem', import.meta.url))
@@ -14,6 +15,8 @@ const REQUIRED = {
   ABS_STREAMER_API_KEY: 'streamer-key',
   ALLOW_PLAIN_HTTP: 'true',
   ABS_ALLOW_PLAIN_HTTP: 'true',
+  SESSION_STORE_KEY: SESSION_KEY_B64,
+  SESSION_STORE_PATH: '/data/sessions.enc',
 }
 
 // Asserts a ConfigError is thrown whose aggregated message contains each expected
@@ -43,11 +46,25 @@ describe('loadConfig', () => {
     expect(config.writePositionBackoffSeconds).toBe(2)
     expect(config.sonosRequestTimeoutMs).toBe(4000)
     expect(config.absRequestTimeoutMs).toBe(10000)
+    // A day, and read off the loop that owns it rather than restated here — the point of the
+    // assertion is that an unset variable leaves the shipped cadence alone.
+    expect(config.keepAliveRefreshIntervalMs).toBe(REFRESH_INTERVAL_MS)
     expect(config.tls).toBeUndefined()
     expect(config.sonosSeedHost).toBeUndefined()
     expect(config.validateResponses).toBe(false)
     expect(config.absCaCert).toBeUndefined()
     expect(config.absTlsInsecure).toBe(false)
+  })
+
+  // The one keep-alive knob (SPEC section 7): a test deployment shortens the interval so the chains
+  // it holds count as stale on the next boot, instead of waiting out a day to reach the dead-chain
+  // path. Validated like every other interval, so a typo cannot silently mean "never".
+  it('takes a keep-alive interval from the environment, and refuses a nonsensical one', () => {
+    expect(loadConfig({ ...REQUIRED, KEEP_ALIVE_REFRESH_INTERVAL_MS: '5000' }).keepAliveRefreshIntervalMs).toBe(5000)
+    expectConfigError(
+      { ...REQUIRED, KEEP_ALIVE_REFRESH_INTERVAL_MS: '0' },
+      'KEEP_ALIVE_REFRESH_INTERVAL_MS must be a positive number',
+    )
   })
 
   it('enables response validation only when VALIDATE_RESPONSES=true', () => {
@@ -60,6 +77,8 @@ describe('loadConfig', () => {
       { ALLOW_PLAIN_HTTP: 'true' },
       'ABS_URL is required',
       'ABS_STREAMER_API_KEY is required',
+      'SESSION_STORE_KEY (or SESSION_STORE_KEY_FILE) is required',
+      'SESSION_STORE_PATH is required',
     )
   })
 
@@ -94,9 +113,8 @@ describe('loadConfig', () => {
 
   it('accepts TLS when both cert and key are readable, without requiring ALLOW_PLAIN_HTTP', () => {
     const config = loadConfig({
-      ABS_URL: REQUIRED.ABS_URL,
-      ABS_STREAMER_API_KEY: REQUIRED.ABS_STREAMER_API_KEY,
-      ABS_ALLOW_PLAIN_HTTP: 'true',
+      ...REQUIRED,
+      ALLOW_PLAIN_HTTP: undefined,
       TLS_CERT_PATH: CERT,
       TLS_KEY_PATH: KEY,
     })
@@ -104,11 +122,7 @@ describe('loadConfig', () => {
   })
 
   it('accepts an https ABS_URL without requiring ABS_ALLOW_PLAIN_HTTP', () => {
-    const config = loadConfig({
-      ABS_URL: 'https://abs.invalid',
-      ABS_STREAMER_API_KEY: REQUIRED.ABS_STREAMER_API_KEY,
-      ALLOW_PLAIN_HTTP: 'true',
-    })
+    const config = loadConfig({ ...REQUIRED, ABS_URL: 'https://abs.invalid', ABS_ALLOW_PLAIN_HTTP: undefined })
     expect(config.absUrl).toBe('https://abs.invalid')
   })
 
@@ -165,24 +179,34 @@ describe('loadConfig', () => {
   })
 
   it('rejects plain HTTP without TLS or an explicit opt-out', () => {
-    expectConfigError(
-      {
-        ABS_URL: REQUIRED.ABS_URL,
-        ABS_STREAMER_API_KEY: REQUIRED.ABS_STREAMER_API_KEY,
-      },
-      'no TLS configured',
-    )
+    expectConfigError({ ...REQUIRED, ALLOW_PLAIN_HTTP: undefined }, 'no TLS configured')
   })
 
   it('reads the session store key from a value or a Docker-secret file, trimming the trailing newline', () => {
     expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY_B64 }).sessionStoreKey).toEqual(SESSION_KEY)
-    expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY_FILE: SESSION_KEY_FILE }).sessionStoreKey).toEqual(SESSION_KEY)
+    expect(
+      loadConfig({ ...REQUIRED, SESSION_STORE_KEY: undefined, SESSION_STORE_KEY_FILE: SESSION_KEY_FILE })
+        .sessionStoreKey,
+    ).toEqual(SESSION_KEY)
   })
 
   it('accepts a hex-encoded session store key as well as base64', () => {
     expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY.toString('hex') }).sessionStoreKey).toEqual(
       SESSION_KEY,
     )
+  })
+
+  it('accepts a base64url-encoded session store key', () => {
+    expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY.toString('base64url') }).sessionStoreKey).toEqual(
+      SESSION_KEY,
+    )
+  })
+
+  it('rejects a session store key that mixes the base64 and base64url alphabets', () => {
+    // 43 chars carrying both `+` and `-`: it decodes to 32 bytes and used to slip through, but a
+    // real key is one alphabet, so a value spanning both is garbled and must be refused.
+    const mixed = `${'A'.repeat(41)}+-`
+    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: mixed }, 'must be a 256-bit key')
   })
 
   it('rejects SESSION_STORE_KEY and SESSION_STORE_KEY_FILE set together', () => {
@@ -193,7 +217,10 @@ describe('loadConfig', () => {
   })
 
   it('rejects an unreadable SESSION_STORE_KEY_FILE', () => {
-    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY_FILE: '/nonexistent/session.key' }, 'is not readable')
+    expectConfigError(
+      { ...REQUIRED, SESSION_STORE_KEY: undefined, SESSION_STORE_KEY_FILE: '/nonexistent/session.key' },
+      'is not readable',
+    )
   })
 
   it('rejects a key that is not 256 bits, and says how to generate one', () => {
@@ -202,10 +229,22 @@ describe('loadConfig', () => {
     expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: Buffer.alloc(16).toString('base64') }, 'must be a 256-bit key')
   })
 
-  // No default on purpose — the container entrypoint decides the location (see SPEC section 7),
-  // because guessing a directory that does not outlive a restart would silently sign devices out.
-  it('leaves the store path unset unless it is configured', () => {
-    expect(loadConfig(REQUIRED).sessionStorePath).toBeUndefined()
+  // Required from the /v2 auth model on (SPEC section 8): the store is what keeps devices signed
+  // in and holds their ABS credentials, so an unconfigured key has no degraded mode to fall back
+  // to — and the operator has to learn that at boot, not from the first user who cannot log in.
+  it('refuses to start without a session store key, and says how to generate one', () => {
+    expectConfigError(
+      { ...REQUIRED, SESSION_STORE_KEY: undefined },
+      'SESSION_STORE_KEY (or SESSION_STORE_KEY_FILE) is required',
+      'openssl rand -base64 32',
+    )
+  })
+
+  // Still no default for the path (SPEC section 7) — but unset is now a refusal rather than a
+  // silently absent store, because guessing a directory that does not outlive a container
+  // recreation would sign every device out on the next restart.
+  it('requires the store path and takes it verbatim', () => {
+    expectConfigError({ ...REQUIRED, SESSION_STORE_PATH: undefined }, 'SESSION_STORE_PATH is required')
     expect(loadConfig({ ...REQUIRED, SESSION_STORE_PATH: '/data/s.enc' }).sessionStorePath).toBe('/data/s.enc')
   })
 })
