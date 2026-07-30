@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { SessionStoreConflictError, SessionStoreCorruptError, SessionStoreIoError } from './errors.js'
+import {
+  SessionStoreConflictError,
+  SessionStoreCorruptError,
+  SessionStoreIoError,
+  SessionStoreWriteError,
+} from './errors.js'
 import { decodeStoreFile, encodeStoreFile, writeFileAtomic } from './sessionFile.js'
 
 // One device login's private Audiobookshelf session: the access token in use plus the refresh
@@ -213,7 +218,7 @@ export class SessionStore {
     await this.assertNobodyElseWrote()
     const revision = this.revision + 1
     const payload = Buffer.from(JSON.stringify({ revision, entries: [...this.entries.values()] }), 'utf8')
-    await writeFileAtomic(this.path, encodeStoreFile(this.key, payload))
+    await writeWithRetry(this.path, encodeStoreFile(this.key, payload))
     this.revision = revision
   }
 
@@ -238,6 +243,35 @@ export class SessionStore {
       throw new SessionStoreConflictError(this.path, this.revision, revision)
     }
   }
+}
+
+// A transient IO failure on the store write — a momentary ENOSPC/EIO blip — is retried a few times
+// before it is allowed to fail. It matters most right after a successful ABS refresh: losing that
+// write discards the pair Audiobookshelf just rotated to, mutate() rolls memory back to the token
+// ABS has already spent, and the next refresh presents it and earns a 401 that marks a live chain
+// dead — a silent sign-out from one disk hiccup. Only the write is retried: assertNobodyElseWrote
+// ran before it and the revision is bumped only on success, so a retry is idempotent and cannot
+// manufacture a conflict; a real conflict is not transient and must surface at once. Bounded tight
+// so the shutdown drain, which awaits the write tail (app.ts onClose), is never held up for long.
+const WRITE_ATTEMPTS = 3
+const WRITE_RETRY_BACKOFF_MS = 50
+
+async function writeWithRetry(path: string, bytes: Buffer): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await writeFileAtomic(path, bytes)
+      return
+    } catch (err) {
+      if (attempt >= WRITE_ATTEMPTS || !(err instanceof SessionStoreWriteError)) throw err
+      await delay(WRITE_RETRY_BACKOFF_MS * attempt)
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms).unref?.()
+  })
 }
 
 // Only the hash of the Ratatoskr token is ever stored (SPEC section 8), so even a full store +
