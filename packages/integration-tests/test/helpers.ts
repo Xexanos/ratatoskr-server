@@ -107,15 +107,49 @@ export interface StoredEntry {
 
 // Decrypt and parse a spawned server's encrypted session store off disk, using the very key the test
 // handed it (sessionStoreEnv). The only external window onto the keep-alive loop's work: a renewal
-// rotates the stored chain and advances its stamp, and a death marks the entry — neither shows on the
+// rotates the stored chain and advances its stamp, and a death marks the chain - neither shows on the
 // /v2 surface, so a process-level test can watch them only here. Reuses the server's own
 // decodeStoreFile (built dist) rather than re-implementing the AES-GCM envelope, so the two cannot
 // drift. Throws on a wrong key or a torn read; call it inside a poll so a read racing the atomic
 // rename simply retries.
+//
+// The on-disk shape is two lists (ADR-0004): one device row per login and one chain per ABS user,
+// shared by that user's devices. This joins them back into the per-device StoredEntry the tests read,
+// so a device carries its user's chain fields (chain, chainRefreshedAt, deadSince) the way the
+// server's own SessionEntry does.
 export function readSessionStore(path: string, keyBase64: string): StoredEntry[] {
   const plaintext = decodeStoreFile(Buffer.from(keyBase64, 'base64'), readFileSync(path), path)
-  const payload = JSON.parse(plaintext.toString('utf8')) as { entries?: StoredEntry[] }
-  return payload.entries ?? []
+  const payload = JSON.parse(plaintext.toString('utf8')) as { devices?: StoredDevice[]; chains?: StoredChain[] }
+  const chains = new Map((payload.chains ?? []).map((chain) => [chain.absUserId, chain]))
+  const entries: StoredEntry[] = []
+  for (const device of payload.devices ?? []) {
+    const chain = chains.get(device.absUserId)
+    if (chain === undefined) continue
+    entries.push({
+      tokenHash: device.tokenHash,
+      absUserId: device.absUserId,
+      absUsername: chain.absUsername,
+      chain: chain.chain,
+      createdAt: device.createdAt,
+      chainRefreshedAt: chain.chainRefreshedAt,
+      ...(chain.deadSince !== undefined ? { deadSince: chain.deadSince } : {}),
+    })
+  }
+  return entries
+}
+
+// The two on-disk rows readSessionStore joins (ADR-0004): a device references its user's chain by id.
+interface StoredDevice {
+  tokenHash: string
+  absUserId: string
+  createdAt: string
+}
+interface StoredChain {
+  absUserId: string
+  absUsername: string
+  chain: { accessToken: string; refreshToken: string }
+  chainRefreshedAt: string
+  deadSince?: string
 }
 
 // Sign in through the spawned server and return the opaque Ratatoskr token, the way a /v2 client does
