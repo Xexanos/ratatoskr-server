@@ -89,6 +89,69 @@ describe('a chain whose access token expired while nobody was listening', () => 
   })
 })
 
+describe('a live chain the upstream revoked before its access token neared expiry', () => {
+  // The token is nowhere near expiry, so usableChain hands back the stored chain without refreshing:
+  // the proxied ABS call is what discovers the revocation. Its 401 must not read as "signed out" —
+  // the token is known and its entry live — but as the lost-session 401 that asks for a password
+  // (#163, SPEC section 8), the same one a chain the sweep proved dead already answers.
+  it('answers UPSTREAM_SESSION_LOST rather than a generic unauthorized', async () => {
+    const listItems = vi.fn().mockRejectedValue(new AbsAuthError())
+    const refresh = vi.fn()
+    const store = await signedInWith({ accessToken: accessToken(3600), refreshToken: 'abs-refresh-1' })
+    const { app } = await appWith(store, { listItems, refresh })
+
+    const res = await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json().code).toBe('UPSTREAM_SESSION_LOST')
+    // The proxied call proved the chain dead: nothing was refreshed ahead of it, since the token was
+    // not near expiry — this is the "revoked before expiry" path, not the refresh-proved-dead one.
+    expect(refresh).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  // The entry is buried on the spot, not left live-looking until the next keep-alive sweep proves it:
+  // the next request is answered from the dead chain, without reaching upstream again.
+  it('marks the chain dead, so the next request needs no upstream call to say so', async () => {
+    const listItems = vi.fn().mockRejectedValue(new AbsAuthError())
+    const store = await signedInWith({ accessToken: accessToken(3600), refreshToken: 'abs-refresh-1' })
+    const { app } = await appWith(store, { listItems })
+
+    await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
+    expect(store.find(DEVICE_TOKEN)?.deadSince).toEqual(expect.any(String))
+
+    listItems.mockClear()
+    const res = await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json().code).toBe('UPSTREAM_SESSION_LOST')
+    expect(listItems).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  // The remapping is confined to a call made on a resolved device session. A wrong-password
+  // re-authentication is unauthenticated (login carries `security: []`, so no Ratatoskr token is
+  // resolved) even when the device offers its old bearer — its 401 is a genuine credential rejection
+  // and must not be mistaken for the live chain going dead.
+  it('leaves a bad-password re-login as a genuine unauthorized, sparing the still-live chain', async () => {
+    const login = vi.fn().mockRejectedValue(new AbsAuthError())
+    const store = await signedInWith({ accessToken: accessToken(3600), refreshToken: 'abs-refresh-1' })
+    const { app } = await appWith(store, { login })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v2/auth/login',
+      headers: V2_AUTH,
+      payload: { username: 'listener', password: 'wrong' },
+    })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json().code).toBe('unauthorized')
+    expect(store.find(DEVICE_TOKEN)?.deadSince).toBeUndefined()
+    await app.close()
+  })
+})
+
 describe('a chain the keep-alive loop has already marked dead', () => {
   async function deadDevice(): Promise<SessionStore> {
     const store = await signedInWith({ accessToken: accessToken(3600), refreshToken: 'abs-refresh-1' })

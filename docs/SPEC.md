@@ -354,6 +354,11 @@ re-login.
   token". The app reacts with a targeted password prompt; re-login creates a fresh chain
   and a **new** token and deletes the old entry (no in-place repair). This failure is rare
   and loud — the inverse of the old model's frequent silent re-logins.
+  The keep-alive loop is the usual place a chain is proved dead, but not the only one. A
+  session revoked upstream while its access token is not yet near expiry is refreshed by
+  nothing, so the revocation stays invisible until a proxied request is rejected. That 401,
+  for a token still naming a live entry, marks the chain dead on the request path and answers
+  the same `UPSTREAM_SESSION_LOST`, rather than falling through to a generic `unauthorized`.
   Mechanically, "deletes the old entry" is the client's doing: `POST /v2/auth/login` is
   unauthenticated, but reads a bearer when one is offered and signs that session out once
   the new one exists. So a re-authenticating device sends the token it is replacing and ends

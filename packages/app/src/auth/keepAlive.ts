@@ -191,6 +191,22 @@ export class ChainKeepAlive {
     }
   }
 
+  // The request path's counterpart to a refresh that returned `dead` (refreshOnce): a proxied
+  // Audiobookshelf call rejected the access token of a chain that was live and not near enough to
+  // expiry for usableChain to refresh it first — an upstream revocation ahead of expiry (#163).
+  // Bury the chain, exactly as a proven-dead refresh does, and raise the lost-session 401 the client
+  // acts on rather than the generic unauthorized the raw AbsAuthError maps to. Only api/app.ts calls
+  // this, and only after re-resolving the token to a still-live entry, so a chain that signed out or
+  // was already marked dead mid-request is left to its own mapping (SPEC section 8).
+  async loseChain(entry: SessionEntry): Promise<never> {
+    await this.store.markDead(entry)
+    this.logger?.warn(
+      { absUserId: entry.absUserId, absUsername: entry.absUsername },
+      'Audiobookshelf rejected a live access token on the request path; this device must sign in again',
+    )
+    throw new UpstreamSessionLostError()
+  }
+
   // Whether the access token is close enough to its expiry to renew now. A token this cannot read a
   // clock off is left alone: there is nothing to renew ahead of, so its eventual rejection surfaces
   // as the 401 it always did. Defensive only in practice — the server requires Audiobookshelf 2.26
