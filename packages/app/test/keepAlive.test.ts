@@ -134,7 +134,8 @@ describe('ChainKeepAlive.sweep', () => {
   })
 
   // The collision is per ABS user, not per sweep, so the gap has to hold against a renewal the
-  // request path just made too — and it is the sweep that waits for it, never the request.
+  // request path just made too. The sweep waits it out before enqueueing, so the queue stays empty
+  // for the request path in between (the spend-time wait inside the queue holds either way).
   it('leaves the same gap after an on-demand renewal as after one of its own', async () => {
     const abs = fakeAbs()
     const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
@@ -156,19 +157,22 @@ describe('ChainKeepAlive.sweep', () => {
     const SPACING = 200
     const abs = fakeAbs()
     await store.create('token-fresh', { ...LISTENER, chain: chainOf('fresh') }) // refreshed first, no wait
-    const stale = await store.create('token-stale', { ...LISTENER, chain: chainOf('stale', -60) }) // second, after the gap
+    await store.create('token-later', { ...LISTENER, chain: chainOf('later') }) // second, after the gap
     const keepAlive = build(abs, { chainSpacingMs: SPACING })
 
     const sweep = keepAlive.sweep()
-    // Halfway through the gap the sweep leaves before its second refresh, sneak an on-demand renewal
-    // of that same chain in (its access token is already expired, so usableChain renews it).
+    // Halfway through the gap the sweep leaves before its second refresh, sneak in an on-demand
+    // renewal of a chain the sweep never listed (its access token is already expired, so
+    // usableChain renews it, itself waiting out the rest of the gap first, issue #165).
     await new Promise((resolve) => setTimeout(resolve, SPACING / 2))
-    await keepAlive.usableChain(stale)
+    const watch = await store.create('token-watch', { ...LISTENER, chain: chainOf('watch', -60) })
+    await keepAlive.usableChain(watch)
     await sweep
 
-    // refreshedAt: [0] fresh (sweep), [1] stale (on-demand, mid-wait), [2] stale (sweep) — and [2]
+    // refreshedAt: [0] fresh (sweep), [1] watch (on-demand, mid-wait), [2] later (sweep), where [2]
     // must clear the gap from [1], not from the sweep's own first refresh.
     expect(abs.refresh).toHaveBeenCalledTimes(3)
+    expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(SPACING)
     expect(abs.refreshedAt[2]! - abs.refreshedAt[1]!).toBeGreaterThanOrEqual(SPACING)
   })
 
@@ -581,5 +585,36 @@ describe('ChainKeepAlive.usableChain', () => {
     await keepAlive.usableChain(entry)
 
     expect(abs.refresh).toHaveBeenCalledTimes(2)
+  })
+
+  // Issue #165: the queue serialized renewals but did not space them. Two devices of one user whose
+  // access tokens expire together (and the sweep itself correlates them, renewing a user's chains
+  // seconds apart every day) would refresh back-to-back inside one second: the ABS < 2.35.1
+  // identical-token collision (ADR-0001's amendment), from the request path this time.
+  it('spaces two on-demand renewals of different devices instead of running them back-to-back', async () => {
+    const abs = fakeAbs()
+    const phone = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const tablet = await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet', -60) })
+    const keepAlive = build(abs)
+
+    await Promise.all([keepAlive.usableChain(phone), keepAlive.usableChain(tablet)])
+
+    expect(abs.refresh).toHaveBeenCalledTimes(2)
+    expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(TEST_SPACING_MS)
+  })
+
+  // The other uncovered direction of the same hole: a sweep renewal has just spent a token when a
+  // request needs its own chain renewed. The gap holds at spend time whichever schedule went first.
+  it('waits out the gap a sweep renewal just started before spending on demand', async () => {
+    const abs = fakeAbs()
+    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    const keepAlive = build(abs)
+
+    await keepAlive.sweep()
+    const tablet = await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet', -60) })
+    await keepAlive.usableChain(tablet)
+
+    expect(abs.refresh).toHaveBeenCalledTimes(2)
+    expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(TEST_SPACING_MS)
   })
 })

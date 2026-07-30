@@ -15,11 +15,13 @@ export const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
 // constant of its own — cannot outgrow a shortened interval and swamp the thing it is spreading.
 const REFRESH_JITTER_FRACTION = 24
 
-// The gap between two chains within one sweep. Deliberately over a second: below Audiobookshelf
-// 2.35.1 the refresh token is minted from second-precision timestamps with no per-session claim, so
-// two refreshes of the same user inside one second come back with the *identical* token — and
-// ending one chain then ends the other (ADR-0001's amendment, advplyr/audiobookshelf#5253). A loop
-// that refreshed the whole store at once would be the most reliable way to trigger exactly that.
+// The gap between any two renewals, whichever schedules started them. Deliberately over a second:
+// below Audiobookshelf 2.35.1 the refresh token is minted from second-precision timestamps with no
+// per-session claim, so two refreshes of the same user inside one second come back with the
+// *identical* token — and ending one chain then ends the other (ADR-0001's amendment,
+// advplyr/audiobookshelf#5253). A loop that refreshed the whole store at once would be the most
+// reliable way to trigger exactly that; two devices renewing on demand together are the next most
+// reliable (issue #165), which is why the gap holds at spend time and not just within a sweep.
 export const CHAIN_SPACING_MS = 1500
 
 // How long before an access token expires the request path renews it. The token has to outlive the
@@ -77,8 +79,8 @@ export class ChainKeepAlive {
   private aborted = false
   // Whether a sweep is mid-walk, so the schedule can skip rather than stack (see scheduleSweep).
   private sweeping = false
-  // When the last renewal of any kind finished, so a sweep can leave the spacing gap after an
-  // on-demand refresh too (see refreshEach).
+  // When the last renewal of any kind finished, so every renewal, a sweep's or an on-demand one,
+  // leaves the spacing gap against the one before it (see refreshOnce).
   private lastRefreshAt = 0
   // One refresh per entry, shared by everyone who asks for it while it is in flight. Audiobookshelf
   // rotates the refresh token on use, so two concurrent refreshes of one chain would spend the same
@@ -171,7 +173,9 @@ export class ChainKeepAlive {
 
   // The chain to act with right now, for a request that has resolved this entry. Renews the access
   // token when it is at or past its margin, so the upstream call behind this one is not made with a
-  // credential that expired during a pause (SPEC section 8).
+  // credential that expired during a pause (SPEC section 8). A renewal may wait out up to
+  // chainSpacingMs against the one before it (issue #165, see refreshOnce); a chain that needs no
+  // renewal is handed back without ever touching the queue.
   //
   // Throws UpstreamSessionLostError — 401 `UPSTREAM_SESSION_LOST` — when the chain is dead, whether
   // it was already marked or this call is what proved it. An unreachable Audiobookshelf propagates
@@ -201,11 +205,11 @@ export class ChainKeepAlive {
     return Date.now() / 1000 >= exp - this.accessTokenMarginSeconds
   }
 
-  // Walk a batch, leaving the gap since the *last renewal of any kind* before each one — so the
-  // spacing holds against an on-demand refresh too, not just within this batch. The waiting is
-  // deliberately all on this side: a sweep is maintenance and can afford to yield, while a request
-  // queueing behind a whole store's worth of gaps would be a user watching a spinner for the sake
-  // of a collision on an Audiobookshelf older than 2.35.1.
+  // Walk a batch, leaving the gap since the *last renewal of any kind* before each one. refreshOnce
+  // holds the gap at spend time anyway; waiting here too, *outside* the queue, is what keeps the
+  // queue empty between the batch's items. A sweep that enqueued its whole store at once would put
+  // every request-path renewal behind a store's worth of gaps, a user watching a spinner for the
+  // sake of maintenance that could just as well have yielded.
   //
   // One chain's failure never stops the rest — an outage would otherwise cost every chain behind
   // the first one its renewal, which is the very thing a sweep exists to prevent.
@@ -263,6 +267,18 @@ export class ChainKeepAlive {
     const current = this.store.current(entry)
     if (current === undefined) return { kind: 'gone' }
     if (!isLive(current)) return { kind: 'dead' }
+
+    // Wait out what is left of the spacing gap before spending anything (issue #165). The sweep
+    // pre-pays this gap outside the queue, but an on-demand renewal enqueues without it — and two
+    // devices of one user whose access tokens expire together would refresh back-to-back inside one
+    // second, the very collision the gap exists to prevent. The wait lives *here*, in the serialized
+    // region, because outside the queue two waiters would wake together and run back-to-back anyway;
+    // inside it, nothing can advance the clock mid-wait, so one wait is provably enough. A request
+    // pays at most chainSpacingMs, and only when another renewal landed inside the gap, which is
+    // exactly the case that would otherwise collide. Waited after the early returns: a no-op that
+    // never touches ABS has nothing to space.
+    const gap = this.gapSinceLastRefresh()
+    if (gap > 0) await delay(gap)
 
     // Past the early returns this call spends a refresh token upstream, so this — not a `gone` or
     // already-dead no-op that touched ABS not at all — is what advances the spacing clock. Stamped
