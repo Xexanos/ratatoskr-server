@@ -203,7 +203,10 @@ class EnvReader {
     }
     const value = configured.value.trim()
     if (/^[0-9a-fA-F]{64}$/.test(value)) return Buffer.from(value, 'hex')
-    if (/^[A-Za-z0-9+/\-_]{43}=?$/.test(value)) {
+    // One alphabet or the other, never a mix: standard base64 (`+`/`/`) or base64url (`-`/`_`), but
+    // not both `+` and `-` in one value. Node decodes either under 'base64'; the point is to reject
+    // a garbled value that happens to fall in the union rather than accept 32 bytes of nonsense.
+    if (/^(?:[A-Za-z0-9+/]{43}|[A-Za-z0-9_-]{43})=?$/.test(value)) {
       const decoded = Buffer.from(value, 'base64')
       if (decoded.length === 32) return decoded
     }

@@ -196,6 +196,19 @@ describe('loadConfig', () => {
     )
   })
 
+  it('accepts a base64url-encoded session store key', () => {
+    expect(loadConfig({ ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY.toString('base64url') }).sessionStoreKey).toEqual(
+      SESSION_KEY,
+    )
+  })
+
+  it('rejects a session store key that mixes the base64 and base64url alphabets', () => {
+    // 43 chars carrying both `+` and `-`: it decodes to 32 bytes and used to slip through, but a
+    // real key is one alphabet, so a value spanning both is garbled and must be refused.
+    const mixed = `${'A'.repeat(41)}+-`
+    expectConfigError({ ...REQUIRED, SESSION_STORE_KEY: mixed }, 'must be a 256-bit key')
+  })
+
   it('rejects SESSION_STORE_KEY and SESSION_STORE_KEY_FILE set together', () => {
     expectConfigError(
       { ...REQUIRED, SESSION_STORE_KEY: SESSION_KEY_B64, SESSION_STORE_KEY_FILE: SESSION_KEY_FILE },
