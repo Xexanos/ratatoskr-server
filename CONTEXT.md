@@ -15,12 +15,23 @@ and is the sole holder of the ABS tokens behind it (ADR-0001).
 _Avoid_: access token, session token, API key — each names something else in this codebase.
 
 **Device session**:
-One sign-in, as the server holds it: a store entry pairing the Ratatoskr token's hash with that
-device's own **ABS chain** (an access/refresh pair, never shared with another device) and the
-identified ABS user. `AuthService` owns its lifecycle; `SessionStore` persists it.
+One sign-in, as the server holds it: a store entry pairing the Ratatoskr token's hash with the
+identified ABS user, whose **ABS chain** (an access/refresh pair) it rides. The chain is **one per
+ABS user, shared by every device of that user** (ADR-0004): the store keeps one entry per device but
+one chain per user, created with the user's first device and ended with the last. `AuthService` owns
+the entry's lifecycle; `SessionStore` persists both.
 _Avoid_: session, playback session — "session" alone means the one active playback in this
 codebase, which is a different thing entirely; qualify it (`device session`, `auth session`)
 whenever both could be meant.
+
+**Shared chain**:
+The single ABS access/refresh pair Ratatoskr holds per ABS user, that all of the user's device
+sessions run on (ADR-0004, issue #165). The keep-alive loop renews it once for the whole user, a
+sign-in reuses or heals it rather than opening a second, and a sign-out ends it upstream only when
+the user's last device goes. Replaces ADR-0001's per-device chain; the reason there is no
+inter-refresh spacing to guard the ABS < 2.35.1 identical-token collision (a user has exactly one
+chain, so two refreshes of one user cannot race).
+_Avoid_: per-device chain (superseded), chain spacing (the spacing is gone with the per-device chain).
 
 **Token guard**:
 The one place (`packages/app/src/api/tokenGuard.ts`) that enforces the invariant *every

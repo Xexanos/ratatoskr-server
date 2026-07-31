@@ -2,28 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError, AbsUpstreamError } from '../src/abs/errors.js'
 import { UnknownTokenError, UpstreamSessionLostError } from '../src/auth/errors.js'
-import { CHAIN_SPACING_MS, ChainKeepAlive } from '../src/auth/keepAlive.js'
-import type { SessionEntry, SessionStore } from '../src/auth/sessionStore.js'
+import { ChainKeepAlive } from '../src/auth/keepAlive.js'
+import type { SessionStore, UserChain } from '../src/auth/sessionStore.js'
 import { tempSessionStore } from './helpers/tempSessionStore.js'
 
-// The keep-alive loop (SPEC section 8 / ADR-0001): what makes a stored chain outlive any pause, and
-// what happens on the one path where it dies anyway. The store is the real one on a temp file — the
-// loop's whole job is to leave the right thing persisted, which a fake store would have to
-// re-implement to be worth anything.
+// The keep-alive loop (SPEC section 8 / ADR-0001, ADR-0004): what makes a stored chain outlive any
+// pause, and what happens on the one path where it dies anyway. The store is the real one on a temp
+// file - the loop's whole job is to leave the right thing persisted, which a fake store would have
+// to re-implement to be worth anything.
 //
-// Timers: the pacing and boot tests run on the real clock with a spacing measured in milliseconds,
-// because the store writes between two refreshes are real file I/O that no timer advance can
-// deterministically flush. Only the daily-schedule tests fake timers, and those sweep a single
-// chain, so nothing races. The boot tests fake `Date` alone — they need chains stamped days ago
-// while the spacing timer keeps ticking for real.
+// The unit the loop renews is the per-user chain (ADR-0004): one refresh serves every device of a
+// user. So tests that want two chains to sweep use two ABS users; two devices of one user share a
+// single chain, and the loop refreshes it once.
+//
+// Timers: the boot tests run on the real clock (the store writes between refreshes are real file I/O
+// no timer advance can deterministically flush) with the system clock faked, so chains can look days
+// old. Only the daily-schedule tests fake timers wholesale.
 
-const LISTENER = { absUserId: 'usr-1', absUsername: 'listener' }
+const USER1 = { absUserId: 'usr-1', absUsername: 'listener' }
+const USER2 = { absUserId: 'usr-2', absUsername: 'reader' }
 const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * HOUR_MS
-// Small enough that a paced sweep costs a test nothing, large enough that the gap between two
-// refreshes is measurable rather than lost in scheduling noise.
-const TEST_SPACING_MS = 20
-const OPTIONS = { chainSpacingMs: TEST_SPACING_MS, refreshIntervalMs: DAY_MS }
+const OPTIONS = { refreshIntervalMs: DAY_MS }
 
 // An access token shaped like the JWT Audiobookshelf issues, expiring `inSeconds` from now. Only
 // the `exp` claim is read (unverified), so nothing else has to be real.
@@ -43,7 +43,7 @@ function chainOf(name: string, expiresInSeconds = 12 * 60 * 60): { accessToken: 
 }
 
 // A client that hands back a fresh pair per refresh, so "the rotated pair was stored" is checkable,
-// and records when each call arrived, so the pacing between them is too.
+// and records when each call arrived.
 function fakeAbs(overrides: Partial<AbsClient> = {}): AbsClient & { refreshedAt: number[] } {
   let generation = 0
   const refreshedAt: number[] = []
@@ -55,11 +55,37 @@ function fakeAbs(overrides: Partial<AbsClient> = {}): AbsClient & { refreshedAt:
       return {
         accessToken: accessToken(12 * 60 * 60),
         refreshToken: `${refreshToken}-${generation}`,
-        user: { id: LISTENER.absUserId, username: LISTENER.absUsername },
+        user: USER1,
       }
     }),
     ...overrides,
   } as unknown as AbsClient & { refreshedAt: number[] }
+}
+
+// A client whose *first* refresh parks until released, so a sweep can be pinned mid-walk with one
+// chain refreshed and the next not yet reached - the window the old inter-refresh gap used to open,
+// now opened deliberately for the two tests that need it.
+function gatedAbs(): AbsClient & { refreshedAt: number[]; releaseFirst: () => void } {
+  let generation = 0
+  const refreshedAt: number[] = []
+  let releaseFirst = (): void => {}
+  let firstGate: Promise<void> | null = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  return {
+    refreshedAt,
+    releaseFirst: () => releaseFirst(),
+    refresh: vi.fn(async (refreshToken: string) => {
+      if (firstGate !== null) {
+        const gate = firstGate
+        firstGate = null
+        await gate
+      }
+      refreshedAt.push(performance.now())
+      generation += 1
+      return { accessToken: accessToken(12 * 60 * 60), refreshToken: `${refreshToken}-${generation}`, user: USER1 }
+    }) as unknown as AbsClient['refresh'],
+  } as unknown as AbsClient & { refreshedAt: number[]; releaseFirst: () => void }
 }
 
 function rejectingAbs(error: Error): AbsClient & { refreshedAt: number[] } {
@@ -86,25 +112,24 @@ function build(abs: AbsClient = fakeAbs(), options: Record<string, unknown> = {}
 
 // A store that answers from memory. Only the schedule tests use it, and they have to: they run on
 // faked timers, and a faked clock never turns the event loop the real store's file writes complete
-// on — the write would still be pending when the next sweep is due.
-function memoryStore(entries: SessionEntry[]): SessionStore {
+// on - the write would still be pending when the next sweep is due.
+function memoryStore(chains: UserChain[]): SessionStore {
   return {
-    list: () => entries,
-    current: (entry: SessionEntry) => entries.find((candidate) => candidate.tokenHash === entry.tokenHash),
+    listChains: () => chains,
+    currentChain: (absUserId: string) => chains.find((chain) => chain.absUserId === absUserId),
     updateChain: async () => true,
     markDead: async () => true,
   } as unknown as SessionStore
 }
 
-function entryOf(name: string): SessionEntry {
-  const now = new Date().toISOString()
-  return { ...LISTENER, tokenHash: `hash-${name}`, createdAt: now, chainRefreshedAt: now, chain: chainOf(name) }
+function chainFixture(user: { absUserId: string; absUsername: string }, name: string): UserChain {
+  return { ...user, chain: chainOf(name), chainRefreshedAt: new Date().toISOString() }
 }
 
 describe('ChainKeepAlive.sweep', () => {
   it('refreshes every stored chain and records the pair it got back', async () => {
     const abs = fakeAbs()
-    const phone = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    const phone = await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
 
     await build(abs).sweep()
 
@@ -113,87 +138,41 @@ describe('ChainKeepAlive.sweep', () => {
     expect(store.find('token-phone')?.chain.accessToken).not.toBe(phone.chain.accessToken)
   })
 
-  // ADR-0001's amendment: below Audiobookshelf 2.35.1, two refreshes of the same user inside one
-  // second come back with the identical refresh token, so refreshing the whole store at once would
-  // collide the chains it is supposed to be keeping alive.
-  it('spaces its refreshes instead of hitting ABS with the whole store at once', async () => {
+  // ADR-0004: one chain per user, so however many devices a user has, the sweep refreshes their
+  // chain exactly once - no two refreshes of one user, the collision the old spacing gap guarded.
+  it('refreshes a user’s shared chain once, however many devices ride it', async () => {
     const abs = fakeAbs()
-    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
-    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
+    await store.create('token-tablet', { ...USER1, chain: chainOf('tablet') })
 
     await build(abs).sweep()
 
-    expect(abs.refresh).toHaveBeenCalledTimes(2)
-    expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(TEST_SPACING_MS)
-  })
-
-  // The gap the shipped default has to clear, kept as its own assertion because the collision it
-  // avoids is a property of Audiobookshelf's second-precision timestamps, not of this code.
-  it('ships a gap wider than the second ABS below 2.35.1 rounds to', () => {
-    expect(CHAIN_SPACING_MS).toBeGreaterThan(1000)
-  })
-
-  // The collision is per ABS user, not per sweep, so the gap has to hold against a renewal the
-  // request path just made too — and it is the sweep that waits for it, never the request.
-  it('leaves the same gap after an on-demand renewal as after one of its own', async () => {
-    const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
-    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
-    const keepAlive = build(abs)
-
-    await keepAlive.usableChain(entry)
-    await keepAlive.sweep()
-
-    expect(abs.refresh).toHaveBeenCalledTimes(3) // on demand, then both chains in the sweep
-    expect(abs.refreshedAt[1]! - abs.refreshedAt[0]!).toBeGreaterThanOrEqual(TEST_SPACING_MS)
-  })
-
-  // The gap is measured from the last renewal of ANY schedule, including one that lands while the
-  // sweep is already waiting. Computed once, before the sleep, it would let a sweep fire in the same
-  // second as an on-demand renewal it never saw start — the ABS < 2.35.1 identical-token collision
-  // CHAIN_SPACING_MS exists to avoid. Re-checking after the wait is what closes that.
-  it('re-checks the spacing gap after waiting, so a renewal during the wait still spaces the sweep', async () => {
-    const SPACING = 200
-    const abs = fakeAbs()
-    await store.create('token-fresh', { ...LISTENER, chain: chainOf('fresh') }) // refreshed first, no wait
-    const stale = await store.create('token-stale', { ...LISTENER, chain: chainOf('stale', -60) }) // second, after the gap
-    const keepAlive = build(abs, { chainSpacingMs: SPACING })
-
-    const sweep = keepAlive.sweep()
-    // Halfway through the gap the sweep leaves before its second refresh, sneak an on-demand renewal
-    // of that same chain in (its access token is already expired, so usableChain renews it).
-    await new Promise((resolve) => setTimeout(resolve, SPACING / 2))
-    await keepAlive.usableChain(stale)
-    await sweep
-
-    // refreshedAt: [0] fresh (sweep), [1] stale (on-demand, mid-wait), [2] stale (sweep) — and [2]
-    // must clear the gap from [1], not from the sweep's own first refresh.
-    expect(abs.refresh).toHaveBeenCalledTimes(3)
-    expect(abs.refreshedAt[2]! - abs.refreshedAt[1]!).toBeGreaterThanOrEqual(SPACING)
+    expect(abs.refresh).toHaveBeenCalledTimes(1)
+    expect(store.find('token-phone')?.chain).toEqual(store.find('token-tablet')?.chain)
   })
 
   it('abandons a sweep in progress when it is stopped, so shutdown is not held up', async () => {
     const abs = fakeAbs()
-    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
-    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
+    await store.create('token-reader', { ...USER2, chain: chainOf('reader') })
     const keepAlive = build(abs)
 
     const sweep = keepAlive.sweep()
     keepAlive.stop()
     await sweep
 
-    // The one already in flight finishes — abandoning it mid-rotation would leave the store naming
-    // a token ABS has replaced — but the sweep goes no further.
+    // The one already in flight finishes - abandoning it mid-rotation would leave the store naming
+    // a token ABS has replaced - but the sweep goes no further.
     expect(abs.refresh).toHaveBeenCalledTimes(1)
   })
 
   // stop() halts the schedule, but the refresh already in flight has to land its store write before
   // the process exits: main.ts calls process.exit the instant app.close() settles, so a SIGTERM
   // between abs.refresh (token already rotated upstream) and the write would lose it, and the next
-  // boot — seeing the spent token — would mark a live chain dead. drained() is what onClose awaits.
+  // boot - seeing the spent token - would mark a live chain dead. drained() is what onClose awaits.
   it('drains the write already in flight before drained() resolves', async () => {
     const abs = fakeAbs()
-    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
     const keepAlive = build(abs)
 
     // Hold the store write open, so stop() lands while a rotation sits between ABS and disk.
@@ -203,10 +182,10 @@ describe('ChainKeepAlive.sweep', () => {
     })
     const realUpdate = store.updateChain.bind(store)
     const writeStarted = new Promise<void>((resolve) => {
-      vi.spyOn(store, 'updateChain').mockImplementation(async (entry, chain) => {
+      vi.spyOn(store, 'updateChain').mockImplementation(async (ref, chain) => {
         resolve()
         await writing
-        return realUpdate(entry, chain)
+        return realUpdate(ref, chain)
       })
     })
 
@@ -227,15 +206,15 @@ describe('ChainKeepAlive.sweep', () => {
     await sweep
 
     expect(drainedSettled).toBe(true)
-    // The rotated pair actually landed — not the pre-rotation token the next boot would reject.
+    // The rotated pair actually landed - not the pre-rotation token the next boot would reject.
     expect(store.find('token-phone')?.chain.refreshToken).toBe('refresh-phone-1')
   })
 
   // The rare-and-loud failure (SPEC section 8): ABS refused the refresh token, so the chain is gone
-  // for good — but the device's token is not, and keeping the entry is what lets its next request
-  // say so.
-  it('marks a chain dead, keeping the entry, when ABS refuses the refresh token', async () => {
-    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+  // for good - but the devices' tokens are not, and keeping the entries is what lets their next
+  // request say so.
+  it('marks a chain dead, keeping its devices, when ABS refuses the refresh token', async () => {
+    await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
 
     await build(rejectingAbs(new AbsAuthError())).sweep()
 
@@ -246,7 +225,7 @@ describe('ChainKeepAlive.sweep', () => {
   // The whole point of the refresh window: an unreachable ABS is a transient outage, not a death
   // sentence. Declaring the chain dead here would sign a device out over a rebooting container.
   it('leaves a chain alone when ABS is merely unreachable', async () => {
-    const phone = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    const phone = await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
 
     await expect(build(rejectingAbs(new AbsUpstreamError('no answer'))).sweep()).resolves.toBeUndefined()
 
@@ -260,57 +239,61 @@ describe('ChainKeepAlive.sweep', () => {
       refresh: vi.fn(async () => {
         calls += 1
         if (calls === 1) throw new AbsUpstreamError('no answer')
-        return { accessToken: accessToken(3600), refreshToken: 'rotated', user: LISTENER }
+        return { accessToken: accessToken(3600), refreshToken: 'rotated', user: USER1 }
       }) as unknown as AbsClient['refresh'],
     })
-    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
-    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
+    await store.create('token-reader', { ...USER2, chain: chainOf('reader') })
 
     await build(abs).sweep()
 
-    expect(store.find('token-tablet')?.chain.refreshToken).toBe('rotated')
+    expect(store.find('token-reader')?.chain.refreshToken).toBe('rotated')
   })
 
-  // The entries a sweep walks are frozen snapshots, and a paced sweep reaches the later ones long
-  // after listing them. If the request path renewed one in between, presenting the token ABS has
-  // since rotated away earns a 401 — and this loop would mark a live chain dead over its own
-  // bookkeeping. So the entry is re-read at the moment it is spent.
+  // The chains a sweep walks are frozen snapshots, and it can reach a later one long after listing
+  // it. If the request path renewed one in between, presenting the token ABS has since rotated away
+  // earns a 401 - and this loop would mark a live chain dead over its own bookkeeping. So the chain
+  // is re-read at the moment it is spent. The gated client pins the sweep on the first chain while
+  // the second is renewed elsewhere.
   it('re-reads a chain before spending it, so a renewal it did not make cannot kill it', async () => {
-    const abs = fakeAbs()
-    const phone = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
-    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+    const abs = gatedAbs()
+    const phone = await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
+    await store.create('token-reader', { ...USER2, chain: chainOf('reader') })
     const keepAlive = build(abs)
 
-    // Between listing and reaching it, the tablet's chain is renewed elsewhere.
     const sweep = keepAlive.sweep()
-    await store.updateChain(store.find('token-tablet')!, { accessToken: 'a', refreshToken: 'refresh-tablet-elsewhere' })
+    // The sweep is parked on the phone's refresh; renew the reader's chain out from under it.
+    await store.updateChain({ absUserId: USER2.absUserId }, { accessToken: 'a', refreshToken: 'refresh-reader-elsewhere' })
+    abs.releaseFirst()
     await sweep
 
-    expect(abs.refresh).toHaveBeenCalledWith('refresh-tablet-elsewhere')
-    expect(abs.refresh).not.toHaveBeenCalledWith('refresh-tablet')
-    expect(store.find('token-tablet')?.deadSince).toBeUndefined()
+    expect(abs.refresh).toHaveBeenCalledWith('refresh-reader-elsewhere')
+    expect(abs.refresh).not.toHaveBeenCalledWith('refresh-reader')
+    expect(store.find('token-reader')?.deadSince).toBeUndefined()
     expect(phone).toBeDefined()
   })
 
-  it('skips a chain whose device signed out after the sweep listed it', async () => {
-    const abs = fakeAbs()
-    await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
-    await store.create('token-tablet', { ...LISTENER, chain: chainOf('tablet') })
+  it('skips a chain whose last device signed out after the sweep listed it', async () => {
+    const abs = gatedAbs()
+    await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
+    await store.create('token-reader', { ...USER2, chain: chainOf('reader') })
     const keepAlive = build(abs)
 
     const sweep = keepAlive.sweep()
-    await store.delete('token-tablet')
+    // Parked on the phone's refresh; the reader signs out before the sweep reaches its chain.
+    await store.delete('token-reader')
+    abs.releaseFirst()
     await sweep
 
-    expect(abs.refresh).not.toHaveBeenCalledWith('refresh-tablet')
+    expect(abs.refresh).not.toHaveBeenCalledWith('refresh-reader')
   })
 
   // Death is terminal (SPEC section 8: no in-place repair). Refreshing a dead chain could only
-  // fail, and succeeding would be worse — it would quietly revive a session whose device has
+  // fail, and succeeding would be worse - it would quietly revive a session whose devices have
   // already been told to re-authenticate.
   it('skips chains it has already marked dead', async () => {
     const abs = fakeAbs()
-    const phone = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    const phone = await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
     await store.markDead(phone)
 
     await build(abs).sweep()
@@ -327,7 +310,7 @@ describe('ChainKeepAlive.start', () => {
   it('sweeps once a day, jittered so the fleet does not land on ABS together', async () => {
     const abs = fakeAbs()
     // Halfway through the jitter window: the sweep is due at a day and half an hour, not at a day.
-    const keepAlive = build(abs, { random: () => 0.5 }, memoryStore([entryOf('phone')]))
+    const keepAlive = build(abs, { random: () => 0.5 }, memoryStore([chainFixture(USER1, 'phone')]))
     keepAlive.start()
 
     await vi.advanceTimersByTimeAsync(DAY_MS)
@@ -344,7 +327,7 @@ describe('ChainKeepAlive.start', () => {
   // wait out an hour of spread on top of its five seconds.
   it('scales the jitter to the interval, so a shortened one is not swamped by it', async () => {
     const abs = fakeAbs()
-    const keepAlive = build(abs, { refreshIntervalMs: 5000, random: () => 1 }, memoryStore([entryOf('phone')]))
+    const keepAlive = build(abs, { refreshIntervalMs: 5000, random: () => 1 }, memoryStore([chainFixture(USER1, 'phone')]))
     keepAlive.start()
 
     // A twenty-fourth of five seconds is about 208 ms, so the whole window is inside this step.
@@ -354,21 +337,27 @@ describe('ChainKeepAlive.start', () => {
     keepAlive.stop()
   })
 
-  // At a shortened interval a sweep can still be walking when the next is due — the normal case for
+  // At a shortened interval a sweep can still be walking when the next is due - the normal case for
   // the test deployments the knob exists for. Starting a second walk beside the first would queue
-  // every chain twice over, and the pile-up grows with each interval.
+  // every chain twice over. A refresh that takes a beat (here a faked delay) is what keeps the first
+  // sweep walking across the next due time.
   it('skips a scheduled sweep while the previous one is still walking', async () => {
-    const abs = fakeAbs()
     const logger = { info: vi.fn(), warn: vi.fn() }
-    const store = memoryStore([entryOf('phone'), entryOf('tablet'), entryOf('watch')])
-    // Chains spaced wider than the interval: the sweep due at 2000 lands mid-walk of the one that
-    // started at 1000 (chains at 1000, 1900, 2800).
-    const keepAlive = build(abs, { refreshIntervalMs: 1000, chainSpacingMs: 900, random: () => 0, logger }, store)
+    const abs = fakeAbs({
+      refresh: vi.fn(async (refreshToken: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        return { accessToken: accessToken(3600), refreshToken: `${refreshToken}-x`, user: USER1 }
+      }) as unknown as AbsClient['refresh'],
+    })
+    const store = memoryStore([chainFixture(USER1, 'phone'), chainFixture(USER2, 'reader'), chainFixture({ absUserId: 'usr-3', absUsername: 'third' }, 'watch')])
+    // Interval 1000; three refreshes of ~400 ms each keep the sweep that starts at 1000 walking past
+    // the next due time at 2000.
+    const keepAlive = build(abs, { refreshIntervalMs: 1000, random: () => 0, logger }, store)
     keepAlive.start()
 
     await vi.advanceTimersByTimeAsync(2950)
 
-    // One walk's worth of chains, and the skip said so — a second walk beside the first would have
+    // One walk's worth of chains, and the skip said so - a second walk beside the first would have
     // queued all three again, and the pile-up would grow with every interval.
     expect(abs.refresh).toHaveBeenCalledTimes(3)
     expect(logger.info).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('skipping'))
@@ -377,7 +366,7 @@ describe('ChainKeepAlive.start', () => {
 
   it('keeps sweeping day after day', async () => {
     const abs = fakeAbs()
-    const keepAlive = build(abs, { random: () => 0 }, memoryStore([entryOf('phone')]))
+    const keepAlive = build(abs, { random: () => 0 }, memoryStore([chainFixture(USER1, 'phone')]))
     keepAlive.start()
 
     await vi.advanceTimersByTimeAsync(DAY_MS)
@@ -389,7 +378,7 @@ describe('ChainKeepAlive.start', () => {
 
   it('stops sweeping once it is stopped, so a closed app leaves no loop behind', async () => {
     const abs = fakeAbs()
-    const keepAlive = build(abs, { random: () => 0 }, memoryStore([entryOf('phone')]))
+    const keepAlive = build(abs, { random: () => 0 }, memoryStore([chainFixture(USER1, 'phone')]))
     keepAlive.start()
     await vi.advanceTimersByTimeAsync(DAY_MS)
 
@@ -401,7 +390,7 @@ describe('ChainKeepAlive.start', () => {
 
   it('arms the loop once, however often it is started', async () => {
     const abs = fakeAbs()
-    const keepAlive = build(abs, { random: () => 0 }, memoryStore([entryOf('phone')]))
+    const keepAlive = build(abs, { random: () => 0 }, memoryStore([chainFixture(USER1, 'phone')]))
     keepAlive.start()
     keepAlive.start()
 
@@ -413,8 +402,8 @@ describe('ChainKeepAlive.start', () => {
 })
 
 describe('ChainKeepAlive refresh-on-boot', () => {
-  // Only the clock is faked here: the chains have to look days old, while the spacing between two
-  // refreshes stays a real timer (see the note at the top).
+  // Only the clock is faked here: the chains have to look days old, while the refreshes stay real
+  // timers (see the note at the top).
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] })
   })
@@ -423,9 +412,9 @@ describe('ChainKeepAlive refresh-on-boot', () => {
   // closest to Audiobookshelf's refresh-window edge (SPEC section 8).
   it('renews the chains that went stale while the server was down, and only those', async () => {
     const abs = fakeAbs()
-    const fresh = await store.create('token-fresh', { ...LISTENER, chain: chainOf('fresh') })
-    await store.create('token-stale', { ...LISTENER, chain: chainOf('stale') })
-    // Two days on, one device's chain was renewed just before the stop and the other's was not.
+    const fresh = await store.create('token-fresh', { ...USER1, chain: chainOf('fresh') })
+    await store.create('token-stale', { ...USER2, chain: chainOf('stale') })
+    // Two days on, one user's chain was renewed just before the stop and the other's was not.
     vi.setSystemTime(Date.now() + 2 * DAY_MS)
     await store.updateChain(fresh, { ...fresh.chain })
 
@@ -441,9 +430,9 @@ describe('ChainKeepAlive refresh-on-boot', () => {
   // order is what decides which of them survive a sweep that only gets halfway.
   it('renews the stalest chain first', async () => {
     const abs = fakeAbs()
-    await store.create('token-older', { ...LISTENER, chain: chainOf('older') })
+    await store.create('token-older', { ...USER1, chain: chainOf('older') })
     vi.setSystemTime(Date.now() + HOUR_MS)
-    await store.create('token-newer', { ...LISTENER, chain: chainOf('newer') })
+    await store.create('token-newer', { ...USER2, chain: chainOf('newer') })
     vi.setSystemTime(Date.now() + 3 * DAY_MS)
 
     const keepAlive = build(abs)
@@ -456,7 +445,7 @@ describe('ChainKeepAlive refresh-on-boot', () => {
 
   it('never lets a boot refresh failure escape into startup', async () => {
     const abs = rejectingAbs(new AbsUpstreamError('no answer'))
-    await store.create('token-stale', { ...LISTENER, chain: chainOf('stale') })
+    await store.create('token-stale', { ...USER1, chain: chainOf('stale') })
     vi.setSystemTime(Date.now() + 2 * DAY_MS)
 
     const keepAlive = build(abs)
@@ -472,17 +461,17 @@ describe('ChainKeepAlive refresh-on-boot', () => {
 describe('ChainKeepAlive.usableChain', () => {
   it('hands back the stored chain while its access token still has life in it', async () => {
     const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', 6 * 60 * 60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', 6 * 60 * 60) })
 
     await expect(build(abs).usableChain(entry)).resolves.toEqual(entry.chain)
     expect(abs.refresh).not.toHaveBeenCalled()
   })
 
   // On-demand refresh (SPEC section 8): the daily sweep keeps the chain alive, but the access token
-  // it leaves behind expires long before the next sweep — so the request path renews it itself.
+  // it leaves behind expires long before the next sweep - so the request path renews it itself.
   it('renews an access token that has run out mid-use, and returns the new one', async () => {
     const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
 
     const chain = await build(abs).usableChain(entry)
 
@@ -493,7 +482,7 @@ describe('ChainKeepAlive.usableChain', () => {
 
   it('renews just before expiry rather than waiting for the first failure', async () => {
     const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', 30) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', 30) })
 
     await build(abs, { accessTokenMarginSeconds: 60 }).usableChain(entry)
 
@@ -505,7 +494,7 @@ describe('ChainKeepAlive.usableChain', () => {
   it('leaves a token it cannot date alone', async () => {
     const abs = fakeAbs()
     const entry = await store.create('token-phone', {
-      ...LISTENER,
+      ...USER1,
       chain: { accessToken: 'not-a-jwt', refreshToken: 'refresh-phone' },
     })
 
@@ -514,14 +503,14 @@ describe('ChainKeepAlive.usableChain', () => {
   })
 
   it('refuses a dead chain with the error that asks for a password', async () => {
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone') })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone') })
     await store.markDead(entry)
 
     await expect(build().usableChain(store.find('token-phone')!)).rejects.toBeInstanceOf(UpstreamSessionLostError)
   })
 
   it('refuses the chain the on-demand refresh just proved dead', async () => {
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
 
     await expect(build(rejectingAbs(new AbsAuthError())).usableChain(entry)).rejects.toBeInstanceOf(
       UpstreamSessionLostError,
@@ -529,14 +518,50 @@ describe('ChainKeepAlive.usableChain', () => {
     expect(store.find('token-phone')?.deadSince).toEqual(expect.any(String))
   })
 
-  // Signing out mid-request is not a lost upstream session, it is a token that no longer exists —
+  // The identity guard (keepAlive.refreshOnce, store.markDead): a 401 from a slow refresh proves the
+  // token it *spent* dead, not whatever chain the user holds when the rejection finally lands. If the
+  // chain was healed or rotated in flight, burying it would kill a live chain over stale news. The
+  // guard confines the death to the token it was proven against, so the healed chain survives.
+  it('does not bury a chain that was rotated while a rejected refresh was in flight', async () => {
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
+    let release = (): void => {}
+    let markEntered = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const abs = fakeAbs({
+      refresh: vi.fn(async () => {
+        markEntered() // the refresh has read the chain and captured the token it spends
+        await gate
+        throw new AbsAuthError()
+      }) as unknown as AbsClient['refresh'],
+    })
+    const keepAlive = build(abs)
+
+    const pending = keepAlive.usableChain(entry) // spends 'refresh-phone', then parks at the gate
+    await entered
+    // The chain is rotated out from under the parked refresh (stands in for a heal / another renewal).
+    await store.updateChain({ absUserId: USER1.absUserId }, { accessToken: 'a2', refreshToken: 'refresh-rotated' })
+    release()
+
+    // The one racing request still fails, but the rotated chain is left live - not buried by the
+    // stale 401 for the token that had already been replaced.
+    await expect(pending).rejects.toBeInstanceOf(UpstreamSessionLostError)
+    expect(store.find('token-phone')?.deadSince).toBeUndefined()
+    expect(store.find('token-phone')?.chain.refreshToken).toBe('refresh-rotated')
+  })
+
+  // Signing out mid-request is not a lost upstream session, it is a token that no longer exists -
   // and answering "your password, please" would send a device that just signed out to a prompt
   // instead of the sign-in screen.
   it('reports a device that signed out mid-request as an unknown token', async () => {
     const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
     // The entry a guard resolved is a snapshot; the device can sign out before the renewal it
-    // triggered gets to spend anything.
+    // triggered gets to spend anything - and as the user's last device, that takes the chain too.
     await store.delete('token-phone')
 
     await expect(build(abs).usableChain(entry)).rejects.toBeInstanceOf(UnknownTokenError)
@@ -546,7 +571,7 @@ describe('ChainKeepAlive.usableChain', () => {
   // An outage is not a lost session: the caller gets the upstream error (502), and the chain is
   // still there to renew once ABS is back.
   it('reports an unreachable ABS as an outage, not as a lost session', async () => {
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
 
     await expect(build(rejectingAbs(new AbsUpstreamError('no answer'))).usableChain(entry)).rejects.toBeInstanceOf(
       AbsUpstreamError,
@@ -555,10 +580,10 @@ describe('ChainKeepAlive.usableChain', () => {
   })
 
   // Audiobookshelf rotates the refresh token on use, so spending one twice is how a live chain gets
-  // killed by its own keep-alive. Concurrent requests for one device must share a single refresh.
+  // killed by its own keep-alive. Concurrent requests for one chain must share a single refresh.
   it('spends one refresh token even when several requests need the chain at once', async () => {
     const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
     const keepAlive = build(abs)
 
     const chains = await Promise.all([
@@ -572,9 +597,23 @@ describe('ChainKeepAlive.usableChain', () => {
     expect(chains[2]).toEqual(chains[0])
   })
 
+  // The same single-refresh guarantee across two *devices* of one user: they share a chain, so the
+  // in-flight dedup is keyed by user, and one refresh serves both (ADR-0004).
+  it('spends one refresh token when two devices of a user need the chain at once', async () => {
+    const abs = fakeAbs()
+    const phone = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
+    const tablet = await store.create('token-tablet', { ...USER1, chain: chainOf('tablet', -60) })
+    const keepAlive = build(abs)
+
+    const [a, b] = await Promise.all([keepAlive.usableChain(phone), keepAlive.usableChain(tablet)])
+
+    expect(abs.refresh).toHaveBeenCalledTimes(1)
+    expect(a).toEqual(b)
+  })
+
   it('lets the next request refresh again once the shared one has settled', async () => {
     const abs = fakeAbs()
-    const entry = await store.create('token-phone', { ...LISTENER, chain: chainOf('phone', -60) })
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
     const keepAlive = build(abs)
 
     await keepAlive.usableChain(entry)

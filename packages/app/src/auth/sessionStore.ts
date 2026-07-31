@@ -8,50 +8,71 @@ import {
 } from './errors.js'
 import { decodeStoreFile, encodeStoreFile, healStoreFileMode, writeFileAtomic } from './sessionFile.js'
 
-// One device login's private Audiobookshelf session: the access token in use plus the refresh
-// token that continues its chain. Never shared between devices (SPEC section 8) — two consumers
-// of one rotating chain is the exact failure mode ADR-0001 removes.
+// One Audiobookshelf session: the access token in use plus the refresh token that continues its
+// chain. **Shared by every device login of one ABS user** (SPEC section 8, ADR-0004): the server
+// keeps exactly one chain per user, so two devices whose access tokens expire together can never
+// trigger two refreshes in the same second - the ABS < 2.35.1 identical-refresh-token collision
+// (advplyr/audiobookshelf#5253) that a per-device chain left open.
 export interface AbsChain {
   accessToken: string
   refreshToken: string
 }
 
-// What a sign-in supplies: the identified ABS user plus the chain created for this device. The ABS
-// username is kept because a renamed account is one of the two ways a chain dies (SPEC section 8),
-// and the keep-alive loop reports the death by the name the operator knows the account under — the
-// user id alone would leave them matching opaque ids by hand. Identity itself is the id: a rename
-// leaves this field stale until the device signs in again, which is harmless, because nothing
-// branches on it.
+// What a sign-in supplies: the identified ABS user plus the chain that sign-in minted. The chain is
+// installed only when the user has none yet, or heals a dead one; a user who already has a live
+// chain keeps it, and the freshly minted one is a throwaway the caller ends upstream (authService).
 export interface SessionRecord {
   absUserId: string
   absUsername: string
   chain: AbsChain
 }
 
-// A stored device login. Instances are frozen: every change goes through the store, so the file
-// on disk can never lag behind what callers see.
-export interface SessionEntry extends SessionRecord {
-  tokenHash: string
-  createdAt: string
-  // When this chain was last minted or refreshed — what the keep-alive loop orders its boot sweep
-  // by, so the chains nearest Audiobookshelf's refresh-window edge are renewed first (SPEC
-  // section 8). Optional so a file written before the field existed stays readable; read it through
-  // chainRefreshedAt(), which supplies the answer for those.
-  chainRefreshedAt?: string
-  // Set when a refresh proved the chain gone (SPEC section 8). The entry deliberately survives:
-  // the token is still the one this device holds, and keeping it is what lets the next request
-  // answer 401 `UPSTREAM_SESSION_LOST` — "re-authenticate" — instead of a generic unknown-token
-  // 401 that reads as "signed out". Terminal: a dead chain is never refreshed and never repaired
-  // in place, only replaced by a fresh sign-in.
+// The per-user shared chain, as the store holds it: the ABS user it belongs to, the chain itself,
+// when it was last minted or refreshed, and whether it has died. This is the unit the keep-alive
+// loop renews - one refresh per user, however many devices ride the chain (keepAlive.ts).
+export interface UserChain {
+  absUserId: string
+  // The ABS username, kept for the operator-facing death report and refreshed whenever a sign-in
+  // installs a fresh chain (a first sign-in, or a heal); a sign-in onto a live chain leaves it as it
+  // was. A rename can therefore outlive any number of re-logins until the chain is replaced, which
+  // is harmless - nothing branches on it.
+  absUsername: string
+  chain: AbsChain
+  // When this chain was last minted or refreshed, as an ISO string - what the boot pass orders by,
+  // stalest first, so the chains nearest Audiobookshelf's refresh-window edge are renewed first.
+  chainRefreshedAt: string
+  // Set when a refresh proved the chain gone (SPEC section 8). Terminal: a dead chain is never
+  // refreshed and never repaired in place. It is revived only by a sign-in of the same user, which
+  // replaces it with a fresh chain and thereby heals every device that shares it at once.
   deadSince?: string
 }
 
-// When the entry's chain was last minted or refreshed, as epoch milliseconds. An entry from before
-// the stamp existed is dated from its creation, which is when its chain was minted; an unparseable
-// stamp reads as the epoch, so a damaged entry is refreshed first rather than skipped forever.
-export function chainRefreshedAt(entry: SessionEntry): number {
-  const stamp = Date.parse(entry.chainRefreshedAt ?? entry.createdAt)
+// A stored device login joined with its user's chain, as callers see it. Instances are frozen:
+// every change goes through the store, so the file on disk can never lag behind what callers hold.
+// The chain-level fields (chain, chainRefreshedAt, deadSince, absUsername) are the shared chain's;
+// several entries of one user carry the same ones.
+export interface SessionEntry extends SessionRecord {
+  tokenHash: string
+  createdAt: string
+  chainRefreshedAt?: string
+  deadSince?: string
+}
+
+// When an entry's (or chain's) chain was last minted or refreshed, as epoch milliseconds. A chain
+// always carries its stamp; an entry from a store written before the field existed is dated from
+// its creation, which is when its chain was minted. An unparseable stamp reads as the epoch, so a
+// damaged record is refreshed first rather than skipped forever.
+export function chainRefreshedAt(record: { chainRefreshedAt?: string; createdAt?: string }): number {
+  const stamp = Date.parse(record.chainRefreshedAt ?? record.createdAt ?? '')
   return Number.isNaN(stamp) ? 0 : stamp
+}
+
+// One device login: the token hash, the ABS user it belongs to, and when it signed in. The chain
+// it rides lives once per user in the chains map, not here - that is the whole point of ADR-0004.
+interface DeviceRow {
+  tokenHash: string
+  absUserId: string
+  createdAt: string
 }
 
 export interface SessionStoreOptions {
@@ -62,22 +83,28 @@ export interface SessionStoreOptions {
   onWarning?: (message: string) => void
 }
 
-// The persisted half of the Ratatoskr-native session model (SPEC section 8): one entry per
-// device login, held in memory for the token guard's in-process lookup and mirrored into a
-// single AES-256-GCM file so "signed in until explicit sign-out" survives a server restart.
+// The persisted half of the Ratatoskr-native session model (SPEC section 8): device logins and the
+// per-user ABS chains they ride, held in memory for the token guard's in-process lookup and mirrored
+// into a single AES-256-GCM file so "signed in until explicit sign-out" survives a server restart.
+//
+// **One chain per ABS user, shared by every device of that user** (ADR-0004, superseding ADR-0001's
+// per-device chain). A device row references its user's chain by `absUserId`; the chain is created
+// with the user's first device and removed with its last. This is what lets the keep-alive loop
+// refresh a user's chain exactly once, and a sign-in heal every device of a user at one stroke.
 //
 // Scope guard (SPEC section 11): this store persists credentials, not domain state. Progress and
-// user data live in Audiobookshelf only — do not grow this into a database.
+// user data live in Audiobookshelf only - do not grow this into a database.
 //
 // Single writer per file, by deployment (one container per volume, compose.yaml) rather than by
 // lock. Mutations within a process are serialized here and each write replaces the whole file
-// atomically, so nothing can tear. A second process is not coordinated with — each holds its own
-// copy of every entry and writes all of them — so it is instead *detected*: every write checks the
+// atomically, so nothing can tear. A second process is not coordinated with - each holds its own
+// copy of every row and writes all of them - so it is instead *detected*: every write checks the
 // revision on disk against the one this server left there and refuses on a mismatch, turning the
 // silent loss of another instance's sessions into a loud SessionStoreConflictError. Detection, not
 // coexistence: a conflict means a misconfiguration to fix, and merging would hide it.
 export class SessionStore {
-  private entries: Map<string, SessionEntry>
+  private devices: Map<string, DeviceRow>
+  private chains: Map<string, UserChain>
   // Tail of the write chain, so concurrent mutations queue instead of racing the same file.
   private writes: Promise<unknown> = Promise.resolve()
   // Revision this server last saw in the file, bumped on every successful write. Zero means the
@@ -88,9 +115,10 @@ export class SessionStore {
   private constructor(
     private readonly path: string,
     private readonly key: Buffer,
-    loaded: { entries: Map<string, SessionEntry>; revision: number },
+    loaded: { devices: Map<string, DeviceRow>; chains: Map<string, UserChain>; revision: number },
   ) {
-    this.entries = loaded.entries
+    this.devices = loaded.devices
+    this.chains = loaded.chains
     this.revision = loaded.revision
   }
 
@@ -102,7 +130,7 @@ export class SessionStore {
     if (file !== undefined) await healStoreFileMode(path, onWarning)
     const loaded =
       file === undefined
-        ? { entries: new Map<string, SessionEntry>(), revision: 0 }
+        ? { devices: new Map<string, DeviceRow>(), chains: new Map<string, UserChain>(), revision: 0 }
         : parsePayload(decodeStoreFile(key, file, path), path)
     const store = new SessionStore(path, key, loaded)
     // Create the file right away when it is absent, so an unwritable volume or a broken mount
@@ -113,99 +141,179 @@ export class SessionStore {
   }
 
   // The token guard's hot path: a synchronous in-process lookup, no ABS roundtrip (SPEC
-  // section 8). Takes the token itself — hashing is the store's business (see hashToken).
+  // section 8). Takes the token itself - hashing is the store's business (see hashToken). Joins the
+  // device with its user's chain; undefined if the token names no device (a device with no chain is
+  // a corruption the parse rules out, so it too reads as absent rather than throwing here).
   find(token: string): SessionEntry | undefined {
-    return this.entries.get(hashToken(token))
+    const device = this.devices.get(hashToken(token))
+    if (device === undefined) return undefined
+    const chain = this.chains.get(device.absUserId)
+    return chain === undefined ? undefined : joinEntry(device, chain)
   }
 
+  // One joined entry per device login (several of one user share their chain's fields).
   list(): readonly SessionEntry[] {
-    return [...this.entries.values()]
+    const joined: SessionEntry[] = []
+    for (const device of this.devices.values()) {
+      const chain = this.chains.get(device.absUserId)
+      if (chain !== undefined) joined.push(joinEntry(device, chain))
+    }
+    return joined
   }
 
-  // The entry as it stands now, for a caller holding one from an earlier list()/find(). Entries are
-  // frozen snapshots, so anything that acts on a *held* one — the keep-alive sweep, which may reach
-  // an entry minutes after listing it — has to re-read first: acting on a chain that has since been
-  // refreshed would spend a token Audiobookshelf already rotated away. Undefined means the device
-  // signed out in the meantime.
-  current(entry: SessionEntry): SessionEntry | undefined {
-    return this.entries.get(entry.tokenHash)
+  // Every stored chain, one per ABS user - the unit the keep-alive loop sweeps and boot-orders.
+  listChains(): readonly UserChain[] {
+    return [...this.chains.values()]
   }
 
-  async create(token: string, record: SessionRecord): Promise<SessionEntry> {
-    const createdAt = new Date().toISOString()
-    const entry = freezeEntry({
-      tokenHash: hashToken(token),
-      absUserId: record.absUserId,
-      absUsername: record.absUsername,
-      chain: { ...record.chain },
-      createdAt,
-      chainRefreshedAt: createdAt,
-    })
-    await this.mutate((entries) => {
-      entries.set(entry.tokenHash, entry)
+  // The chain for a user as it stands now, for the keep-alive loop holding one from an earlier
+  // listChains(). Chains are frozen snapshots, so anything that acts on a *held* one - the sweep,
+  // which may reach a chain minutes after listing it - has to re-read first: acting on a chain that
+  // has since been refreshed would spend a token Audiobookshelf already rotated away. Undefined
+  // means the user's last device signed out in the meantime.
+  currentChain(absUserId: string): UserChain | undefined {
+    return this.chains.get(absUserId)
+  }
+
+  // Add a device login for a user, and settle its chain (ADR-0004). Returns the joined entry and
+  // whether the *supplied* chain became the user's chain:
+  //   - the user had no chain           → install the supplied one          (usedFreshChain: true)
+  //   - the user's chain had died       → replace it, healing every device  (usedFreshChain: true)
+  //   - the user already had a live one → keep it, ignore the supplied one  (usedFreshChain: false)
+  // The last case is why the caller must end the supplied chain upstream when this returns false: it
+  // was minted only to prove the password and is now a throwaway ABS session (authService.signIn).
+  async attach(token: string, record: SessionRecord): Promise<{ entry: SessionEntry; usedFreshChain: boolean }> {
+    const tokenHash = hashToken(token)
+    const now = new Date().toISOString()
+    let usedFreshChain = false
+    await this.mutate((state) => {
+      state.devices.set(tokenHash, freezeDevice({ tokenHash, absUserId: record.absUserId, createdAt: now }))
+      const existing = state.chains.get(record.absUserId)
+      if (existing === undefined || existing.deadSince !== undefined) {
+        // Install the freshly minted chain: the user had none, or theirs had died and this heals it.
+        // On a heal (existing was dead), retire the user's *other* device rows first: their tokens
+        // rode the chain that just died, and reviving them would re-arm a token an upstream
+        // revocation or a password change was meant to kill (the pre-ADR-0004 remediation this
+        // restores). Each such device re-authenticates once, exactly ADR-0001's accepted post-outage
+        // UX. A fresh install has no siblings, so this branch does nothing there.
+        if (existing !== undefined) {
+          for (const [hash, device] of state.devices) {
+            if (device.absUserId === record.absUserId && hash !== tokenHash) state.devices.delete(hash)
+          }
+        }
+        state.chains.set(
+          record.absUserId,
+          freezeChain({
+            absUserId: record.absUserId,
+            absUsername: record.absUsername,
+            chain: { ...record.chain },
+            chainRefreshedAt: now,
+          }),
+        )
+        usedFreshChain = true
+      }
       return true
     })
-    return entry
+    const entry = this.find(token)
+    // find() re-reads the live maps after the write landed; the device was just written, so it is
+    // there unless a concurrent sign-out of the same token raced this in - vanishingly unlikely for
+    // a token only this sign-in holds, but typed honestly all the same.
+    if (entry === undefined) throw new SessionStoreWriteError(this.path, { cause: new Error('device vanished mid-attach') })
+    return { entry, usedFreshChain }
   }
 
-  // Sign-out: the token is dead the moment the entry is gone. Reports whether there was
-  // anything to delete, so the caller can stay idempotent on an unknown token.
-  async delete(token: string): Promise<boolean> {
+  // The store side of a sign-in (authService.signIn); returns just the joined entry for callers that
+  // do not need to know whether the supplied chain was installed or discarded (tests, fixtures).
+  async create(token: string, record: SessionRecord): Promise<SessionEntry> {
+    return (await this.attach(token, record)).entry
+  }
+
+  // Sign-out: the token is dead the moment its device is gone. When it was the *last* device on its
+  // user's chain, the chain is removed too and returned as `endedChain`, so the caller can end that
+  // ABS session upstream (authService.signOut) - a chain other devices still ride is kept, and no
+  // `endedChain` comes back. `removed` stays false for a token this store never held, so sign-out
+  // can be idempotent.
+  async delete(token: string): Promise<{ removed: boolean; endedChain?: AbsChain }> {
     const tokenHash = hashToken(token)
-    return this.mutate((entries) => entries.delete(tokenHash))
+    let endedChain: AbsChain | undefined
+    const removed = await this.mutate((state) => {
+      const device = state.devices.get(tokenHash)
+      if (device === undefined) return false
+      state.devices.delete(tokenHash)
+      if (isLastDevice(state.devices, device.absUserId)) {
+        const chain = state.chains.get(device.absUserId)
+        if (chain !== undefined) {
+          endedChain = chain.chain
+          state.chains.delete(device.absUserId)
+        }
+      }
+      return true
+    })
+    return endedChain === undefined ? { removed } : { removed, endedChain }
   }
 
-  // Record a refreshed ABS chain against an entry obtained from find()/list(), stamped with the
-  // moment it was refreshed. False means the entry is gone — the device signed out while its chain
-  // was being refreshed, and re-adding it would resurrect a revoked token.
+  // Record a refreshed ABS chain against a user, stamped with the moment it was refreshed. False
+  // means the write did not apply - the user's last device signed out while the chain was being
+  // refreshed (re-adding it would resurrect a revoked session), or `spentRefreshToken` was given and
+  // no longer matches what is stored.
   //
-  // Deliberately does not clear `deadSince`: death is terminal (SPEC section 8 — no in-place
-  // repair), so the keep-alive loop never refreshes a dead chain in the first place.
-  async updateChain(entry: SessionEntry, chain: AbsChain): Promise<boolean> {
-    return this.mutate((entries) => {
-      const current = entries.get(entry.tokenHash)
+  // `spentRefreshToken` is an optimistic guard for the keep-alive loop: it is the refresh token this
+  // renewal actually spent, and the write lands only while the stored chain still holds it. If a
+  // sign-in healed the chain (or another renewal rotated it) while a slow refresh was in flight, the
+  // stored token has moved on, and writing the stale successor would clobber the live chain with the
+  // pair a spent token bought (keepAlive.refreshOnce).
+  //
+  // Deliberately does not clear `deadSince`: death is terminal (SPEC section 8 - no in-place
+  // repair), so the keep-alive loop never refreshes a dead chain in the first place; only a sign-in
+  // revives one, by replacing it outright (see attach).
+  async updateChain(ref: { absUserId: string }, chain: AbsChain, spentRefreshToken?: string): Promise<boolean> {
+    return this.mutate((state) => {
+      const current = state.chains.get(ref.absUserId)
       if (current === undefined) return false
-      entries.set(
-        entry.tokenHash,
-        freezeEntry({ ...current, chain: { ...chain }, chainRefreshedAt: new Date().toISOString() }),
+      if (spentRefreshToken !== undefined && current.chain.refreshToken !== spentRefreshToken) return false
+      state.chains.set(
+        ref.absUserId,
+        freezeChain({ ...current, chain: { ...chain }, chainRefreshedAt: new Date().toISOString() }),
       )
       return true
     })
   }
 
-  // The chain behind this entry is gone and cannot be renewed (see SessionEntry.deadSince). The
-  // entry is kept, so the device's next request can be answered with the 401 that asks for a
-  // password rather than the one that reads as "signed out". False means the device signed out
-  // first, which needs no marking — it has no token left to answer.
-  async markDead(entry: SessionEntry): Promise<boolean> {
-    return this.mutate((entries) => {
-      const current = entries.get(entry.tokenHash)
+  // The chain behind a user is gone and cannot be renewed (see UserChain.deadSince). Every device of
+  // that user keeps its entry, so their next request answers the 401 that asks for a password rather
+  // than the one that reads as "signed out". False means the write did not apply: the user's last
+  // device signed out first (no chain left to answer), or `spentRefreshToken` was given and no longer
+  // matches what is stored.
+  //
+  // `spentRefreshToken` guards the same race updateChain does: a 401 from a slow refresh proves *the
+  // token it spent* dead, not whatever chain the user holds by the time the rejection lands. If a
+  // sign-in healed the chain meanwhile, the stored token has moved on, and burying it would kill a
+  // live chain over stale news, sending a freshly signed-in device to UPSTREAM_SESSION_LOST
+  // (keepAlive.refreshOnce).
+  async markDead(ref: { absUserId: string }, spentRefreshToken?: string): Promise<boolean> {
+    return this.mutate((state) => {
+      const current = state.chains.get(ref.absUserId)
       if (current === undefined) return false
-      entries.set(entry.tokenHash, freezeEntry({ ...current, deadSince: new Date().toISOString() }))
+      if (spentRefreshToken !== undefined && current.chain.refreshToken !== spentRefreshToken) return false
+      state.chains.set(ref.absUserId, freezeChain({ ...current, deadSince: new Date().toISOString() }))
       return true
     })
   }
 
-  // Delete an entry the caller holds rather than one it has the token for — the raw token exists
-  // only on the device that signed in, so retiring somebody else's stale entry (authService.ts)
-  // can only be expressed this way. False means it was already gone.
-  async remove(entry: SessionEntry): Promise<boolean> {
-    return this.mutate((entries) => entries.delete(entry.tokenHash))
-  }
-
-  // Every mutation funnels through here: queued behind the previous write, applied to a copy, and
-  // swapped in only once the write has landed. Memory must never hold a session the file does not,
-  // or the next restart would sign that device out with nobody having seen an error — and because
-  // find() reads this.entries synchronously and unqueued, "after the write" has to mean the map it
-  // reads is never the half-written one. So the live map is replaced in a single assignment after
-  // flush() succeeds; a failed write (including one the bounded retry could not rescue) leaves the
-  // original in place and never became visible, so there is nothing to roll back.
-  private mutate(change: (entries: Map<string, SessionEntry>) => boolean): Promise<boolean> {
+  // Every mutation funnels through here: queued behind the previous write, applied to a copy of both
+  // maps, and swapped in only once the write has landed. Memory must never hold a session the file
+  // does not, or the next restart would sign that device out with nobody having seen an error - and
+  // because find() reads the live maps synchronously and unqueued, "after the write" has to mean the
+  // maps it reads are never the half-written ones. So the live maps are replaced in a single pair of
+  // assignments after flush() succeeds; a failed write (including one the bounded retry could not
+  // rescue) leaves the originals in place and never became visible, so there is nothing to roll back.
+  private mutate(change: (state: { devices: Map<string, DeviceRow>; chains: Map<string, UserChain> }) => boolean): Promise<boolean> {
     return this.enqueue(async () => {
-      const next = new Map(this.entries)
+      const next = { devices: new Map(this.devices), chains: new Map(this.chains) }
       if (!change(next)) return false
       await this.flush(next)
-      this.entries = next
+      this.devices = next.devices
+      this.chains = next.chains
       return true
     })
   }
@@ -220,25 +328,30 @@ export class SessionStore {
     return run
   }
 
-  // Persist a set of entries, defaulting to the live map for the boot-time create in open(). mutate()
-  // passes the pending copy so the file is written from it before it ever becomes this.entries — the
+  // Persist a set of maps, defaulting to the live ones for the boot-time create in open(). mutate()
+  // passes the pending copies so the file is written from them before they ever become live - the
   // revision is bumped only once the bytes have landed, so a failed write leaves both the file and
   // the counter as they were.
-  private async flush(entries: Map<string, SessionEntry> = this.entries): Promise<void> {
+  private async flush(
+    state: { devices: Map<string, DeviceRow>; chains: Map<string, UserChain> } = { devices: this.devices, chains: this.chains },
+  ): Promise<void> {
     await this.assertNobodyElseWrote()
     const revision = this.revision + 1
-    const payload = Buffer.from(JSON.stringify({ revision, entries: [...entries.values()] }), 'utf8')
+    const payload = Buffer.from(
+      JSON.stringify({ revision, devices: [...state.devices.values()], chains: [...state.chains.values()] }),
+      'utf8',
+    )
     await writeWithRetry(this.path, encodeStoreFile(this.key, payload))
     this.revision = revision
   }
 
   // Optimistic concurrency check: re-read the file and compare its revision against what this
-  // server left there. Costs one small read and decrypt per write — writes are sign-ins, sign-outs
+  // server left there. Costs one small read and decrypt per write - writes are sign-ins, sign-outs
   // and the daily keep-alive, so that is free in practice.
   //
   // This narrows the window rather than closing it: another writer could still publish between
   // this check and the rename below. Closing it would need a lock, and a lock file outlives a
-  // SIGKILL — a stale one would stop the server from booting at all, which is a worse failure for
+  // SIGKILL - a stale one would stop the server from booting at all, which is a worse failure for
   // a self-hosted appliance than the misconfiguration it guards against. The revision lives inside
   // the encrypted payload, so it is covered by the GCM tag and cannot be edited on its own.
   private async assertNobodyElseWrote(): Promise<void> {
@@ -255,11 +368,11 @@ export class SessionStore {
   }
 }
 
-// A transient IO failure on the store write — a momentary ENOSPC/EIO blip — is retried a few times
+// A transient IO failure on the store write - a momentary ENOSPC/EIO blip - is retried a few times
 // before it is allowed to fail. It matters most right after a successful ABS refresh: losing that
 // write discards the pair Audiobookshelf just rotated to, mutate() rolls memory back to the token
 // ABS has already spent, and the next refresh presents it and earns a 401 that marks a live chain
-// dead — a silent sign-out from one disk hiccup. Only the write is retried: assertNobodyElseWrote
+// dead - a silent sign-out from one disk hiccup. Only the write is retried: assertNobodyElseWrote
 // ran before it and the revision is bumped only on success, so a retry is idempotent and cannot
 // manufacture a conflict; a real conflict is not transient and must surface at once. Bounded tight
 // so the shutdown drain, which awaits the write tail (app.ts onClose), is never held up for long.
@@ -293,9 +406,34 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex')
 }
 
-function freezeEntry(entry: SessionEntry): SessionEntry {
-  Object.freeze(entry.chain)
-  return Object.freeze(entry)
+// Whether removing this device leaves the user with none, so its chain can be retired with it.
+function isLastDevice(devices: Map<string, DeviceRow>, absUserId: string): boolean {
+  for (const device of devices.values()) {
+    if (device.absUserId === absUserId) return false
+  }
+  return true
+}
+
+// Join a device row with its user's chain into the frozen snapshot callers hold.
+function joinEntry(device: DeviceRow, chain: UserChain): SessionEntry {
+  return Object.freeze({
+    tokenHash: device.tokenHash,
+    absUserId: device.absUserId,
+    absUsername: chain.absUsername,
+    createdAt: device.createdAt,
+    chain: chain.chain,
+    chainRefreshedAt: chain.chainRefreshedAt,
+    ...(chain.deadSince !== undefined ? { deadSince: chain.deadSince } : {}),
+  })
+}
+
+function freezeDevice(device: DeviceRow): DeviceRow {
+  return Object.freeze(device)
+}
+
+function freezeChain(chain: UserChain): UserChain {
+  Object.freeze(chain.chain)
+  return Object.freeze(chain)
 }
 
 async function readStoreFile(path: string): Promise<Buffer | undefined> {
@@ -307,51 +445,171 @@ async function readStoreFile(path: string): Promise<Buffer | undefined> {
   }
 }
 
-function parsePayload(plaintext: Buffer, path: string): { entries: Map<string, SessionEntry>; revision: number } {
+function parsePayload(
+  plaintext: Buffer,
+  path: string,
+): { devices: Map<string, DeviceRow>; chains: Map<string, UserChain>; revision: number } {
   let payload: unknown
   try {
     payload = JSON.parse(plaintext.toString('utf8'))
   } catch {
     throw new SessionStoreCorruptError(path, 'the decrypted payload is not valid JSON')
   }
-  const { entries: list, revision } = (payload ?? {}) as { entries?: unknown; revision?: unknown }
-  if (!Array.isArray(list)) {
-    throw new SessionStoreCorruptError(path, 'the decrypted payload carries no entry list')
+  const { devices: deviceList, chains: chainList, entries: legacyList, revision } = (payload ?? {}) as {
+    devices?: unknown
+    chains?: unknown
+    entries?: unknown
+    revision?: unknown
   }
-  const entries = new Map<string, SessionEntry>()
-  for (const candidate of list) {
-    const entry = asEntry(candidate)
-    if (entry === undefined) {
-      throw new SessionStoreCorruptError(path, 'the decrypted payload contains a malformed entry')
+  const rev = typeof revision === 'number' ? revision : 0
+  // The pre-ADR-0004 single-list shape (one entry per device, each carrying its own chain) is
+  // migrated on load rather than refused, so upgrading a deployed server keeps its devices signed in
+  // (SPEC section 8's hard requirement) instead of bricking the boot on a SessionStoreCorruptError.
+  // Recognised only when the new two-list keys are absent, so a genuine new-shape store is never
+  // misread as legacy.
+  if (Array.isArray(legacyList) && deviceList === undefined && chainList === undefined) {
+    return migrateLegacyEntries(legacyList, rev, path)
+  }
+  if (!Array.isArray(deviceList) || !Array.isArray(chainList)) {
+    throw new SessionStoreCorruptError(path, 'the decrypted payload carries no device and chain lists')
+  }
+  const chains = new Map<string, UserChain>()
+  for (const candidate of chainList) {
+    const chain = asChain(candidate)
+    if (chain === undefined) {
+      throw new SessionStoreCorruptError(path, 'the decrypted payload contains a malformed chain')
     }
-    entries.set(entry.tokenHash, entry)
+    chains.set(chain.absUserId, chain)
+  }
+  const devices = new Map<string, DeviceRow>()
+  const referenced = new Set<string>()
+  for (const candidate of deviceList) {
+    const device = asDevice(candidate)
+    if (device === undefined) {
+      throw new SessionStoreCorruptError(path, 'the decrypted payload contains a malformed device')
+    }
+    // Every device must reference a chain that is actually present - a device with no chain could
+    // not be resolved, so a store carrying one is corrupt, not merely odd (the invariant ADR-0004
+    // rests on: one chain per user, created and removed with the user's first and last device).
+    if (!chains.has(device.absUserId)) {
+      throw new SessionStoreCorruptError(path, 'the decrypted payload has a device with no chain')
+    }
+    devices.set(device.tokenHash, device)
+    referenced.add(device.absUserId)
+  }
+  // The other half of that invariant: a chain no device references can never be removed (a chain is
+  // retired only by its last device's sign-out) and would be re-encrypted and swept forever. Drop
+  // such orphans on load rather than let them accumulate. Unreachable through this code's own writes,
+  // but a torn or hand-edited store could carry one.
+  for (const absUserId of chains.keys()) {
+    if (!referenced.has(absUserId)) chains.delete(absUserId)
   }
   // A payload without a revision counts as zero, so the very first write after this counter was
   // introduced does not read as somebody else's work.
-  return { entries, revision: typeof revision === 'number' ? revision : 0 }
+  return { devices, chains, revision: rev }
 }
 
-// Validate the shape rather than trusting our own past writes: the alternative is a malformed
-// entry surfacing as an obscure TypeError somewhere in the auth path. Only known fields are
-// carried over, so anything added here later must be optional to stay readable both ways.
-function asEntry(candidate: unknown): SessionEntry | undefined {
+// Convert a legacy single-list store (one entry per device, each with its own chain) into the
+// two-list device+chain shape (ADR-0004). One chain per user now, so a user's several per-device
+// chains collapse to one: the freshest *live* chain that user had. A device whose own chain was dead
+// is dropped, not carried onto a live chain - reviving it would re-arm a token an upstream revocation
+// or password change was meant to kill, the same reasoning the runtime heal follows (attach). A user
+// with no live entry keeps no chain and no devices, so each of their devices re-authenticates once.
+function migrateLegacyEntries(
+  entriesRaw: unknown[],
+  revision: number,
+  path: string,
+): { devices: Map<string, DeviceRow>; chains: Map<string, UserChain>; revision: number } {
+  const liveByUser = new Map<string, LegacyEntry[]>()
+  for (const candidate of entriesRaw) {
+    const entry = asLegacyEntry(candidate)
+    if (entry === undefined) {
+      throw new SessionStoreCorruptError(path, 'the decrypted payload contains a malformed device')
+    }
+    if (entry.deadSince !== undefined) continue // a dead device is retired by the migration
+    const list = liveByUser.get(entry.absUserId) ?? []
+    list.push(entry)
+    liveByUser.set(entry.absUserId, list)
+  }
+  const devices = new Map<string, DeviceRow>()
+  const chains = new Map<string, UserChain>()
+  for (const [absUserId, list] of liveByUser) {
+    for (const entry of list) {
+      devices.set(entry.tokenHash, freezeDevice({ tokenHash: entry.tokenHash, absUserId, createdAt: entry.createdAt }))
+    }
+    const freshest = list.reduce((a, b) => (legacyRefreshedAt(b) >= legacyRefreshedAt(a) ? b : a))
+    chains.set(
+      absUserId,
+      freezeChain({
+        absUserId,
+        absUsername: freshest.absUsername,
+        chain: { ...freshest.chain },
+        chainRefreshedAt: freshest.chainRefreshedAt ?? freshest.createdAt,
+      }),
+    )
+  }
+  return { devices, chains, revision }
+}
+
+// One legacy stored entry (the pre-ADR-0004 joined shape), for the migration above.
+interface LegacyEntry {
+  tokenHash: string
+  absUserId: string
+  absUsername: string
+  chain: AbsChain
+  createdAt: string
+  chainRefreshedAt?: string
+  deadSince?: string
+}
+
+function legacyRefreshedAt(entry: LegacyEntry): number {
+  const stamp = Date.parse(entry.chainRefreshedAt ?? entry.createdAt)
+  return Number.isNaN(stamp) ? 0 : stamp
+}
+
+function asLegacyEntry(candidate: unknown): LegacyEntry | undefined {
   if (typeof candidate !== 'object' || candidate === null) return undefined
-  const { tokenHash, absUserId, absUsername, createdAt, chainRefreshedAt, deadSince, chain } =
+  const { tokenHash, absUserId, absUsername, createdAt, chainRefreshedAt: refreshedAt, deadSince, chain } =
     candidate as Record<string, unknown>
   if (![tokenHash, absUserId, absUsername, createdAt].every(isNonEmptyString)) return undefined
   if (typeof chain !== 'object' || chain === null) return undefined
   const { accessToken, refreshToken } = chain as Record<string, unknown>
   if (!isNonEmptyString(accessToken) || !isNonEmptyString(refreshToken)) return undefined
-  // The two optional stamps are spread in only when present: an explicit `undefined` is not the
-  // same as an absent property under exactOptionalPropertyTypes, and writing one back out would
-  // put a null into the file for every entry that has neither.
-  return freezeEntry({
+  return {
     tokenHash: tokenHash as string,
     absUserId: absUserId as string,
     absUsername: absUsername as string,
-    createdAt: createdAt as string,
     chain: { accessToken, refreshToken },
-    ...(isNonEmptyString(chainRefreshedAt) ? { chainRefreshedAt } : {}),
+    createdAt: createdAt as string,
+    ...(isNonEmptyString(refreshedAt) ? { chainRefreshedAt: refreshedAt } : {}),
+    ...(isNonEmptyString(deadSince) ? { deadSince } : {}),
+  }
+}
+
+// Validate the shape rather than trusting our own past writes: the alternative is a malformed row
+// surfacing as an obscure TypeError somewhere in the auth path.
+function asDevice(candidate: unknown): DeviceRow | undefined {
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const { tokenHash, absUserId, createdAt } = candidate as Record<string, unknown>
+  if (![tokenHash, absUserId, createdAt].every(isNonEmptyString)) return undefined
+  return freezeDevice({ tokenHash: tokenHash as string, absUserId: absUserId as string, createdAt: createdAt as string })
+}
+
+function asChain(candidate: unknown): UserChain | undefined {
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const { absUserId, absUsername, chainRefreshedAt: refreshedAt, deadSince, chain } = candidate as Record<string, unknown>
+  if (![absUserId, absUsername, refreshedAt].every(isNonEmptyString)) return undefined
+  if (typeof chain !== 'object' || chain === null) return undefined
+  const { accessToken, refreshToken } = chain as Record<string, unknown>
+  if (!isNonEmptyString(accessToken) || !isNonEmptyString(refreshToken)) return undefined
+  // deadSince is spread in only when present: an explicit `undefined` is not the same as an absent
+  // property under exactOptionalPropertyTypes, and writing one back out would put a null into the
+  // file for every chain that is alive.
+  return freezeChain({
+    absUserId: absUserId as string,
+    absUsername: absUsername as string,
+    chain: { accessToken, refreshToken },
+    chainRefreshedAt: refreshedAt as string,
     ...(isNonEmptyString(deadSince) ? { deadSince } : {}),
   })
 }

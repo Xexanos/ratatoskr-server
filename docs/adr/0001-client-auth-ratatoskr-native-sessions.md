@@ -58,6 +58,13 @@ occasional rather than reproducible, which is the worst shape for it to have.*
   every version — one entry per device, never shared — but the ABS chains behind two entries are only
   genuinely distinct from 2.35.1 on. Below it, two sign-ins in the same second end up holding the same
   refresh token, and the per-device half of the decision degrades to "per user" for that pair.*
+  ***Superseded by [ADR-0004](./0004-one-abs-chain-per-user.md) (issue
+  [#165](https://github.com/Xexanos/ratatoskr-server/issues/165)): the chain is now one per ABS user,
+  shared by every device of that user, rather than one per device. The store still keeps one entry per
+  device; only the chain behind them is shared. This removes the same-user collision by construction
+  (a user has exactly one chain, so no two refreshes of one user can ever race) and lets the keep-alive
+  loop drop the inter-refresh spacing this note called for. See ADR-0004 for the reasoning and the
+  residual, accepted micro-risk that remains on ABS < 2.35.1.***
 - **The Ratatoskr credential is an opaque 256-bit token — non-expiring, revocable.** The
   server stores only its hash; validation is an in-process lookup (replacing the token
   guard's per-request ABS roundtrip). No expiry and no rotation: a rotating pair would
@@ -90,6 +97,10 @@ occasional rather than reproducible, which is the worst shape for it to have.*
   concerned — its token and store entry are untouched — but its ABS calls fail until it
   re-authenticates. What the keep-alive loop must not do on such a version is refresh several stored
   chains inside one second, or it collides them itself; the daily refresh has to space its writes.*
+  ***Superseded by [ADR-0004](./0004-one-abs-chain-per-user.md): sign-out is no longer per device at
+  the ABS level. With one chain shared per user, sign-out deletes the device's store entry always and
+  ends the ABS session upstream only when it was the user's last device. The keep-alive spacing this
+  note required is gone with the per-device chain.***
 - **The app stores only the Ratatoskr token** (Keystore-backed), plus server URL, TLS
   fingerprint, and display username. ABS tokens and the entire adoption logic of app SPEC
   section 5 drop. The user's ABS password is never stored — on either side.

@@ -198,9 +198,11 @@ describe('a chain the keep-alive loop has already marked dead', () => {
     await app.close()
   })
 
-  // The client that re-authenticates *without* offering its old token — its entry is an orphan
-  // nobody can name, and the sign-in is what retires it (SPEC section 8).
-  it('is retired by a re-login that offers no bearer', async () => {
+  // A re-login of the same user heals the dead chain, but retires the user's other devices rather
+  // than reviving them (ADR-0004): a stale bearer that rode the dead chain must not be re-armed, or
+  // the upstream revocation that killed the chain would be undone. The stranded device re-reads as
+  // signed out and re-authenticates on its own.
+  it('retires the user’s other devices when a re-login heals the chain', async () => {
     const store = await deadDevice()
     const { app } = await appWith(store)
 
@@ -209,10 +211,21 @@ describe('a chain the keep-alive loop has already marked dead', () => {
       url: '/v2/auth/login',
       payload: { username: 'listener', password: 's3cret' },
     })
-
     expect(res.statusCode).toBe(200)
+    const fresh = res.json().token as string
+
+    // The stranded device is gone, and its old bearer now reads as signed out (not the lost-session
+    // 401), so its device shows the sign-in screen rather than a password prompt.
     expect(store.find(DEVICE_TOKEN)).toBeUndefined()
+    const stale = await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
+    expect(stale.statusCode).toBe(401)
+    expect(stale.json().code).toBe('unauthorized')
+
+    // Only the re-authenticated device remains, on the one healed chain.
+    const usable = await app.inject({ method: 'GET', url: '/v2/library/items', headers: { authorization: `Bearer ${fresh}` } })
+    expect(usable.statusCode).toBe(200)
     expect(store.list()).toHaveLength(1)
+    expect(store.listChains()).toHaveLength(1)
     await app.close()
   })
 })

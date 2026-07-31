@@ -6,13 +6,18 @@ import { UnknownTokenError, UpstreamSessionLostError } from '../src/auth/errors.
 import type { SessionStore } from '../src/auth/sessionStore.js'
 import { tempSessionStore } from './helpers/tempSessionStore.js'
 
-// The Ratatoskr-native session model (SPEC section 8 / ADR-0001) as behaviour: what a sign-in
-// creates, what a sign-out destroys, and what a bearer resolves to. The store is the real one on a
-// temp file — the property under test is precisely that only the token's hash is persisted, which a
-// fake store would have to re-implement to be worth anything.
+// The Ratatoskr-native session model (SPEC section 8 / ADR-0001, ADR-0004) as behaviour: what a
+// sign-in creates, what a sign-out destroys, and what a bearer resolves to. The store is the real
+// one on a temp file - the property under test is precisely that only the token's hash is persisted,
+// and that a user's devices share one chain, which a fake store would have to re-implement to be
+// worth anything.
 
 const LISTENER = { id: 'usr-1', username: 'listener' }
+const OTHER_USER = { id: 'usr-2', username: 'other' }
+// The chain a user's first sign-in installs, and the throwaway a later sign-in of a user who already
+// has a live chain mints and then ends upstream.
 const CHAIN = { accessToken: 'abs-access', refreshToken: 'abs-refresh' }
+const THROWAWAY = { accessToken: 'abs-access-2', refreshToken: 'abs-refresh-2' }
 
 function fakeAbs(overrides: Partial<AbsClient> = {}): AbsClient {
   return {
@@ -71,16 +76,21 @@ describe('AuthService.signIn', () => {
     expect(store.find(token)).toMatchObject({ absUserId: 'usr-1', absUsername: 'listener', chain: CHAIN })
   })
 
-  // One chain per device login, never shared (SPEC section 8) — the failure mode ADR-0001 removes.
-  it('gives each sign-in its own entry, so one device never signs another out', async () => {
-    const { auth, store } = await build()
+  // ADR-0004: a user's devices share one chain. The second sign-in keeps the chain already there and
+  // ends the throwaway ABS session it just minted, so there is only ever one chain per user - and
+  // signing in on one device still never signs the other out.
+  it('gives each device its own entry on the one shared chain', async () => {
+    const { auth, store, abs } = await build()
 
     const phone = await auth.signIn('listener', 's3cret')
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...THROWAWAY, user: LISTENER })
     const tablet = await auth.signIn('listener', 's3cret')
 
     expect(store.list()).toHaveLength(2)
-    expect(store.find(phone.token)).toBeDefined()
-    expect(store.find(tablet.token)).toBeDefined()
+    // Both ride the chain the first sign-in installed; the second's throwaway was ended upstream.
+    expect(store.find(phone.token)?.chain).toEqual(CHAIN)
+    expect(store.find(tablet.token)?.chain).toEqual(CHAIN)
+    expect(abs.logout).toHaveBeenCalledWith(THROWAWAY)
   })
 
   it('rejects bad credentials without creating anything', async () => {
@@ -95,17 +105,19 @@ describe('AuthService.signIn', () => {
     expect(store.list()).toHaveLength(0)
   })
 
-  // A device re-authenticating after its chain died gets a wholly new session, and the one it
-  // replaces is retired — but only once the new one exists (SPEC section 8).
-  it('retires the token being replaced, full depth', async () => {
+  // A device re-authenticating gets a wholly new token (SPEC section 8), and the one it replaces is
+  // retired - but only once the new one exists. The user's live chain is kept across the re-login;
+  // it is the freshly minted throwaway that is ended upstream (ADR-0004).
+  it('retires the token being replaced and keeps the user’s live chain, ending the throwaway', async () => {
     const { auth, store, abs } = await build()
     const old = await auth.signIn('listener', 's3cret')
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...THROWAWAY, user: LISTENER })
 
     const fresh = await auth.signIn('listener', 's3cret', old.token)
 
     expect(store.find(old.token)).toBeUndefined()
-    expect(store.find(fresh.token)).toBeDefined()
-    expect(abs.logout).toHaveBeenCalledWith(CHAIN)
+    expect(store.find(fresh.token)?.chain).toEqual(CHAIN)
+    expect(abs.logout).toHaveBeenCalledWith(THROWAWAY)
   })
 
   it('keeps the old session when the new password is rejected', async () => {
@@ -121,7 +133,7 @@ describe('AuthService.signIn', () => {
     expect(store.find(old.token)).toBeDefined()
   })
 
-  it('still returns the new session when retiring the old one fails', async () => {
+  it('still returns the new session when ending the throwaway fails', async () => {
     const abs = fakeAbs({
       logout: vi.fn(async () => {
         throw new AbsUpstreamError('ABS is down')
@@ -133,57 +145,53 @@ describe('AuthService.signIn', () => {
     const fresh = await auth.signIn('listener', 's3cret', old.token)
 
     // The new token is already live, so failing the sign-in here would hand the caller an error
-    // for a token that in fact works — and lose it.
+    // for a token that in fact works - and lose it.
     expect(store.find(fresh.token)).toBeDefined()
   })
 
-  // The half of "re-login deletes the old entry" no client can do (SPEC section 8): a device whose
-  // chain died before it could offer the token it is replacing leaves an entry nobody can name. Once
-  // the keep-alive loop has marked that entry dead, sign-in can retire it on the user's behalf.
-  it('retires the dead entries of the same ABS user, which no client can name', async () => {
-    const { auth, store } = await build()
+  // Healing a dead chain retires the user's *other* devices rather than reviving them (ADR-0004):
+  // a stale bearer riding the dead chain must not be re-armed by the owner's next sign-in, or an
+  // upstream revocation (or password change) that killed the chain would be silently undone. Each
+  // such device re-authenticates once - ADR-0001's accepted post-outage UX.
+  it('retires the user’s other devices when a sign-in heals their dead chain', async () => {
+    const { auth, store, abs } = await build()
     const stranded = await auth.signIn('listener', 's3cret')
     await store.markDead(store.find(stranded.token)!)
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...THROWAWAY, user: LISTENER })
 
     const fresh = await auth.signIn('listener', 's3cret')
 
+    // Only the re-authenticating device survives, on the healed chain; the stranded one is gone.
     expect(store.find(stranded.token)).toBeUndefined()
-    expect(store.find(fresh.token)).toBeDefined()
+    expect(store.find(fresh.token)?.chain).toEqual(THROWAWAY)
+    expect(store.find(fresh.token)?.deadSince).toBeUndefined()
+    expect(store.list()).toHaveLength(1)
+    // The healing chain is the user's chain now, not a throwaway - nothing to end upstream.
+    expect(abs.logout).not.toHaveBeenCalled()
   })
 
-  // Only the dead ones: another device of the same user is still listening on its own chain, and
-  // retiring that would be this model signing a working device out.
-  it('leaves the same user’s live sessions alone', async () => {
-    const { auth, store } = await build()
+  // A live sibling is left alone: retiring on heal fires only when the chain had actually died, so a
+  // second sign-in onto a live chain never disturbs the devices already on it.
+  it('leaves the user’s live devices alone on an ordinary second sign-in', async () => {
+    const { auth, store, abs } = await build()
     const tablet = await auth.signIn('listener', 's3cret')
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...THROWAWAY, user: LISTENER })
 
     await auth.signIn('listener', 's3cret')
 
     expect(store.find(tablet.token)).toBeDefined()
+    expect(store.list()).toHaveLength(2)
   })
 
-  it('leaves another ABS user’s dead session alone', async () => {
+  it('leaves another ABS user’s dead chain alone', async () => {
     const { auth, store, abs } = await build()
-    vi.mocked(abs.login).mockResolvedValueOnce({ ...CHAIN, user: { id: 'usr-2', username: 'other' } })
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...CHAIN, user: OTHER_USER })
     const other = await auth.signIn('other', 's3cret')
     await store.markDead(store.find(other.token)!)
 
     await auth.signIn('listener', 's3cret')
 
-    expect(store.find(other.token)).toBeDefined()
-  })
-
-  // Best-effort for the same reason retiring the offered token is: the new token is already live, so
-  // failing the sign-in over a stale entry would lose a credential that works.
-  it('still returns the new session when a dead entry cannot be retired', async () => {
-    const { auth, store } = await build()
-    const stranded = await auth.signIn('listener', 's3cret')
-    await store.markDead(store.find(stranded.token)!)
-    vi.spyOn(store, 'remove').mockRejectedValueOnce(new Error('disk full'))
-
-    const fresh = await auth.signIn('listener', 's3cret')
-
-    expect(store.find(fresh.token)).toBeDefined()
+    expect(store.find(other.token)?.deadSince).toEqual(expect.any(String))
   })
 
   it('ignores a replaced token it does not know', async () => {
@@ -197,7 +205,7 @@ describe('AuthService.signIn', () => {
 })
 
 describe('AuthService.signOut', () => {
-  it('kills the token immediately and ends exactly this chain upstream', async () => {
+  it('kills the token immediately and ends a solo device’s chain upstream', async () => {
     const { auth, store, abs } = await build()
     const { token } = await auth.signIn('listener', 's3cret')
 
@@ -207,14 +215,18 @@ describe('AuthService.signOut', () => {
     expect(abs.logout).toHaveBeenCalledWith(CHAIN)
   })
 
-  it('leaves other devices signed in', async () => {
-    const { auth, store } = await build()
+  // Signing out one device of a user leaves the shared chain alive for the others - so it must not
+  // be ended upstream while another device still rides it (ADR-0004).
+  it('leaves other devices signed in and their shared chain untouched upstream', async () => {
+    const { auth, store, abs } = await build()
     const phone = await auth.signIn('listener', 's3cret')
     const tablet = await auth.signIn('listener', 's3cret')
+    vi.mocked(abs.logout).mockClear()
 
     await auth.signOut(phone.token)
 
     expect(store.find(tablet.token)).toBeDefined()
+    expect(abs.logout).not.toHaveBeenCalled()
   })
 
   // Idempotent and best-effort, so a client can always complete a sign-out locally (contract).
@@ -273,9 +285,9 @@ describe('AuthService.resolve', () => {
     expect(() => auth.resolve(token)).toThrow(UnknownTokenError)
   })
 
-  // The whole point of keeping a dead entry (SPEC section 8): this token is not unknown, and
-  // telling its device "signed out" would send it to a full sign-in when a password prompt is what
-  // the situation calls for.
+  // The whole point of keeping a dead chain's devices (SPEC section 8): this token is not unknown,
+  // and telling its device "signed out" would send it to a full sign-in when a password prompt is
+  // what the situation calls for.
   it('reports a dead chain as a lost upstream session, not as an unknown token', async () => {
     const { auth, store } = await build()
     const { token } = await auth.signIn('listener', 's3cret')

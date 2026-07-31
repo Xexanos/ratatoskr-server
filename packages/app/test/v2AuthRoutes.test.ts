@@ -102,7 +102,9 @@ describe('POST /v2/auth/login', () => {
   })
 
   // Sign-in is unauthenticated, so a bearer is read rather than required — this is the whole
-  // mechanism by which a re-login retires the session it replaces (SPEC section 8).
+  // mechanism by which a re-login retires the session it replaces (SPEC section 8). The user's live
+  // chain is kept across the re-login; the freshly minted throwaway ABS session is the one ended
+  // upstream (ADR-0004).
   it('signs the offered previous token out once the new session exists', async () => {
     const logout = vi.fn().mockResolvedValue(undefined)
     const { app, store } = await appWith({ logout })
@@ -111,10 +113,11 @@ describe('POST /v2/auth/login', () => {
 
     expect(res.statusCode).toBe(200)
     expect(store.find(DEVICE_TOKEN)).toBeUndefined()
-    expect(store.find(res.json().token as string)).toBeDefined()
-    // Exactly one session, and the replaced chain ended upstream rather than orphaned.
+    // The new session rides the chain that was already there, not the throwaway.
+    expect(store.find(res.json().token as string)?.chain).toEqual(ABS_CHAIN)
+    // Exactly one session, and the throwaway ABS session was ended upstream rather than orphaned.
     expect(store.list()).toHaveLength(1)
-    expect(logout).toHaveBeenCalledWith(ABS_CHAIN)
+    expect(logout).toHaveBeenCalledWith({ accessToken: UPSTREAM.accessToken, refreshToken: UPSTREAM.refreshToken })
     await app.close()
   })
 
