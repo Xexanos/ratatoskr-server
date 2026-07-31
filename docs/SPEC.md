@@ -331,7 +331,10 @@ re-login.
   opened during startup, not on first use, so a wrong key, a corrupt file and a directory
   that cannot be written all stop the boot while the operator is watching rather than
   surfacing later as one user's failed sign-in — opening it creates the file when absent,
-  which is what makes the last of those visible at all.
+  which is what makes the last of those visible at all. A store written before ADR-0004, in the
+  old per-device `{ entries }` shape, is migrated on load rather than refused (each user's live
+  per-device chains collapse to the freshest, dead devices dropped), so an upgrade keeps the
+  deployed devices signed in instead of bricking the boot.
 - **Keep-alive**: the server renews every stored ABS chain on three schedules, which between
   them answer three different ways of losing one.
   - **Daily, jittered**: one sweep a day, at a jittered offset, renewing every stored chain
@@ -378,17 +381,15 @@ re-login.
   sign-in over a stale entry would lose a credential that does work. An offered token this
   server does not know is ignored — the route must never turn a valid sign-in into a 401 —
   and only the holder of a token can retire it this way, so no device can sign another out.
-  Because the chain is one per user (ADR-0004), a sign-in that heals it revives **every**
-  device of that user at once: the dead chain is one entry in the store, and replacing it with
-  the fresh mint clears the death for the phone, the tablet and the browser tab together, each
-  of which resumes on the new pair at its next request without a re-login of its own. This is
-  the dominant recovery path, since the dominant death cause (an outage past the refresh window
-  or a rename) kills the user's one chain, and one sign-in brings it back. A well-behaved app
-  offers its old bearer on the re-login so its own stale device entry is retired in the same
-  step; a re-login that offers no bearer leaves that one entry behind, revived but unreferenced,
-  a bounded orphan a later operator session-list feature (section 16) can clear. The old model's
-  per-device retire-the-dead-siblings dance is gone with the per-device chain: there are no
-  dead sibling entries to retire, only one shared chain to heal.
+  Because the chain is one per user (ADR-0004), a sign-in that heals a dead chain also **retires
+  the user's other device rows**: replacing the dead chain with the fresh mint revives the phone,
+  the tablet and the browser tab as a set, so reviving them silently would re-arm a bearer an
+  upstream revocation (or a password change) was meant to kill. Instead each of those devices
+  re-authenticates once, exactly the old model's post-outage behaviour, which is what keeps
+  revocation an effective remediation. The dominant death cause (an outage past the refresh window,
+  or a rename) kills the user's one chain, so all their devices meet `UPSTREAM_SESSION_LOST` and
+  re-sign-in on their own next run. This intentionally has no cross-device auto-heal: reviving the
+  siblings is the revocation hole just described.
 - **Sign-out** (`POST /v2/auth/logout`): delete the device's session entry (the token is dead
   immediately) and, **only when it was the user's last device**, fire a best-effort ABS `POST
   /logout` with the shared chain's refresh token, ending that user's ABS session; while another

@@ -24,7 +24,10 @@ two-refreshes-of-one-user case cannot arise, and the gap it required has nothing
 
 Grounding facts are unchanged from ADR-0001 (ABS rotates the refresh token in place; the refresh
 window slides; below 2.35.1 the refresh token is minted from second-precision timestamps with no
-per-session claim). Nothing is deployed yet, so there is no stored data to migrate.
+per-session claim). The `/v2` auth model has shipped (server
+[#156](https://github.com/Xexanos/ratatoskr-server/pull/156)) and at least one server is deployed, so
+a store already on disk in the old shape must be migrated on load rather than refused (see
+Consequences).
 
 ## Decision
 
@@ -38,11 +41,12 @@ last (reference-counted).
   password-hash comparison (see rejected options): the password is proved against ABS on every
   sign-in, exactly as before, and is stored nowhere.
 - **The chain a sign-in mints is kept only when the user had none live.** A first sign-in installs
-  it; a sign-in after the user's chain died replaces it, *healing every device that shared it at
-  once*; a sign-in while the user already has a live chain keeps that one and ends the freshly minted
-  ABS session upstream (a throwaway that existed only to prove the password). Ending it is
-  best-effort, for the same reason retiring a replaced token is: the new Ratatoskr token is already
-  live.
+  it; a sign-in after the user's chain died replaces it and **retires the user's other device rows**,
+  so each of those devices re-authenticates once rather than being silently revived (see the
+  revocation consequence below); a sign-in while the user already has a live chain keeps that one and
+  ends the freshly minted ABS session upstream (a throwaway that existed only to prove the password).
+  Ending it is best-effort, for the same reason retiring a replaced token is: the new Ratatoskr token
+  is already live.
 - **Sign-out ends the ABS session upstream only for the user's last device.** While another device
   still rides the chain, sign-out deletes the device row and leaves the chain alone; the last device
   out takes the chain with it and its ABS session is ended. The Ratatoskr token is dead immediately
@@ -52,25 +56,30 @@ last (reference-counted).
   refreshes of one user can overlap or race, so **`CHAIN_SPACING_MS` and the whole inter-refresh
   spacing mechanism are removed.**
 - **A dead chain still keeps its devices** (ADR-0001's rare-and-loud failure), so their next request
-  answers `UPSTREAM_SESSION_LOST` rather than "signed out". The difference is the heal: the first
-  device of the user to sign in again replaces the dead chain, and every other device resumes on the
-  new pair without a re-login of its own.
+  answers `UPSTREAM_SESSION_LOST` rather than "signed out" until they re-authenticate. The heal is
+  deliberately bounded: the first device to sign in again replaces the dead chain and retires the
+  user's other device rows, so each of those re-authenticates once. It does not silently revive them,
+  which would reopen the revocation hole the retire closes (see Consequences).
 
 ## Consequences
 
 - **The collision is gone by construction, not by timing.** The mitigation ADR-0001 needed (space
   every schedule's refreshes over a second) is deleted rather than extended to the request path,
   which is what #165 would otherwise have required.
-- **Admin revocation is coarser, deliberately.** Revoking a user's ABS session upstream now forces
-  every device of that user to re-authenticate, where per-device chains could (on ABS >= 2.35.1) have
-  taken down one device. Accepted, and arguably an operator convenience: one revocation is enough to
-  make Ratatoskr re-prompt the user, rather than one per device. Per-device revocation, if it is ever
-  wanted, belongs to the planned operator session-list feature on the Ratatoskr side, not to the ABS
-  chain.
-- **A user's chain death hits all their devices together.** This was already the dominant case under
-  ADR-0001 (an outage past the refresh window, or a rename, kills all of a user's chains at once);
-  now it is the only case. The heal makes recovery cheaper than before: one re-login, not one per
-  device.
+- **Upstream revocation and password change stay effective remediations.** Because healing a dead
+  chain retires the user's other device rows, a Ratatoskr bearer that rode a chain killed by a
+  revocation is not silently re-armed by the owner's next sign-in: it reads as signed out and cannot
+  act again. This carries forward ADR-0001's property that a re-login deleted the user's dead entries.
+  An earlier draft of this ADR revived every device on heal instead; a security review flagged that as
+  re-arming a stolen or revoked token (a lost phone locked out by a revocation would come back to life
+  the moment the owner signed in), so the retire-on-heal behavior was restored. Revocation is per user,
+  not per device: locking out one device re-prompts the user on all of theirs. Per-device lock-out, if
+  wanted, is the planned operator session-list (SPEC section 16).
+- **A user's chain death hits all their devices together, and each re-authenticates once.** An outage
+  past the refresh window, or a rename, kills the user's one chain; every device meets
+  `UPSTREAM_SESSION_LOST` and re-authenticates on its own next run. This is exactly ADR-0001's accepted
+  post-outage UX. There is deliberately no cross-device auto-heal, since reviving the siblings is the
+  revocation hole above.
 - **A residual, accepted micro-risk on ABS < 2.35.1.** A sign-in mints a throwaway ABS session even
   when the user already has a live chain. If that mint lands in the same second as a refresh of the
   user's chain (or a second simultaneous sign-in of the same user), the throwaway token can equal the
@@ -79,8 +88,17 @@ last (reference-counted).
   self-limited to outdated servers. Spacing the login path was considered and rejected as
   disproportionate to that risk (see below); the failure, if it ever happens, is the ordinary
   dead-chain one, and the next sign-in heals it.
-- **No migration.** Nothing is deployed, so the store format changes freely to the two-list
-  (devices + chains) shape.
+- **A stale refresh cannot bury a healed chain.** The keep-alive loop guards its write-back and its
+  death mark with the refresh token it actually spent: a slow refresh whose chain a heal or another
+  renewal overtook applies to nothing, rather than clobbering the successor or marking a now-live
+  chain dead over a 401 for a token that had already been replaced.
+- **A deployed store is migrated on load, not refused.** A file in the old single-list `{ entries }`
+  shape is converted when opened: each user's live per-device chains collapse to the freshest one,
+  every live device is preserved on it, and a device whose own chain had died is dropped (it
+  re-authenticates, matching retire-on-heal); a user all of whose devices were dead keeps nothing. So
+  an operator upgrading across this change keeps their signed-in devices (SPEC section 8's hard
+  requirement) instead of hitting a `SessionStoreCorruptError` that refuses the boot. The store is
+  rewritten in the two-list (devices + chains) shape on its first write thereafter.
 
 ## Considered options
 
@@ -99,3 +117,12 @@ last (reference-counted).
   at the cost of adding request-path latency and a spacing clock back, to guard a case that needs two
   events of one user within one second on an unsupported-soon ABS version. Not worth it; the risk is
   accepted instead.
+- **Revive every device of the user on heal** (the first draft's auto-resume bonus, rejected): it
+  re-arms every outstanding bearer of the user the moment the owner signs in again, including a stolen
+  or revoked one, silently undoing an upstream revocation or password change while the operator
+  session-list that could substitute for it does not yet exist. Retiring the user's other device rows
+  on heal (each re-authenticates once) keeps revocation working, at the cost of the auto-resume
+  convenience.
+- **Refuse an old-shape store and require a manual wipe / `!` breaking release** (rejected): simpler
+  in code, but it signs every device out on upgrade, the exact failure the persisted store exists to
+  prevent. The on-load migration is small and keeps the hard requirement intact, so it wins.
