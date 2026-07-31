@@ -198,10 +198,11 @@ describe('a chain the keep-alive loop has already marked dead', () => {
     await app.close()
   })
 
-  // The bonus the shared chain buys (ADR-0004): a re-login of the same user heals the dead chain, so
-  // every device that shared it is revived at once: the stranded device's own token starts working
-  // again without a re-login of its own, even though this sign-in offered no bearer.
-  it('is healed for every device that shared it by a re-login of the same user', async () => {
+  // A re-login of the same user heals the dead chain, but retires the user's other devices rather
+  // than reviving them (ADR-0004): a stale bearer that rode the dead chain must not be re-armed, or
+  // the upstream revocation that killed the chain would be undone. The stranded device re-reads as
+  // signed out and re-authenticates on its own.
+  it('retires the user’s other devices when a re-login heals the chain', async () => {
     const store = await deadDevice()
     const { app } = await appWith(store)
 
@@ -210,14 +211,20 @@ describe('a chain the keep-alive loop has already marked dead', () => {
       url: '/v2/auth/login',
       payload: { username: 'listener', password: 's3cret' },
     })
-
     expect(res.statusCode).toBe(200)
-    // The chain is live again, so the previously dead device resolves and its next request succeeds.
-    expect(store.find(DEVICE_TOKEN)?.deadSince).toBeUndefined()
-    const revived = await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
-    expect(revived.statusCode).toBe(200)
-    // Both devices ride the one healed chain: the stranded one and the one this sign-in created.
-    expect(store.list()).toHaveLength(2)
+    const fresh = res.json().token as string
+
+    // The stranded device is gone, and its old bearer now reads as signed out (not the lost-session
+    // 401), so its device shows the sign-in screen rather than a password prompt.
+    expect(store.find(DEVICE_TOKEN)).toBeUndefined()
+    const stale = await app.inject({ method: 'GET', url: '/v2/library/items', headers: V2_AUTH })
+    expect(stale.statusCode).toBe(401)
+    expect(stale.json().code).toBe('unauthorized')
+
+    // Only the re-authenticated device remains, on the one healed chain.
+    const usable = await app.inject({ method: 'GET', url: '/v2/library/items', headers: { authorization: `Bearer ${fresh}` } })
+    expect(usable.statusCode).toBe(200)
+    expect(store.list()).toHaveLength(1)
     expect(store.listChains()).toHaveLength(1)
     await app.close()
   })

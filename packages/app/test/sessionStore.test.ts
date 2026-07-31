@@ -258,6 +258,46 @@ describe('SessionStore', () => {
     expect((await open()).list()).toEqual([])
   })
 
+  // The optimistic guard the keep-alive loop uses (keepAlive.refreshOnce): a refresh writes back only
+  // while the stored chain still holds the token it actually spent, so a slow refresh whose chain was
+  // healed or rotated meanwhile cannot clobber the successor with the pair a stale token bought.
+  it('refuses to write back a refresh whose spent token no longer matches the stored chain', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+
+    const applied = await store.updateChain(entry, { accessToken: 'a2', refreshToken: 'r2' }, 'some-other-refresh-token')
+
+    expect(applied).toBe(false)
+    expect(store.find('token-phone')?.chain).toEqual(PHONE.chain)
+  })
+
+  it('writes back a refresh whose spent token still matches the stored chain', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+    const rotated = { accessToken: 'a2', refreshToken: 'r2' }
+
+    expect(await store.updateChain(entry, rotated, PHONE.chain.refreshToken)).toBe(true)
+    expect(store.find('token-phone')?.chain).toEqual(rotated)
+  })
+
+  // The same guard on the death mark: a 401 proves *the token it spent* dead, not whatever chain the
+  // user holds by the time it lands - burying a chain healed in between would kill a live one.
+  it('refuses to bury a chain whose spent token no longer matches the stored one', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+
+    expect(await store.markDead(entry, 'some-other-refresh-token')).toBe(false)
+    expect(store.find('token-phone')?.deadSince).toBeUndefined()
+  })
+
+  it('buries a chain when the spent token still matches', async () => {
+    const store = await open()
+    const entry = await store.create('token-phone', PHONE)
+
+    expect(await store.markDead(entry, PHONE.chain.refreshToken)).toBe(true)
+    expect(store.find('token-phone')?.deadSince).toEqual(expect.any(String))
+  })
+
   it('stamps a refreshed chain, so the boot sweep can tell how stale each one is', async () => {
     const store = await open()
     const entry = await store.create('token-phone', PHONE)
@@ -466,6 +506,21 @@ describe('SessionStore', () => {
     await expect(open()).rejects.toThrow(/device with no chain/)
   })
 
+  // The other half of the one-chain-per-user invariant: a chain no device references can never be
+  // removed (only a last sign-out retires one) and would be swept forever. Drop it on load rather
+  // than refuse the boot - it is harmless, just orphaned.
+  it('drops a chain that no device references, rather than sweeping it forever', async () => {
+    const orphanChain = { ...STORED_CHAIN, absUserId: 'usr-9', chain: { accessToken: 'a-orphan', refreshToken: 'r-orphan' } }
+    await writePayload({ revision: 1, devices: [STORED_DEVICE], chains: [STORED_CHAIN, orphanChain] })
+
+    const store = await open()
+
+    expect(store.listChains()).toHaveLength(1)
+    expect(store.listChains()[0]?.absUserId).toBe('usr-1')
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]?.tokenHash).toBe(STORED_DEVICE.tokenHash)
+  })
+
   it.each([
     ['not an object', 'nope'],
     ['a missing field', { ...STORED_DEVICE, absUserId: undefined }],
@@ -515,5 +570,106 @@ describe('SessionStore', () => {
     await writeFile(path, file)
 
     await expect(open()).rejects.toThrow(/version/i)
+  })
+})
+
+// A server upgraded across ADR-0004 finds a store in the old single-list `{ entries }` shape (one
+// entry per device, each with its own chain). It must migrate on load, not refuse to boot, so the
+// deployed devices stay signed in (SPEC section 8's hard requirement).
+describe('SessionStore legacy migration', () => {
+  const hashOf = (token: string): string => createHash('sha256').update(token, 'utf8').digest('hex')
+
+  // A legacy entry as the pre-ADR-0004 store persisted it: the device fields and its own chain, in
+  // one object, keyed at lookup by the token's hash.
+  function legacyEntry(
+    token: string,
+    absUserId: string,
+    absUsername: string,
+    chain: { accessToken: string; refreshToken: string },
+    extra: { chainRefreshedAt?: string; deadSince?: string } = {},
+  ): Record<string, unknown> {
+    return { tokenHash: hashOf(token), absUserId, absUsername, chain, createdAt: '2026-07-01T00:00:00.000Z', ...extra }
+  }
+
+  it('collapses a user’s live per-device chains onto the one freshest, keeping every device', async () => {
+    await writePayload({
+      revision: 4,
+      entries: [
+        legacyEntry('token-phone', 'usr-1', 'listener', { accessToken: 'a-phone', refreshToken: 'r-phone' }, {
+          chainRefreshedAt: '2026-07-28T09:00:00.000Z',
+        }),
+        legacyEntry('token-tablet', 'usr-1', 'listener', { accessToken: 'a-tablet', refreshToken: 'r-tablet' }, {
+          chainRefreshedAt: '2026-07-29T09:00:00.000Z', // fresher
+        }),
+      ],
+    })
+
+    const store = await open()
+
+    // Both devices survive and ride the one chain, which is the freshest of the two the old store had.
+    expect(store.listChains()).toHaveLength(1)
+    const shared = { accessToken: 'a-tablet', refreshToken: 'r-tablet' }
+    expect(store.find('token-phone')?.chain).toEqual(shared)
+    expect(store.find('token-tablet')?.chain).toEqual(shared)
+    expect(store.list()).toHaveLength(2)
+  })
+
+  it('drops a legacy device whose own chain had died, keeping the live one', async () => {
+    await writePayload({
+      revision: 1,
+      entries: [
+        legacyEntry('token-live', 'usr-1', 'listener', { accessToken: 'a-live', refreshToken: 'r-live' }),
+        legacyEntry('token-dead', 'usr-1', 'listener', { accessToken: 'a-dead', refreshToken: 'r-dead' }, {
+          deadSince: '2026-07-20T00:00:00.000Z',
+        }),
+      ],
+    })
+
+    const store = await open()
+
+    expect(store.find('token-live')?.chain).toEqual({ accessToken: 'a-live', refreshToken: 'r-live' })
+    // The dead device is retired by the migration, not revived onto the live chain (ADR-0004).
+    expect(store.find('token-dead')).toBeUndefined()
+    expect(store.list()).toHaveLength(1)
+  })
+
+  it('keeps nothing for a user whose every legacy device was dead', async () => {
+    await writePayload({
+      revision: 1,
+      entries: [
+        legacyEntry('token-dead', 'usr-2', 'other', { accessToken: 'a', refreshToken: 'r' }, {
+          deadSince: '2026-07-20T00:00:00.000Z',
+        }),
+      ],
+    })
+
+    const store = await open()
+
+    expect(store.find('token-dead')).toBeUndefined()
+    expect(store.listChains()).toHaveLength(0)
+    expect(store.list()).toEqual([])
+  })
+
+  it('rewrites the store in the new two-list shape on the next write', async () => {
+    await writePayload({
+      revision: 2,
+      entries: [legacyEntry('token-phone', 'usr-1', 'listener', { accessToken: 'a-phone', refreshToken: 'r-phone' })],
+    })
+    const store = await open()
+
+    // Any mutation flushes; from then on the file carries devices+chains, and no `entries`.
+    await store.create('token-other', OTHER)
+    const persisted = JSON.parse(await storedPayload()) as Record<string, unknown>
+
+    expect(persisted).toHaveProperty('devices')
+    expect(persisted).toHaveProperty('chains')
+    expect(persisted).not.toHaveProperty('entries')
+    // The migrated device and the new one both survive a genuine reopen of the rewritten file.
+    expect((await open()).list()).toHaveLength(2)
+  })
+
+  it('refuses a legacy store with a malformed entry rather than dropping it silently', async () => {
+    await writePayload({ revision: 1, entries: [{ tokenHash: 'x', absUserId: 'usr-1' }] })
+    await expect(open()).rejects.toBeInstanceOf(SessionStoreCorruptError)
   })
 })

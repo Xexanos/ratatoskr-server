@@ -256,17 +256,23 @@ export class ChainKeepAlive {
     if (current === undefined) return { kind: 'gone' }
     if (!isLive(current)) return { kind: 'dead' }
 
+    // The refresh token this renewal spends. Both the write-back and the death are guarded by it, so
+    // a slow refresh whose chain was healed out from under it (a sign-in replaced the dead chain, or
+    // another renewal rotated it) neither clobbers the successor nor buries a now-live chain: the
+    // stored token has moved on, and the guarded write is skipped (updateChain / markDead).
+    const spent = current.chain.refreshToken
     try {
-      const pair = await this.abs.refresh(current.chain.refreshToken)
+      const pair = await this.abs.refresh(spent)
       const chain = { accessToken: pair.accessToken, refreshToken: pair.refreshToken }
-      // A false return from updateChain means the user's last device signed out during the call. The
-      // chain still goes back to the caller: its request is already running on this entry, and the
-      // upstream session it names outlives the local chain either way.
-      await this.store.updateChain({ absUserId }, chain)
+      // A false return means the write did not apply - the user's last device signed out during the
+      // call, or the chain was healed/rotated meanwhile. The chain still goes back to the caller: its
+      // request is already running on this entry, and the upstream session it names outlives the
+      // local chain either way.
+      await this.store.updateChain({ absUserId }, chain, spent)
       return { kind: 'renewed', chain }
     } catch (err) {
       if (!(err instanceof AbsAuthError)) throw err
-      await this.store.markDead({ absUserId })
+      await this.store.markDead({ absUserId }, spent)
       this.logger?.warn(
         { absUserId: current.absUserId, absUsername: current.absUsername },
         'Audiobookshelf refused a stored refresh token; the devices on this chain must sign in again',

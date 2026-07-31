@@ -518,6 +518,42 @@ describe('ChainKeepAlive.usableChain', () => {
     expect(store.find('token-phone')?.deadSince).toEqual(expect.any(String))
   })
 
+  // The identity guard (keepAlive.refreshOnce, store.markDead): a 401 from a slow refresh proves the
+  // token it *spent* dead, not whatever chain the user holds when the rejection finally lands. If the
+  // chain was healed or rotated in flight, burying it would kill a live chain over stale news. The
+  // guard confines the death to the token it was proven against, so the healed chain survives.
+  it('does not bury a chain that was rotated while a rejected refresh was in flight', async () => {
+    const entry = await store.create('token-phone', { ...USER1, chain: chainOf('phone', -60) })
+    let release = (): void => {}
+    let markEntered = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    const abs = fakeAbs({
+      refresh: vi.fn(async () => {
+        markEntered() // the refresh has read the chain and captured the token it spends
+        await gate
+        throw new AbsAuthError()
+      }) as unknown as AbsClient['refresh'],
+    })
+    const keepAlive = build(abs)
+
+    const pending = keepAlive.usableChain(entry) // spends 'refresh-phone', then parks at the gate
+    await entered
+    // The chain is rotated out from under the parked refresh (stands in for a heal / another renewal).
+    await store.updateChain({ absUserId: USER1.absUserId }, { accessToken: 'a2', refreshToken: 'refresh-rotated' })
+    release()
+
+    // The one racing request still fails, but the rotated chain is left live - not buried by the
+    // stale 401 for the token that had already been replaced.
+    await expect(pending).rejects.toBeInstanceOf(UpstreamSessionLostError)
+    expect(store.find('token-phone')?.deadSince).toBeUndefined()
+    expect(store.find('token-phone')?.chain.refreshToken).toBe('refresh-rotated')
+  })
+
   // Signing out mid-request is not a lost upstream session, it is a token that no longer exists -
   // and answering "your password, please" would send a device that just signed out to a prompt
   // instead of the sign-in screen.

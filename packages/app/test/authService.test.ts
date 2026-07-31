@@ -149,10 +149,11 @@ describe('AuthService.signIn', () => {
     expect(store.find(fresh.token)).toBeDefined()
   })
 
-  // The bonus the shared chain buys (ADR-0004): when a user's chain has died, the first device of
-  // theirs to sign in again heals it - every other device riding that chain resumes on the new pair
-  // without a re-login of its own.
-  it('heals the whole user’s chain on the first sign-in after it died', async () => {
+  // Healing a dead chain retires the user's *other* devices rather than reviving them (ADR-0004):
+  // a stale bearer riding the dead chain must not be re-armed by the owner's next sign-in, or an
+  // upstream revocation (or password change) that killed the chain would be silently undone. Each
+  // such device re-authenticates once - ADR-0001's accepted post-outage UX.
+  it('retires the user’s other devices when a sign-in heals their dead chain', async () => {
     const { auth, store, abs } = await build()
     const stranded = await auth.signIn('listener', 's3cret')
     await store.markDead(store.find(stranded.token)!)
@@ -160,12 +161,26 @@ describe('AuthService.signIn', () => {
 
     const fresh = await auth.signIn('listener', 's3cret')
 
-    // The stranded device is revived, not retired: its chain is live again and carries the new pair.
-    expect(store.find(stranded.token)?.deadSince).toBeUndefined()
-    expect(store.find(stranded.token)?.chain).toEqual(THROWAWAY)
+    // Only the re-authenticating device survives, on the healed chain; the stranded one is gone.
+    expect(store.find(stranded.token)).toBeUndefined()
     expect(store.find(fresh.token)?.chain).toEqual(THROWAWAY)
+    expect(store.find(fresh.token)?.deadSince).toBeUndefined()
+    expect(store.list()).toHaveLength(1)
     // The healing chain is the user's chain now, not a throwaway - nothing to end upstream.
     expect(abs.logout).not.toHaveBeenCalled()
+  })
+
+  // A live sibling is left alone: retiring on heal fires only when the chain had actually died, so a
+  // second sign-in onto a live chain never disturbs the devices already on it.
+  it('leaves the user’s live devices alone on an ordinary second sign-in', async () => {
+    const { auth, store, abs } = await build()
+    const tablet = await auth.signIn('listener', 's3cret')
+    vi.mocked(abs.login).mockResolvedValueOnce({ ...THROWAWAY, user: LISTENER })
+
+    await auth.signIn('listener', 's3cret')
+
+    expect(store.find(tablet.token)).toBeDefined()
+    expect(store.list()).toHaveLength(2)
   })
 
   it('leaves another ABS user’s dead chain alone', async () => {
