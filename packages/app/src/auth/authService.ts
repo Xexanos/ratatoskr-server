@@ -38,11 +38,12 @@ export class AuthService {
   // that one call and then dropped; it is stored nowhere, on either side.
   //
   // The chain ABS just minted is kept only when the user had no live chain: a first sign-in installs
-  // it, and a sign-in after the chain died heals it, reviving every device of that user at once
-  // (ADR-0004). When the user already has a live chain, that one is kept and the freshly minted chain
-  // is a throwaway - best-effort ended upstream, so no idle ABS session is left behind. Ending it is
-  // best-effort because the new token is already live by then: failing the sign-in over an orphaned
-  // upstream session would hand the caller an error for a token that in fact works.
+  // it, and a sign-in after the chain died heals it and retires the user's *other* device rows
+  // (ADR-0004), so a bearer that rode the dead chain is not silently re-armed - each such device
+  // re-authenticates once. When the user already has a live chain, that one is kept and the freshly
+  // minted chain is a throwaway - best-effort ended upstream, so no idle ABS session is left behind.
+  // Ending it is best-effort because the new token is already live by then: failing the sign-in over
+  // an orphaned upstream session would hand the caller an error for a token that in fact works.
   //
   // `replacing` is the caller's previous token, if it still has one. A device re-authenticating gets
   // a wholly new session rather than a repaired one (SPEC section 8), so the old entry is signed out
