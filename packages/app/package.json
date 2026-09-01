@@ -18,19 +18,19 @@
     "@ratatoskr/contract": "workspace:*",
     "@ratatoskr/position": "workspace:*",
     "@svrooij/sonos": "^2.5.0",
-    "fast-xml-parser": "^5.10.1",
-    "fastify": "^5.10.0",
-    "fastify-openapi-glue": "^4.11.3",
-    "undici": "^8.8.0"
+    "fast-xml-parser": "^5.11.0",
+    "fastify": "^5.12.1",
+    "fastify-openapi-glue": "^4.11.4",
+    "undici": "^8.10.0"
   },
   "devDependencies": {
-    "@fastify/response-validation": "^3.0.3",
+    "@fastify/response-validation": "^3.0.4",
     "@ratatoskr/fake-sonos": "workspace:*",
-    "@types/node": "^26.1.2",
-    "@vitest/coverage-v8": "^4.1.9",
+    "@types/node": "^26.3.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "ajv": "^8.17.1",
-    "tsx": "^4.23.1",
+    "tsx": "^4.23.12",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.11"
   }
 }
