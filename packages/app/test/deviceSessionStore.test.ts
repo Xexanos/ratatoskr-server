@@ -198,6 +198,27 @@ describe('touch (last used)', () => {
     expect(warnings.join('\n')).toMatch(/last used/i)
   })
 
+  it('does not retry a failed write-through on every later request', async () => {
+    const warnings: string[] = []
+    const store = await open((m) => warnings.push(m))
+    await store.create('phone', RECORD)
+    store.touch('phone')
+    await store.flushLastUsed()
+    // Stale again, and the volume goes away: the write-through fails once ...
+    vi.setSystemTime(new Date(Date.parse('2026-09-29T10:00:00.000Z') + 2 * HOUR))
+    await rm(dir, { recursive: true, force: true })
+    store.touch('phone')
+    await vi.waitFor(() => expect(warnings).toHaveLength(1), { timeout: 2000 })
+
+    // ... and the requests after it do not each start another write.
+    store.touch('phone')
+    store.touch('phone')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(warnings).toHaveLength(1)
+    // Memory stays exact regardless of the failed write.
+    expect(Date.parse(store.find('phone')?.lastUsedAt ?? '')).toBeGreaterThanOrEqual(Date.parse('2026-09-29T12:00:00.000Z'))
+  })
+
   it('has nothing to flush for a device that signed out meanwhile', async () => {
     const store = await open()
     const { id } = await store.create('phone', RECORD)

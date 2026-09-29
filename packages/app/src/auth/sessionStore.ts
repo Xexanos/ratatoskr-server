@@ -132,9 +132,11 @@ export class SessionStore {
   // Each device's exact "last used", by token hash: updated on every guard hit, written to the file
   // only throttled (touch) or at shutdown (flushLastUsed). Memory only, so it needs no queueing.
   private readonly lastUsed = new Map<string, string>()
-  // Token hashes whose throttled write-through is already on its way, so a burst of requests queues
-  // one write, not one each.
-  private readonly persisting = new Set<string>()
+  // When each device last *attempted* a throttled write-through, by token hash. The throttle runs on
+  // attempts, not on successes: a write that fails leaves the persisted value stale, and without this
+  // every later request would retry it (a full read, decrypt and write per request, queued ahead of
+  // writes that matter such as a chain refresh). It also means a burst queues one write, not one each.
+  private readonly lastAttempt = new Map<string, number>()
 
   private constructor(
     private readonly path: string,
@@ -192,11 +194,13 @@ export class SessionStore {
     this.lastUsed.set(tokenHash, now.toISOString())
     const persisted = device.lastUsedAt === undefined ? Number.NaN : Date.parse(device.lastUsedAt)
     const stale = Number.isNaN(persisted) || now.getTime() - persisted > LAST_USED_PERSIST_INTERVAL_MS
-    if (!stale || this.persisting.has(tokenHash)) return
-    this.persisting.add(tokenHash)
-    this.writeLastUsed()
-      .catch((cause: unknown) => this.onWarning(`could not persist a device last used time: ${(cause as Error).message}`))
-      .finally(() => this.persisting.delete(tokenHash))
+    if (!stale) return
+    const attempted = this.lastAttempt.get(tokenHash)
+    if (attempted !== undefined && now.getTime() - attempted < LAST_USED_PERSIST_INTERVAL_MS) return
+    this.lastAttempt.set(tokenHash, now.getTime())
+    this.writeLastUsed().catch((cause: unknown) =>
+      this.onWarning(`could not persist a device last used time: ${(cause as Error).message}`),
+    )
   }
 
   // Shutdown hook: write out every in-memory "last used" the file does not have yet, once. Queued
@@ -423,6 +427,9 @@ export class SessionStore {
       // A device that is gone takes its in-memory "last used" with it.
       for (const tokenHash of this.lastUsed.keys()) {
         if (!this.devices.has(tokenHash)) this.lastUsed.delete(tokenHash)
+      }
+      for (const tokenHash of this.lastAttempt.keys()) {
+        if (!this.devices.has(tokenHash)) this.lastAttempt.delete(tokenHash)
       }
       return true
     })

@@ -425,7 +425,7 @@ components:
       in: path
       required: true
       description: Device session id, as listed by `GET /auth/device-sessions`.
-      schema: { type: string }
+      schema: { type: string, format: uuid }
 
     ItemId:
       name: itemId
@@ -648,6 +648,7 @@ components:
       properties:
         id:
           type: string
+          format: uuid
           description: |
             Public identifier of this device session, for `DELETE /auth/device-sessions/{id}`.
             Unrelated to the bearer token, which it does not reveal.

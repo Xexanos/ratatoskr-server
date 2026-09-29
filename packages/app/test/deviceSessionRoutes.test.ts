@@ -225,7 +225,7 @@ describe('DELETE /v2/auth/device-sessions/{id}', () => {
     const { app, store } = await appWith()
     const foreign = await store.create('foreign', OTHER_USER)
 
-    const unknown = await app.inject({ method: 'DELETE', url: '/v2/auth/device-sessions/no-such-id', headers: V2_AUTH })
+    const unknown = await app.inject({ method: 'DELETE', url: '/v2/auth/device-sessions/6f1c5a0e-3f6b-4c1e-9a55-2d8f0b7c1e10', headers: V2_AUTH })
     const other = await app.inject({ method: 'DELETE', url: `/v2/auth/device-sessions/${foreign.id}`, headers: V2_AUTH })
 
     expect(unknown.statusCode).toBe(404)
