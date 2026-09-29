@@ -24,6 +24,25 @@ _Avoid_: session, playback session — "session" alone means the one active play
 codebase, which is a different thing entirely; qualify it (`device session`, `auth session`)
 whenever both could be meant.
 
+**Device session list**:
+A signed-in user's overview of their own device sessions, with the ability to end any one of them
+(issue #138). A hygiene tool - spotting a device that was reset or retired but still holds a
+session - not a threat-detection one. Self-service only: a user sees and ends their own device
+sessions, never another user's. Ending one has exactly sign-out's effect on that device.
+_Avoid_: operator view (there is no operator identity), device list - a device session is one
+sign-in, not a physical device: a phone reset and signed in again is two entries.
+
+**Device name**:
+The optional, client-supplied label a device sends at sign-in (e.g. "Pixel 8"), shown in the
+device session list. Display text only - nothing ever branches on it - and not carried over when
+a re-authentication replaces the device's token.
+
+**Last used**:
+When a device session last made a request that proved its bearer. Only the device's own requests
+count: keep-alive renewals (per user) and the sync loop's progress writes (server activity) do not,
+or a forgotten device would look alive.
+_Avoid_: last seen, last refreshed (that is the shared chain's, not the device's).
+
 **Shared chain**:
 The single ABS access/refresh pair Ratatoskr holds per ABS user, that all of the user's device
 sessions run on (ADR-0004, issue #165). The keep-alive loop renews it once for the whole user, a
