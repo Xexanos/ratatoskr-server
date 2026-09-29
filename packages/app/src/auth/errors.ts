@@ -10,6 +10,16 @@ export class UnknownTokenError extends Error {
   }
 }
 
+// The id names none of the caller's own device sessions: it never existed, it was already ended, or it
+// belongs to another user. All three are deliberately one error, so the existence of a foreign id is
+// not revealed (issue #138).
+export class DeviceSessionNotFoundError extends Error {
+  constructor() {
+    super('No such device session')
+    this.name = 'DeviceSessionNotFoundError'
+  }
+}
+
 // The opposite case to UnknownTokenError, and the reason the two must not share a code: the token
 // is live and this server still holds its entry, but the Audiobookshelf chain behind it has died —
 // contact with ABS was lost for longer than its refresh window, or the account was renamed. Only

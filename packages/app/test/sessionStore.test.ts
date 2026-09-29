@@ -66,6 +66,7 @@ async function writePayload(payload: unknown): Promise<void> {
 // One device and its chain exactly as they are persisted (the two-list on-disk shape of ADR-0004).
 const STORED_DEVICE = {
   tokenHash: 'a'.repeat(64),
+  id: 'dev-session-1',
   absUserId: 'usr-1',
   createdAt: '2026-07-28T09:00:00.000Z',
 }
@@ -78,6 +79,7 @@ const STORED_CHAIN = {
 // The joined entry the store reads those two back as.
 const STORED_ENTRY = {
   tokenHash: STORED_DEVICE.tokenHash,
+  id: STORED_DEVICE.id,
   absUserId: 'usr-1',
   absUsername: 'listener',
   createdAt: STORED_DEVICE.createdAt,

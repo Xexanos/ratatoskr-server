@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import {
   SessionStoreConflictError,
@@ -25,6 +25,9 @@ export interface SessionRecord {
   absUserId: string
   absUsername: string
   chain: AbsChain
+  // The label the device sent at sign-in - display text only, never branched on, and never inherited
+  // by a later sign-in (issue #138).
+  deviceName?: string
 }
 
 // The per-user shared chain, as the store holds it: the ABS user it belongs to, the chain itself,
@@ -53,7 +56,13 @@ export interface UserChain {
 // several entries of one user carry the same ones.
 export interface SessionEntry extends SessionRecord {
   tokenHash: string
+  // The device session's public identifier: random and separate from tokenHash, which stays an
+  // internal lookup key. It is what the device session list shows and ends by (issue #138).
+  id: string
   createdAt: string
+  // When this device last proved its bearer: the exact in-memory value where there is one, else what
+  // the file holds. Absent for a device never used since this field existed.
+  lastUsedAt?: string
   chainRefreshedAt?: string
   deadSince?: string
 }
@@ -71,9 +80,18 @@ export function chainRefreshedAt(record: { chainRefreshedAt?: string; createdAt?
 // it rides lives once per user in the chains map, not here - that is the whole point of ADR-0004.
 interface DeviceRow {
   tokenHash: string
+  id: string
   absUserId: string
   createdAt: string
+  deviceName?: string
+  // The last value written to the file - throttled (see SessionStore.touch), so it can trail the
+  // in-memory one by up to LAST_USED_PERSIST_INTERVAL_MS.
+  lastUsedAt?: string
 }
+
+// How stale the persisted "last used" may get before a request writes it through. A crash loses at
+// most this much precision; the shutdown flush closes the gap on a clean stop.
+const LAST_USED_PERSIST_INTERVAL_MS = 60 * 60 * 1000
 
 export interface SessionStoreOptions {
   path: string
@@ -111,10 +129,19 @@ export class SessionStore {
   // file was absent (or predates the counter), which is the only state where writing over
   // "nothing" is legitimate.
   private revision: number
+  // Each device's exact "last used", by token hash: updated on every guard hit, written to the file
+  // only throttled (touch) or at shutdown (flushLastUsed). Memory only, so it needs no queueing.
+  private readonly lastUsed = new Map<string, string>()
+  // When each device last *attempted* a throttled write-through, by token hash. The throttle runs on
+  // attempts, not on successes: a write that fails leaves the persisted value stale, and without this
+  // every later request would retry it (a full read, decrypt and write per request, queued ahead of
+  // writes that matter such as a chain refresh). It also means a burst queues one write, not one each.
+  private readonly lastAttempt = new Map<string, number>()
 
   private constructor(
     private readonly path: string,
     private readonly key: Buffer,
+    private readonly onWarning: (message: string) => void,
     loaded: { devices: Map<string, DeviceRow>; chains: Map<string, UserChain>; revision: number },
   ) {
     this.devices = loaded.devices
@@ -130,13 +157,16 @@ export class SessionStore {
     if (file !== undefined) await healStoreFileMode(path, onWarning)
     const loaded =
       file === undefined
-        ? { devices: new Map<string, DeviceRow>(), chains: new Map<string, UserChain>(), revision: 0 }
+        ? { devices: new Map<string, DeviceRow>(), chains: new Map<string, UserChain>(), revision: 0, idsGenerated: false }
         : parsePayload(decodeStoreFile(key, file, path), path)
-    const store = new SessionStore(path, key, loaded)
+    const store = new SessionStore(path, key, onWarning, loaded)
     // Create the file right away when it is absent, so an unwritable volume or a broken mount
     // fails loud at boot rather than at some user's first sign-in hours later. Two servers booting
     // at once on an empty volume also settle here: the loser's first write hits the conflict check.
-    if (file === undefined) await store.flush()
+    //
+    // Rows that predate device session ids were given ids by the parse; writing them back now keeps an
+    // id a client has listed valid across a restart, rather than re-rolling it until the next mutation.
+    if (file === undefined || loaded.idsGenerated) await store.flush()
     return store
   }
 
@@ -148,7 +178,53 @@ export class SessionStore {
     const device = this.devices.get(hashToken(token))
     if (device === undefined) return undefined
     const chain = this.chains.get(device.absUserId)
-    return chain === undefined ? undefined : joinEntry(device, chain)
+    return chain === undefined ? undefined : this.join(device, chain)
+  }
+
+  // Record that this token's device just proved its bearer (the token guard, every request): the
+  // device's "last used". Synchronous and never fails a request - the in-memory value is exact on
+  // every call, and the file is written only when its value is older than an hour, in the
+  // background (a failure only warns). Keep-alive renewals and the sync loop never come through
+  // here, on purpose: only the device's own requests count, or a forgotten device would look alive.
+  touch(token: string): void {
+    const tokenHash = hashToken(token)
+    const device = this.devices.get(tokenHash)
+    if (device === undefined) return
+    const now = new Date()
+    this.lastUsed.set(tokenHash, now.toISOString())
+    const persisted = device.lastUsedAt === undefined ? Number.NaN : Date.parse(device.lastUsedAt)
+    const stale = Number.isNaN(persisted) || now.getTime() - persisted > LAST_USED_PERSIST_INTERVAL_MS
+    if (!stale) return
+    const attempted = this.lastAttempt.get(tokenHash)
+    if (attempted !== undefined && now.getTime() - attempted < LAST_USED_PERSIST_INTERVAL_MS) return
+    this.lastAttempt.set(tokenHash, now.getTime())
+    this.writeLastUsed().catch((cause: unknown) =>
+      this.onWarning(`could not persist a device last used time: ${(cause as Error).message}`),
+    )
+  }
+
+  // Shutdown hook: write out every in-memory "last used" the file does not have yet, once. Queued
+  // behind any write-through already in flight, so it also waits those out. Never throws - a failed
+  // flush only warns, because losing up to an hour of "last used" must not block shutdown.
+  async flushLastUsed(): Promise<void> {
+    try {
+      await this.writeLastUsed()
+    } catch (cause) {
+      this.onWarning(`could not flush the devices last used times on shutdown: ${(cause as Error).message}`)
+    }
+  }
+
+  private writeLastUsed(): Promise<boolean> {
+    return this.mutate((state) => {
+      let dirty = false
+      for (const [tokenHash, at] of this.lastUsed) {
+        const device = state.devices.get(tokenHash)
+        if (device === undefined || device.lastUsedAt === at) continue
+        state.devices.set(tokenHash, freezeDevice({ ...device, lastUsedAt: at }))
+        dirty = true
+      }
+      return dirty
+    })
   }
 
   // One joined entry per device login (several of one user share their chain's fields).
@@ -156,7 +232,7 @@ export class SessionStore {
     const joined: SessionEntry[] = []
     for (const device of this.devices.values()) {
       const chain = this.chains.get(device.absUserId)
-      if (chain !== undefined) joined.push(joinEntry(device, chain))
+      if (chain !== undefined) joined.push(this.join(device, chain))
     }
     return joined
   }
@@ -187,7 +263,16 @@ export class SessionStore {
     const now = new Date().toISOString()
     let usedFreshChain = false
     await this.mutate((state) => {
-      state.devices.set(tokenHash, freezeDevice({ tokenHash, absUserId: record.absUserId, createdAt: now }))
+      state.devices.set(
+        tokenHash,
+        freezeDevice({
+          tokenHash,
+          id: randomUUID(),
+          absUserId: record.absUserId,
+          createdAt: now,
+          ...(record.deviceName !== undefined ? { deviceName: record.deviceName } : {}),
+        }),
+      )
       const existing = state.chains.get(record.absUserId)
       if (existing === undefined || existing.deadSince !== undefined) {
         // Install the freshly minted chain: the user had none, or theirs had died and this heals it.
@@ -235,10 +320,29 @@ export class SessionStore {
   // can be idempotent.
   async delete(token: string): Promise<{ removed: boolean; endedChain?: AbsChain }> {
     const tokenHash = hashToken(token)
+    return this.remove((devices) => devices.get(tokenHash))
+  }
+
+  // End one of a user's device sessions by its public id - sign-out's effect on that device, exactly
+  // (`delete` above). Scoped to the user, so another user's id is indistinguishable from an unknown
+  // one: `removed: false` for both, and nothing of theirs is touched.
+  async deleteDeviceSession(absUserId: string, id: string): Promise<{ removed: boolean; endedChain?: AbsChain }> {
+    return this.remove((devices) => {
+      for (const device of devices.values()) {
+        if (device.id === id && device.absUserId === absUserId) return device
+      }
+      return undefined
+    })
+  }
+
+  private async remove(
+    pick: (devices: Map<string, DeviceRow>) => DeviceRow | undefined,
+  ): Promise<{ removed: boolean; endedChain?: AbsChain }> {
     let endedChain: AbsChain | undefined
     const removed = await this.mutate((state) => {
-      const device = state.devices.get(tokenHash)
+      const device = pick(state.devices)
       if (device === undefined) return false
+      const tokenHash = device.tokenHash
       state.devices.delete(tokenHash)
       if (isLastDevice(state.devices, device.absUserId)) {
         const chain = state.chains.get(device.absUserId)
@@ -300,6 +404,12 @@ export class SessionStore {
     })
   }
 
+  // A device row joined with its user's chain, carrying the device's exact in-memory "last used"
+  // where it has one.
+  private join(device: DeviceRow, chain: UserChain): SessionEntry {
+    return joinEntry(device, chain, this.lastUsed.get(device.tokenHash))
+  }
+
   // Every mutation funnels through here: queued behind the previous write, applied to a copy of both
   // maps, and swapped in only once the write has landed. Memory must never hold a session the file
   // does not, or the next restart would sign that device out with nobody having seen an error - and
@@ -314,6 +424,13 @@ export class SessionStore {
       await this.flush(next)
       this.devices = next.devices
       this.chains = next.chains
+      // A device that is gone takes its in-memory "last used" with it.
+      for (const tokenHash of this.lastUsed.keys()) {
+        if (!this.devices.has(tokenHash)) this.lastUsed.delete(tokenHash)
+      }
+      for (const tokenHash of this.lastAttempt.keys()) {
+        if (!this.devices.has(tokenHash)) this.lastAttempt.delete(tokenHash)
+      }
       return true
     })
   }
@@ -415,14 +532,18 @@ function isLastDevice(devices: Map<string, DeviceRow>, absUserId: string): boole
 }
 
 // Join a device row with its user's chain into the frozen snapshot callers hold.
-function joinEntry(device: DeviceRow, chain: UserChain): SessionEntry {
+function joinEntry(device: DeviceRow, chain: UserChain, lastUsedAt: string | undefined): SessionEntry {
+  const lastUsed = lastUsedAt ?? device.lastUsedAt
   return Object.freeze({
     tokenHash: device.tokenHash,
+    id: device.id,
     absUserId: device.absUserId,
     absUsername: chain.absUsername,
     createdAt: device.createdAt,
     chain: chain.chain,
     chainRefreshedAt: chain.chainRefreshedAt,
+    ...(device.deviceName !== undefined ? { deviceName: device.deviceName } : {}),
+    ...(lastUsed !== undefined ? { lastUsedAt: lastUsed } : {}),
     ...(chain.deadSince !== undefined ? { deadSince: chain.deadSince } : {}),
   })
 }
@@ -448,7 +569,7 @@ async function readStoreFile(path: string): Promise<Buffer | undefined> {
 function parsePayload(
   plaintext: Buffer,
   path: string,
-): { devices: Map<string, DeviceRow>; chains: Map<string, UserChain>; revision: number } {
+): ParsedStore {
   let payload: unknown
   try {
     payload = JSON.parse(plaintext.toString('utf8'))
@@ -483,8 +604,9 @@ function parsePayload(
   }
   const devices = new Map<string, DeviceRow>()
   const referenced = new Set<string>()
+  const generated = { ids: false }
   for (const candidate of deviceList) {
-    const device = asDevice(candidate)
+    const device = asDevice(candidate, generated)
     if (device === undefined) {
       throw new SessionStoreCorruptError(path, 'the decrypted payload contains a malformed device')
     }
@@ -506,7 +628,16 @@ function parsePayload(
   }
   // A payload without a revision counts as zero, so the very first write after this counter was
   // introduced does not read as somebody else's work.
-  return { devices, chains, revision: rev }
+  return { devices, chains, revision: rev, idsGenerated: generated.ids }
+}
+
+// What loading the file yields. `idsGenerated` says some device row predates public ids and was
+// given one, so the caller should write the file back to keep that id stable.
+interface ParsedStore {
+  devices: Map<string, DeviceRow>
+  chains: Map<string, UserChain>
+  revision: number
+  idsGenerated: boolean
 }
 
 // Convert a legacy single-list store (one entry per device, each with its own chain) into the
@@ -519,7 +650,7 @@ function migrateLegacyEntries(
   entriesRaw: unknown[],
   revision: number,
   path: string,
-): { devices: Map<string, DeviceRow>; chains: Map<string, UserChain>; revision: number } {
+): ParsedStore {
   const liveByUser = new Map<string, LegacyEntry[]>()
   for (const candidate of entriesRaw) {
     const entry = asLegacyEntry(candidate)
@@ -535,7 +666,10 @@ function migrateLegacyEntries(
   const chains = new Map<string, UserChain>()
   for (const [absUserId, list] of liveByUser) {
     for (const entry of list) {
-      devices.set(entry.tokenHash, freezeDevice({ tokenHash: entry.tokenHash, absUserId, createdAt: entry.createdAt }))
+      devices.set(
+        entry.tokenHash,
+        freezeDevice({ tokenHash: entry.tokenHash, id: randomUUID(), absUserId, createdAt: entry.createdAt }),
+      )
     }
     const freshest = list.reduce((a, b) => (legacyRefreshedAt(b) >= legacyRefreshedAt(a) ? b : a))
     chains.set(
@@ -548,7 +682,7 @@ function migrateLegacyEntries(
       }),
     )
   }
-  return { devices, chains, revision }
+  return { devices, chains, revision, idsGenerated: devices.size > 0 }
 }
 
 // One legacy stored entry (the pre-ADR-0004 joined shape), for the migration above.
@@ -588,11 +722,23 @@ function asLegacyEntry(candidate: unknown): LegacyEntry | undefined {
 
 // Validate the shape rather than trusting our own past writes: the alternative is a malformed row
 // surfacing as an obscure TypeError somewhere in the auth path.
-function asDevice(candidate: unknown): DeviceRow | undefined {
+//
+// A row from before device session ids has no `id`: it is given a fresh one and `generated.ids` is
+// set, so the store is written back once with the ids in it. Name and last used are optional and
+// simply stay empty for such a row - the migration never forces a re-login (SPEC section 8).
+function asDevice(candidate: unknown, generated: { ids: boolean }): DeviceRow | undefined {
   if (typeof candidate !== 'object' || candidate === null) return undefined
-  const { tokenHash, absUserId, createdAt } = candidate as Record<string, unknown>
+  const { tokenHash, id, absUserId, createdAt, deviceName, lastUsedAt } = candidate as Record<string, unknown>
   if (![tokenHash, absUserId, createdAt].every(isNonEmptyString)) return undefined
-  return freezeDevice({ tokenHash: tokenHash as string, absUserId: absUserId as string, createdAt: createdAt as string })
+  if (!isNonEmptyString(id)) generated.ids = true
+  return freezeDevice({
+    tokenHash: tokenHash as string,
+    id: isNonEmptyString(id) ? id : randomUUID(),
+    absUserId: absUserId as string,
+    createdAt: createdAt as string,
+    ...(isNonEmptyString(deviceName) ? { deviceName } : {}),
+    ...(isNonEmptyString(lastUsedAt) ? { lastUsedAt } : {}),
+  })
 }
 
 function asChain(candidate: unknown): UserChain | undefined {

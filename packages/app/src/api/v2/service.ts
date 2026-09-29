@@ -2,10 +2,11 @@ import type { components } from '@ratatoskr/contract'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AuthService } from '../../auth/authService.js'
 import { bearerToken } from '../bearer.js'
-import { toAuthSession } from '../contractMapping.js'
+import { toAuthSession, toDeviceSessionList } from '../contractMapping.js'
 import { ApiService, type ApiServiceDeps } from '../service.js'
 
 type AuthSession = components['schemas']['AuthSession']
+type DeviceSessionList = components['schemas']['DeviceSessionList']
 type LoginRequest = components['schemas']['LoginRequest']
 
 export interface V2ApiServiceDeps extends ApiServiceDeps {
@@ -38,8 +39,8 @@ export class V2ApiService extends ApiService {
   // first sign-in has none — and an unknown one must not be an error either, or a valid sign-in would
   // 401 over the very credential the caller was trying to discard.
   async login(request: FastifyRequest): Promise<AuthSession> {
-    const { username, password } = request.body as LoginRequest
-    return toAuthSession(await this.auth.signIn(username, password, offeredBearer(request)))
+    const { username, password, deviceName } = request.body as LoginRequest
+    return toAuthSession(await this.auth.signIn(username, password, offeredBearer(request), deviceName))
   }
 
   // Sign out: 204 always, per the contract's idempotence — an unknown or already-revoked token and an
@@ -49,6 +50,20 @@ export class V2ApiService extends ApiService {
   // is exempt from the token guard (tokenGuard.ts).
   async logout(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     await this.auth.signOut(request.ratatoskrToken as string)
+    await reply.code(204).send()
+  }
+
+  // The caller's own device sessions (issue #138): session hygiene, self-service only. The caller is
+  // whoever the token guard just proved, so the list is scoped to their user by construction.
+  listDeviceSessions(request: FastifyRequest): DeviceSessionList {
+    return toDeviceSessionList(this.auth.listDeviceSessions(request.ratatoskrToken as string))
+  }
+
+  // End one of them. 404 for an unknown id and for another user's, indistinguishably; the effect on
+  // the ended device is exactly sign-out's (AuthService.endDeviceSession).
+  async endDeviceSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const { id } = request.params as { id: string }
+    await this.auth.endDeviceSession(request.ratatoskrToken as string, id)
     await reply.code(204).send()
   }
 }

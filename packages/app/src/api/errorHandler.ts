@@ -1,7 +1,7 @@
 import type { FastifyError } from 'fastify'
 import { InvalidCursorError } from '../abs/cursor.js'
 import { AbsAuthError, AbsNotFoundError, AbsUpstreamError, ItemNotPlayableError } from '../abs/errors.js'
-import { UnknownTokenError, UpstreamSessionLostError } from '../auth/errors.js'
+import { DeviceSessionNotFoundError, UnknownTokenError, UpstreamSessionLostError } from '../auth/errors.js'
 import { NoActiveSessionError } from '../playback/errors.js'
 import { SonosUpstreamError } from '../sonos/errors.js'
 import { MissingBearerError } from './bearer.js'
@@ -79,6 +79,9 @@ export function mapError(error: unknown): MappedError {
   }
   if (error instanceof NoActiveSessionError) {
     return { statusCode: 404, code: 'not_found', message: 'No audiobook is currently playing' }
+  }
+  if (error instanceof DeviceSessionNotFoundError) {
+    return { statusCode: 404, code: 'not_found', message: 'No such device session' }
   }
   if (error instanceof ItemNotPlayableError) {
     return { statusCode: 400, code: 'bad_request', message: 'This item cannot be played' }

@@ -112,6 +112,9 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     // Wait out a chain refresh caught mid-rotation before the process exits, so its store write is
     // not lost to process.exit (keepAlive.drained). Bounded by main.ts's drain timeout.
     await keepAlive.drained()
+    // Devices' "last used" is persisted throttled while running; write out what the file lacks. Never
+    // throws - a failed flush only warns and must not hold up shutdown (SessionStore.flushLastUsed).
+    await store.flushLastUsed()
     try {
       if (sessions.hasSession?.()) await sessions.stop()
     } catch {
@@ -204,6 +207,11 @@ function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>, keepAlive: Chai
 function resolveDeviceSession(auth: AuthService, keepAlive: ChainKeepAlive): (request: FastifyRequest) => Promise<void> {
   return async (request) => {
     const token = request.ratatoskrToken as string
+    // The bearer is proved here, before anything else can fail on the chain behind it: this is the
+    // device's own request, the one thing "last used" counts (SessionStore.touch). A token that names
+    // no device, or whose chain has died, throws out of resolve and is not recorded.
+    auth.resolve(token)
+    auth.recordUse(token)
     const currentAccessToken = async (): Promise<string> => (await keepAlive.usableChain(auth.resolve(token))).accessToken
     request.absTokenSource = currentAccessToken
     request.absToken = await currentAccessToken()

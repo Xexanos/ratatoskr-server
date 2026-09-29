@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { AbsClient } from '../abs/client.js'
-import { UnknownTokenError, UpstreamSessionLostError } from './errors.js'
-import type { SessionEntry, SessionStore } from './sessionStore.js'
+import { DeviceSessionNotFoundError, UnknownTokenError, UpstreamSessionLostError } from './errors.js'
+import type { AbsChain, SessionEntry, SessionStore } from './sessionStore.js'
 
 // The Audiobookshelf identity a sign-in resolved to, and the credential minted to stand in for it.
 // Deliberately not the contract's AuthSession: what a major puts on the wire is api/'s business
@@ -9,6 +9,18 @@ import type { SessionEntry, SessionStore } from './sessionStore.js'
 export interface DeviceSession {
   token: string
   user: { id: string; username: string }
+}
+
+// One entry of a user's device session list (issue #138): what a signed-in user may see of their own
+// sign-ins. Like DeviceSession, deliberately free of any credential - not the token, its hash, or the
+// chain - so nothing that maps onto a response can leak one.
+export interface DeviceSessionSummary {
+  id: string
+  deviceName?: string
+  createdAt: string
+  lastUsedAt?: string
+  // True for the caller's own entry.
+  current: boolean
 }
 
 // 256 bits, as ADR-0001 requires: the token never expires and is never rotated, so its whole
@@ -49,7 +61,10 @@ export class AuthService {
   // a wholly new session rather than a repaired one (SPEC section 8), so the old entry is signed out
   // full-depth once the new one exists - never before, or a rejected password would sign the device
   // out of a session that was still working. Best-effort for the same reason ending the throwaway is.
-  async signIn(username: string, password: string, replacing?: string): Promise<DeviceSession> {
+  //
+  // `deviceName` is the label this device gave itself, kept on the new entry for the device session list
+  // and never carried over from the entry it replaces.
+  async signIn(username: string, password: string, replacing?: string, deviceName?: string): Promise<DeviceSession> {
     const upstream = await this.abs.login(username, password)
     const token = randomBytes(TOKEN_BYTES).toString('base64url')
     const chain = { accessToken: upstream.accessToken, refreshToken: upstream.refreshToken }
@@ -57,6 +72,7 @@ export class AuthService {
       absUserId: upstream.user.id,
       absUsername: upstream.user.username,
       chain,
+      ...(deviceName !== undefined ? { deviceName } : {}),
     })
     if (!usedFreshChain) {
       // The user already had a live chain; this login's chain is a throwaway ABS session to end.
@@ -88,11 +104,51 @@ export class AuthService {
   // live, and answering "signed out" then is a lie.
   async signOut(token: string): Promise<void> {
     const { removed, endedChain } = await this.store.delete(token)
-    if (!removed || endedChain === undefined) return
+    if (removed) await this.endUpstream(endedChain)
+  }
+
+  // The caller's own device sessions, newest sign-in first, the caller's marked `current`. Scoped by
+  // the resolved entry's user, so another user's sessions are unreachable from here rather than merely
+  // filtered out of a response (issue #138).
+  listDeviceSessions(token: string): DeviceSessionSummary[] {
+    const caller = this.resolve(token)
+    return this.store
+      .list()
+      .filter((entry) => entry.absUserId === caller.absUserId)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .map((entry) => ({
+        id: entry.id,
+        createdAt: entry.createdAt,
+        current: entry.id === caller.id,
+        ...(entry.deviceName !== undefined ? { deviceName: entry.deviceName } : {}),
+        ...(entry.lastUsedAt !== undefined ? { lastUsedAt: entry.lastUsedAt } : {}),
+      }))
+  }
+
+  // End one of the caller's own device sessions: exactly sign-out's effect on that device (`signOut`) -
+  // the entry goes first, and the shared chain is released upstream only when it was the user's last
+  // device. Unlike sign-out this is not idempotent: an id that is not the caller's own is an error, and
+  // another user's id reads the same as an unknown one.
+  async endDeviceSession(token: string, id: string): Promise<void> {
+    const caller = this.resolve(token)
+    const { removed, endedChain } = await this.store.deleteDeviceSession(caller.absUserId, id)
+    if (!removed) throw new DeviceSessionNotFoundError()
+    await this.endUpstream(endedChain)
+  }
+
+  // Note that this token's device just proved its bearer: its "last used". The token guard calls it
+  // once per proved request (app.ts); see SessionStore.touch for what that costs and what it skips.
+  recordUse(token: string): void {
+    this.store.touch(token)
+  }
+
+  // Best-effort, and only when a chain was actually retired with its last device (SPEC section 8).
+  private async endUpstream(endedChain: AbsChain | undefined): Promise<void> {
+    if (endedChain === undefined) return
     try {
       await this.abs.logout(endedChain)
     } catch {
-      // best-effort (SPEC section 8): sign-out still succeeds.
+      // best-effort (SPEC section 8): the device session is gone regardless.
     }
   }
 

@@ -40,9 +40,11 @@ const MAJORS = [
     prefix: '/v2',
     document: openapiDocument,
     expectedProtected: [
+      'endDeviceSession',
       'getCurrentSession',
       'getLibraryItem',
       'getLibraryItemCover',
+      'listDeviceSessions',
       'listInProgressItems',
       'listLibraryItems',
       'logout',
@@ -71,6 +73,8 @@ const FIXTURES: Record<string, { method: 'GET' | 'PUT' | 'POST' | 'DELETE'; path
   resumeSession: { method: 'POST', path: '/sessions/current/resume' },
   seekSession: { method: 'POST', path: '/sessions/current/seek', payload: { positionSeconds: 10 } },
   logout: { method: 'POST', path: '/auth/logout' },
+  listDeviceSessions: { method: 'GET', path: '/auth/device-sessions' },
+  endDeviceSession: { method: 'DELETE', path: '/auth/device-sessions/6f1c5a0e-3f6b-4c1e-9a55-2d8f0b7c1e10' },
 }
 
 // Derived with a deliberate, independent walk (not tokenGuard's) so a derivation bug in the
