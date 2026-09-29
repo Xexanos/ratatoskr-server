@@ -66,7 +66,7 @@ describe('AbsClient.getPlaybackManifest', () => {
       }),
     )
     const manifest = await new AbsClient(BASE).getPlaybackManifest('t', 'li_1')
-    // The whole-book duration (999), not the track-sum (100) — exactly what GET /v1/library/items/li_1
+    // The whole-book duration (999), not the track-sum (100) — exactly what GET /v2/library/items/li_1
     // projects for the same book, and in the same domain shape (the cover URL is minted at the edge).
     expect(manifest.item).toEqual({
       id: 'li_1',

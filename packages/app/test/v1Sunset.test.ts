@@ -28,11 +28,15 @@ describe('/v1 is sunset', () => {
     ['GET', '/v1/something/never/existed'],
     ['GET', '/v1'],
     ['GET', '/v1/'],
+    ['GET', '/v1/library/items?token=abc&limit=5'],
+    ['HEAD', '/v1/health'],
+    ['OPTIONS', '/v1/auth/login'],
   ])('answers %s %s with 410 UPGRADE_REQUIRED in the contract error shape', async (method, url) => {
     const { app } = await appWithAbs()
     const res = await app.inject({ method: method as 'GET', url })
     expect(res.statusCode).toBe(410)
-    expect(res.json()).toEqual(UPGRADE_REQUIRED)
+    // A HEAD response carries no body by definition.
+    if (method !== 'HEAD') expect(res.json()).toEqual(UPGRADE_REQUIRED)
     await app.close()
   })
 
@@ -55,6 +59,8 @@ describe('/v1 is sunset', () => {
       ['{ not json', 'application/json'],
       ['username=lars', 'application/x-www-form-urlencoded'],
       ['plain', 'text/plain'],
+      // Far past Fastify's default body limit (1 MiB): still the 410, not a 413.
+      ['x'.repeat(2 * 1024 * 1024), 'application/json'],
     ] as const) {
       const res = await app.inject({
         method: 'POST',
@@ -62,7 +68,7 @@ describe('/v1 is sunset', () => {
         payload,
         headers: { 'content-type': contentType },
       })
-      expect(res.statusCode, contentType).toBe(410)
+      expect(res.statusCode, `${contentType} ${payload.length}`).toBe(410)
       expect(res.json().code, contentType).toBe('UPGRADE_REQUIRED')
     }
     await app.close()

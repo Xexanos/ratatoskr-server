@@ -5,7 +5,7 @@
 export type ContractDocument = Record<string, unknown>
 
 // A served major's version-mount prefix, read out of its contract's `servers.url` — which SPEC
-// section 6 names as the one place the prefix lives, one place *per major*, so that two majors can be
+// section 6 names as the one place the prefix lives, one place *per major*, so that majors can be
 // served side by side. The Fastify mount (app.ts's openapi-glue `prefix`) and the cover URLs that
 // major's responses carry (contractMapping.ts) both come from here, so the mounted routes, the URLs
 // the API hands out, and the contract that documents them cannot drift apart — deriving it is what

@@ -18,18 +18,17 @@ const UPGRADE_REQUIRED = {
 // and it can only do so if nothing in front of the answer asks for one. So this is a plain route,
 // outside the contract, the security handlers and the token guard, and it never reaches Audiobookshelf.
 //
-// Registered in its own encapsulated scope so its body handling cannot leak: the old app's requests
-// carry JSON bodies that no longer match anything, and a malformed or unexpected one must not turn the
-// answer into a 400 or 415 before this handler runs. Every content type is accepted and discarded.
+// The answer is sent from an `onRequest` hook, which runs before Fastify reads or parses the body: a
+// malformed, oversized or unexpectedly typed one (400, 413, 415) must not turn the answer into anything
+// else. The route below exists only so that the hook has something to match.
 //
 // Not rate limited: the limit is an allow-list over the credential routes (rateLimit.ts), and an
 // unauthenticated 410 takes no credential and costs nothing to serve.
 export async function registerSunsetV1(app: FastifyInstance): Promise<void> {
   await app.register(async (scope) => {
-    scope.removeAllContentTypeParsers()
-    scope.addContentTypeParser('*', { parseAs: 'buffer' }, (_request, _body, done) => done(null, undefined))
+    scope.addHook('onRequest', (_request, reply) => reply.code(410).send(UPGRADE_REQUIRED))
     // Both spellings: the wildcard route does not match the bare prefix.
-    scope.all(SUNSET_PREFIX, (_request, reply) => reply.code(410).send(UPGRADE_REQUIRED))
-    scope.all(`${SUNSET_PREFIX}/*`, (_request, reply) => reply.code(410).send(UPGRADE_REQUIRED))
+    scope.all(SUNSET_PREFIX, () => undefined)
+    scope.all(`${SUNSET_PREFIX}/*`, () => undefined)
   })
 }
