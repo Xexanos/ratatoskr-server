@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import type { Server as HttpsServer } from 'node:https'
-import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
+import { openapiDocument } from '@ratatoskr/contract'
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 import openapiGlue from 'fastify-openapi-glue'
 import { versionPrefix, type ContractDocument } from './apiPrefix.js'
@@ -15,15 +15,10 @@ import { SessionManager } from '../playback/sessionManager.js'
 import { SonosClient } from '../sonos/client.js'
 import { mapError, NotImplementedError } from './errorHandler.js'
 import { credentialPaths, enableCredentialRateLimit } from './rateLimit.js'
-import { absBearerHandlers, ratatoskrBearerHandlers, type SecurityHandlers } from './security.js'
+import { ratatoskrBearerHandlers, type SecurityHandlers } from './security.js'
 import type { ApiService } from './service.js'
-import {
-  createTokenGuard,
-  SELF_VALIDATING_OPERATIONS,
-  UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
-  type GuardOperation,
-} from './tokenGuard.js'
-import { V1ApiService } from './v1/service.js'
+import { registerSunsetV1 } from './sunsetV1.js'
+import { createTokenGuard, UNKNOWN_TOKEN_TOLERANT_OPERATIONS, type GuardOperation } from './tokenGuard.js'
 import { V2ApiService, type V2ApiServiceDeps } from './v2/service.js'
 
 // SPEC section 14: tokens must never be logged. Pino's default request serializer logs
@@ -53,8 +48,8 @@ export interface BuildAppOptions {
 }
 
 export async function buildApp(config: Config, options: BuildAppOptions = {}): Promise<FastifyInstance> {
-  // SPEC section 14: serve HTTPS whenever TLS is configured, so credentials and the
-  // refresh token never cross the network in cleartext. loadConfig() already validated
+  // SPEC section 14: serve HTTPS whenever TLS is configured, so credentials and the Ratatoskr
+  // token never cross the network in cleartext. loadConfig() already validated
   // that the cert/key exist and are readable (or that ALLOW_PLAIN_HTTP was set), so these
   // reads won't surprise us with an ENOENT here.
   //
@@ -140,6 +135,8 @@ export async function buildApp(config: Config, options: BuildAppOptions = {}): P
     new Set(majors.flatMap((major) => credentialPaths(major.document, major.prefix))),
   )
   for (const major of majors) await mountMajor(app, major)
+  // After the mounts, though the order is not load-bearing: /v1 shares no path with anything above.
+  await registerSunsetV1(app)
 
   return app
 }
@@ -160,34 +157,16 @@ interface ServedMajor {
   guardOperation: GuardOperation
 }
 
-// The list of majors served side by side, and the only place that knows there is more than one
-// (SPEC section 6). A major is added or dropped by editing this list alone; nothing downstream has to
-// be revisited for it.
+// The list of majors served, and the only place that knows which (SPEC section 6). A major is added or
+// dropped by editing this list alone; nothing downstream has to be revisited for it. There is one
+// entry today: /v1 was sunset and is answered by registerSunsetV1 instead, outside the contract.
 //
 // Every entry is fully built before any of them is mounted, so a stale token-guard exemption fails
-// startup rather than the first request that happens to hit that major (tokenGuard.ts). Order between
-// the entries carries no meaning.
+// startup rather than the first request that happens to hit that major (tokenGuard.ts).
 function servedMajors(deps: Omit<V2ApiServiceDeps, 'apiPrefix'>, keepAlive: ChainKeepAlive): ServedMajor[] {
-  const v1Prefix = versionPrefix(frozenV1Document)
   const v2Prefix = versionPrefix(openapiDocument)
 
   return [
-    {
-      // Frozen at the contract-1.4.0 tag: the surface installed app versions talk to, which is why it
-      // is served from its own document and its own service (v1/service.ts).
-      document: frozenV1Document,
-      prefix: v1Prefix,
-      service: new V1ApiService({ ...deps, apiPrefix: v1Prefix }),
-      // The bearer is an Audiobookshelf access token, and ABS is the sole authority on whether it is
-      // still valid, so proving it costs an upstream call — skipped for the handlers that make one
-      // anyway (SELF_VALIDATING_OPERATIONS).
-      securityHandlers: absBearerHandlers,
-      guardOperation: createTokenGuard(
-        frozenV1Document,
-        (request) => deps.abs.validateToken(request.absToken as string),
-        SELF_VALIDATING_OPERATIONS,
-      ),
-    },
     {
       // The Ratatoskr-native surface (ADR-0001): the bearer is an opaque token this server issued, so
       // proving it is an in-process store lookup and no request path reaches ABS to authenticate.
@@ -238,8 +217,6 @@ function resolveDeviceSession(auth: AuthService, keepAlive: ChainKeepAlive): (re
 // only refreshes, and thereby only discovers death, when the access token is near expiry — a
 // revocation ahead of that window is invisible until a handler's own upstream call is rejected.
 //
-// /v2 only: the wrap re-resolves the caller's Ratatoskr token, which /v1 has no notion of, and /v1's
-// bearer *is* an Audiobookshelf token, so a 401 there is a genuine `unauthorized`.
 function withUpstreamSessionLoss(guard: GuardOperation, auth: AuthService, keepAlive: ChainKeepAlive): GuardOperation {
   return (operationId, handler) => {
     const guarded = guard(operationId, handler)
@@ -276,8 +253,8 @@ async function mountMajor(app: FastifyInstance, major: ServedMajor): Promise<voi
     specification: major.document,
     // glue registers every path the document declares. Resolve each operationId to its service
     // method; an operation a major declares but does not implement gets a stub that throws
-    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. Both majors
-    // currently implement everything they declare, so no route reaches it — it stays because the
+    // NotImplementedError → 404, rather than glue's default notImplemented stub → 500. The served major
+    // currently implements everything it declares, so no route reaches it — it stays because the
     // alternative for the next declared-but-unbuilt operation is a 500 that reads like a server fault.
     operationResolver: (operationId) => {
       const method = methods[operationId]

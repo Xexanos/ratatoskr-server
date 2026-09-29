@@ -96,6 +96,35 @@ async function adminToken(absBase: string): Promise<string> {
   return token
 }
 
+// Log in as a per-file end user straight against ABS and return the raw token pair (x-return-tokens
+// asks for the refresh token in the body). Used where a test needs a genuine ABS credential of its
+// own - to write progress into ABS directly, or as the "wrong kind of bearer" the server must refuse -
+// now that the server no longer hands ABS tokens out. Tolerant of the response shape across versions,
+// like adminToken above; retried through ABS's warm-up.
+export async function absLogin(
+  absBase: string,
+  username: string,
+  password: string,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const res = await seedFetch(`ABS login ${username}`, `${absBase}/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-return-tokens': 'true' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!res.ok) throw new Error(`ABS login ${username} failed: ${res.status} ${await res.text()}`)
+  const body = (await res.json()) as {
+    accessToken?: unknown
+    refreshToken?: unknown
+    user?: { accessToken?: unknown; refreshToken?: unknown; token?: unknown }
+  }
+  const accessToken = [body.accessToken, body.user?.accessToken, body.user?.token].find((t) => typeof t === 'string')
+  const refreshToken = [body.refreshToken, body.user?.refreshToken].find((t) => typeof t === 'string')
+  if (typeof accessToken !== 'string' || typeof refreshToken !== 'string') {
+    throw new Error(`ABS login ${username} returned no access/refresh token pair`)
+  }
+  return { accessToken, refreshToken }
+}
+
 // Create an (active) ABS user. Each test file creates its OWN end user and streamer user so
 // files cannot interfere through shared progress or login sessions on the shared container.
 // isActive defaults to false → an inactive user cannot log in (401), and the server logs the

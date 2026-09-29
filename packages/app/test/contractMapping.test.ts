@@ -1,18 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { LibraryBook, LibraryBookDetail } from '../src/abs/library.js'
 import {
-  toAuthTokens,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
   toLibraryItemSummary,
   toSessionResponse,
   toSpeaker,
-  toV1SessionResponse,
 } from '../src/api/contractMapping.js'
 import type { PlaybackSession } from '../src/playback/sessionManager.js'
 
-const PREFIX = '/v1'
+const PREFIX = '/v2'
 
 const book = (overrides: Partial<LibraryBook> = {}): LibraryBook => ({
   id: 'li_1',
@@ -27,13 +25,13 @@ const book = (overrides: Partial<LibraryBook> = {}): LibraryBook => ({
 describe('domain -> contract mapping', () => {
   describe('coverUrl', () => {
     it('mints the cover-proxy path under the given mount prefix when the book has cover art', () => {
-      expect(toLibraryItemSummary(book(), PREFIX).coverUrl).toBe('/v1/library/items/li_1/cover')
+      expect(toLibraryItemSummary(book(), PREFIX).coverUrl).toBe('/v2/library/items/li_1/cover')
     })
 
     // The point of minting at the edge: a request served under a different major must be handed
     // that major's own cover path, not the one baked in when the projection ran.
     it('carries the requesting major prefix rather than a fixed one', () => {
-      expect(toLibraryItemSummary(book(), '/v2').coverUrl).toBe('/v2/library/items/li_1/cover')
+      expect(toLibraryItemSummary(book(), '/v3').coverUrl).toBe('/v3/library/items/li_1/cover')
     })
 
     it('is null when Audiobookshelf holds no cover art', () => {
@@ -41,7 +39,7 @@ describe('domain -> contract mapping', () => {
     })
 
     it('percent-encodes the item id', () => {
-      expect(toLibraryItemSummary(book({ id: 'li/1 x' }), PREFIX).coverUrl).toBe('/v1/library/items/li%2F1%20x/cover')
+      expect(toLibraryItemSummary(book({ id: 'li/1 x' }), PREFIX).coverUrl).toBe('/v2/library/items/li%2F1%20x/cover')
     })
   })
 
@@ -53,7 +51,7 @@ describe('domain -> contract mapping', () => {
         title: 'Alpha',
         author: 'Author A',
         durationSeconds: 3600,
-        coverUrl: '/v1/library/items/li_1/cover',
+        coverUrl: '/v2/library/items/li_1/cover',
         progress,
       })
     })
@@ -72,7 +70,7 @@ describe('domain -> contract mapping', () => {
       const page = { books: [book(), book({ id: 'li_2', hasCover: false })], nextCursor: 'abc' }
       expect(toLibraryItemPage(page, PREFIX)).toEqual({
         items: [
-          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
+          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v2/library/items/li_1/cover' },
           { id: 'li_2', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: null },
         ],
         nextCursor: 'abc',
@@ -86,7 +84,7 @@ describe('domain -> contract mapping', () => {
     it('wraps a bare book array as a list', () => {
       expect(toLibraryItemList([book()], PREFIX)).toEqual({
         items: [
-          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v1/library/items/li_1/cover' },
+          { id: 'li_1', title: 'Alpha', author: 'Author A', durationSeconds: 3600, coverUrl: '/v2/library/items/li_1/cover' },
         ],
       })
     })
@@ -107,7 +105,7 @@ describe('domain -> contract mapping', () => {
         title: 'Alpha',
         author: 'Author A',
         durationSeconds: 3600,
-        coverUrl: '/v1/library/items/li_1/cover',
+        coverUrl: '/v2/library/items/li_1/cover',
         progress: { positionSeconds: 0, isFinished: false },
         description: 'Desc',
         narrator: 'Nar',
@@ -134,26 +132,6 @@ describe('domain -> contract mapping', () => {
     })
   })
 
-  describe('auth tokens', () => {
-    it('maps the ABS pair and its user onto the contract shape', () => {
-      const pair = {
-        accessToken: 'access-1',
-        refreshToken: 'refresh-1',
-        user: { id: 'usr_1', username: 'lars' },
-      }
-      expect(toAuthTokens(pair)).toEqual(pair)
-    })
-
-    // A fresh object, not the upstream one passed through: the two types coincide today but are not
-    // the same thing, and a later major replaces the contract side without ABS changing.
-    it('does not hand back the upstream object itself', () => {
-      const pair = { accessToken: 'a', refreshToken: 'r', user: { id: 'u', username: 'n' } }
-      const mapped = toAuthTokens(pair)
-      expect(mapped).not.toBe(pair)
-      expect(mapped.user).not.toBe(pair.user)
-    })
-  })
-
   describe('session', () => {
     const session = (overrides: Partial<PlaybackSession> = {}): PlaybackSession => ({
       itemId: 'li_1',
@@ -163,7 +141,6 @@ describe('domain -> contract mapping', () => {
       positionSeconds: 12,
       durationSeconds: 3600,
       updatedAt: '2026-07-28T00:00:00.000Z',
-      rotatedTokens: undefined,
       ...overrides,
     })
 
@@ -176,9 +153,9 @@ describe('domain -> contract mapping', () => {
         title: 'Alpha',
         author: 'Author A',
         durationSeconds: 3600,
-        coverUrl: '/v1/library/items/li_1/cover',
+        coverUrl: '/v2/library/items/li_1/cover',
       })
-      expect(toSessionResponse(session(), '/v2').item.coverUrl).toBe('/v2/library/items/li_1/cover')
+      expect(toSessionResponse(session(), '/v3').item.coverUrl).toBe('/v3/library/items/li_1/cover')
     })
 
     it('carries the session fields through unchanged', () => {
@@ -189,30 +166,6 @@ describe('domain -> contract mapping', () => {
         positionSeconds: 12,
         durationSeconds: 3600,
         updatedAt: '2026-07-28T00:00:00.000Z',
-      })
-    })
-
-    // The rotated pair is 1.4.0's handover field, so the shared mapper must not be able to produce
-    // it. Otherwise keeping an upstream refresh token off the /v2 wire would rest on the serializer
-    // dropping what 2.0.0's schema omits, instead of on nothing ever minting it for that major.
-    it('never carries a rotated pair, even when the session holds one', () => {
-      const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-      expect(toSessionResponse(session({ rotatedTokens }), PREFIX)).not.toHaveProperty('rotatedTokens')
-    })
-
-    describe('the /v1 variant', () => {
-      it('passes a pending rotated pair through and omits it when there is none', () => {
-        const rotatedTokens = { accessToken: 'new-access', refreshToken: 'new-refresh' }
-        expect(toV1SessionResponse(session({ rotatedTokens }), PREFIX).rotatedTokens).toEqual(rotatedTokens)
-        expect(toV1SessionResponse(session(), PREFIX)).not.toHaveProperty('rotatedTokens')
-      })
-
-      it('carries the shared session fields as well', () => {
-        expect(toV1SessionResponse(session(), PREFIX)).toMatchObject({
-          itemId: 'li_1',
-          speakerId: 'sp_1',
-          item: { coverUrl: '/v1/library/items/li_1/cover' },
-        })
       })
     })
   })

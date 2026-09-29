@@ -1,10 +1,9 @@
 import type { components } from '@ratatoskr/contract'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { AbsClient } from '../abs/client.js'
-import type { ListeningToken, PlaybackSession, SessionManager } from '../playback/sessionManager.js'
+import type { ListeningToken, SessionManager } from '../playback/sessionManager.js'
 import type { SonosClient } from '../sonos/client.js'
 import {
-  type MappedSession,
   toLibraryItem,
   toLibraryItemList,
   toLibraryItemPage,
@@ -51,21 +50,6 @@ async function checkSonos(sonos: SonosClient): Promise<{ status: DependencyStatu
   }
 }
 
-// Where a playback session started by this request reads its Audiobookshelf access token. A major
-// whose guard resolved a re-readable session supplies the live source; one whose bearer *is* the
-// upstream token has nothing behind it to re-read, so its session holds what the request carried —
-// which is exactly the /v1 semantics the frozen major is entitled to (security.ts).
-export function listeningToken(request: FastifyRequest): ListeningToken {
-  if (request.absTokenSource !== undefined) return request.absTokenSource
-  // Read now, not later. A playback session outlives the request that started it by the length of a
-  // book, so closing over `request` to re-read the decorator off it would keep the whole request
-  // object alive for that long — and read it well after the response was sent. There is nothing to
-  // gain by waiting either: on a surface with no source to re-read, the bearer *is* the upstream
-  // token and cannot change under the session.
-  const token = request.absToken as string
-  return () => Promise.resolve(token)
-}
-
 export interface ApiServiceDeps {
   abs: AbsClient
   sonos: SonosClient
@@ -82,7 +66,7 @@ export interface ApiServiceDeps {
 //
 // Every served major runs these operations from this one body, so they cannot drift apart by
 // accident — which also means a change here reaches every mount. The members below are protected for
-// the subclass in v1/, not for open extension.
+// the subclass in v2/, not for open extension.
 export class ApiService {
   protected readonly abs: AbsClient
   private readonly sonos: SonosClient
@@ -107,9 +91,8 @@ export class ApiService {
     return { status: abs.reachable && !sonosDown ? 'ok' : 'degraded', abs, sonos: sonosCheck.status }
   }
 
-  // No auth operations here: both majors declare `login` at POST /auth/login and mean incompatible
-  // things by it, so each one's auth model lives in its own subclass — see v1/service.ts, which
-  // carries the reasoning.
+  // No auth operations here: the auth model belongs to the major, so it lives in its own subclass -
+  // see v2/service.ts.
 
   async listLibraryItems(request: FastifyRequest): Promise<LibraryItemPage> {
     const { q: searchQuery, limit, cursor } = request.query as { q?: string; limit: number; cursor?: string }
@@ -150,53 +133,39 @@ export class ApiService {
 
   // --- Playback (SPEC sections 4 and 5) ---
 
-  // Every session response goes through here, so a surface that puts an extra field on the wire says
-  // so in one place. This mapper cannot produce the rotated Audiobookshelf pair at all: leaving that
-  // to the serializer would make "no upstream credential on the wire" (SPEC section 8) depend on every
-  // response having a declared schema (contractMapping.ts).
-  protected mapSession(session: PlaybackSession): MappedSession {
+  // The session methods act on the session's own listening token rather than forwarding the caller's,
+  // so they take nothing from the request but what the operation names. The token guard has already
+  // proved the bearer and resolved the chain (tokenGuard.ts).
+  async getCurrentSession(): Promise<Session> {
+    return toSessionResponse(await this.sessions.current(), this.apiPrefix)
+  }
+
+  // What the session is given is where to *read* the access token (`absTokenSource`), not the token
+  // itself - so the chain the keep-alive loop renews under it reaches a session that is already
+  // running, and long unattended playback keeps writing progress past the access token it started
+  // with (SPEC section 8).
+  async startSession(request: FastifyRequest): Promise<Session> {
+    const { itemId, speakerId } = request.body as StartSessionRequest
+    const session = await this.sessions.start(request.absTokenSource as ListeningToken, itemId, speakerId)
     return toSessionResponse(session, this.apiPrefix)
   }
 
-  // The session methods never forward the caller's token to ABS on their own (they act on the
-  // session's stored listening token), so the token guard validates it upstream before dispatch —
-  // see tokenGuard.ts. startSession is the exception (self-validating): it presents the token to
-  // ABS via getPlaybackManifest, which 401s an invalid one.
-  async getCurrentSession(request: FastifyRequest): Promise<Session> {
-    return this.mapSession(await this.sessions.current(request.absToken as string))
-  }
-
-  // No refresh token is passed on: rotating one is the /v1 handover's business (v1/service.ts), and
-  // on /v2 renewing the chain belongs to the keep-alive loop instead. What the session is given is
-  // where to *read* the access token, not the token itself — so the chain that loop renews under it
-  // reaches a session that is already running, and long unattended playback keeps writing progress
-  // past the access token it started with (SPEC section 8).
-  async startSession(request: FastifyRequest): Promise<Session> {
-    const { itemId, speakerId } = request.body as StartSessionRequest
-    const session = await this.sessions.start(listeningToken(request), undefined, itemId, speakerId)
-    return this.mapSession(session)
-  }
-
-  // Always 204: no token pair travels to the client on this surface, so the final Session the manager
-  // returns has nothing left to deliver and is discarded (SPEC section 8, which also records what that
-  // costs when a session is shared with a surface that does deliver one).
-  async stopSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    await this.sessions.stop(request.absToken as string)
+  async stopSession(_request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    await this.sessions.stop()
     await reply.code(204).send()
   }
 
   // pause/resume/seek command Sonos and write the reached position back to ABS (SPEC section 5).
-  async pauseSession(request: FastifyRequest): Promise<Session> {
-    return this.mapSession(await this.sessions.pause(request.absToken as string))
+  async pauseSession(): Promise<Session> {
+    return toSessionResponse(await this.sessions.pause(), this.apiPrefix)
   }
 
-  async resumeSession(request: FastifyRequest): Promise<Session> {
-    return this.mapSession(await this.sessions.resume(request.absToken as string))
+  async resumeSession(): Promise<Session> {
+    return toSessionResponse(await this.sessions.resume(), this.apiPrefix)
   }
 
   async seekSession(request: FastifyRequest): Promise<Session> {
     const { positionSeconds } = request.body as SeekRequest
-    const session = await this.sessions.seek(request.absToken as string, positionSeconds)
-    return this.mapSession(session)
+    return toSessionResponse(await this.sessions.seek(positionSeconds), this.apiPrefix)
   }
 }

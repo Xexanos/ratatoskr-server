@@ -1,4 +1,4 @@
-import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
+import { openapiDocument } from '@ratatoskr/contract'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AbsClient } from '../src/abs/client.js'
 import { buildApp } from '../src/api/app.js'
@@ -19,7 +19,6 @@ async function appWith(abs: Partial<AbsClient> = {}) {
     absClient: {
       login: vi.fn().mockResolvedValue(TOKENS),
       logout: vi.fn().mockResolvedValue(undefined),
-      refresh: vi.fn().mockResolvedValue(TOKENS),
       probe: vi.fn().mockResolvedValue('ok'),
       ...abs,
     } as unknown as AbsClient,
@@ -48,14 +47,10 @@ async function attempt(
   return last
 }
 
-describe('the credential endpoints are rate limited on every served major', () => {
+describe('the credential endpoints are rate limited', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it.each([
-    ['/v1/auth/login'],
-    ['/v2/auth/login'],
-    ['/v1/auth/refresh'],
-  ])('refuses the attempt after the window is exhausted on %s', async (url) => {
+  it.each([['/v2/auth/login']])('refuses the attempt after the window is exhausted on %s', async (url) => {
     const app = await appWith()
 
     const allowed = await attempt(app, url, CREDENTIAL_ATTEMPTS_PER_WINDOW)
@@ -70,29 +65,14 @@ describe('the credential endpoints are rate limited on every served major', () =
     await app.close()
   })
 
-  // One budget per address across every credential route, not one per route. Deliberate: the budget is
-  // for credential attempts as such, so an attacker cannot get a fresh allowance by alternating between
-  // login and refresh, or between the two majors' logins.
-  it('spends one budget across all credential routes of all majors', async () => {
-    const app = await appWith()
-    const exhausted = await attempt(app, '/v1/auth/login', CREDENTIAL_ATTEMPTS_PER_WINDOW + 1)
-    expect(exhausted.statusCode).toBe(429)
-
-    for (const url of ['/v1/auth/refresh', '/v2/auth/login']) {
-      const res = await app.inject({ method: 'POST', url, payload: CREDENTIALS, remoteAddress: '10.0.0.1' })
-      expect(res.statusCode, url).toBe(429)
-    }
-    await app.close()
-  })
-
   it('counts per source address, so one client cannot lock another out', async () => {
     const app = await appWith()
-    const exhausted = await attempt(app, '/v1/auth/login', CREDENTIAL_ATTEMPTS_PER_WINDOW + 1)
+    const exhausted = await attempt(app, '/v2/auth/login', CREDENTIAL_ATTEMPTS_PER_WINDOW + 1)
     expect(exhausted.statusCode).toBe(429)
 
     const other = await app.inject({
       method: 'POST',
-      url: '/v1/auth/login',
+      url: '/v2/auth/login',
       payload: CREDENTIALS,
       remoteAddress: '10.0.0.2',
     })
@@ -102,7 +82,7 @@ describe('the credential endpoints are rate limited on every served major', () =
 
   // These take no credentials, and /health in particular is polled on a timer by anything watching
   // the service — a limit there would turn monitoring into an outage.
-  it.each([['/v1/health'], ['/v2/health'], ['/v1/speakers']])('leaves %s unlimited', async (url) => {
+  it.each([['/v2/health'], ['/v2/speakers']])('leaves %s unlimited', async (url) => {
     const app = await appWith()
     for (let i = 0; i < CREDENTIAL_ATTEMPTS_PER_WINDOW + 5; i += 1) {
       const res = await app.inject({ method: 'GET', url, remoteAddress: '10.0.0.1' })
@@ -116,11 +96,11 @@ describe('the credential endpoints are rate limited on every served major', () =
   it('does not count requests to unknown paths', async () => {
     const app = await appWith()
     for (let i = 0; i < CREDENTIAL_ATTEMPTS_PER_WINDOW + 5; i += 1) {
-      await app.inject({ method: 'POST', url: '/v1/nope', payload: {}, remoteAddress: '10.0.0.1' })
+      await app.inject({ method: 'POST', url: '/v2/nope', payload: {}, remoteAddress: '10.0.0.1' })
     }
     const res = await app.inject({
       method: 'POST',
-      url: '/v1/auth/login',
+      url: '/v2/auth/login',
       payload: CREDENTIALS,
       remoteAddress: '10.0.0.1',
     })
@@ -129,14 +109,12 @@ describe('the credential endpoints are rate limited on every served major', () =
   })
 })
 
-// The limited routes are derived from the documents rather than listed, so an operation that takes
-// credentials is limited on whichever major declares it, at whatever path that major declares.
+// The limited routes are derived from the document rather than listed, so an operation that takes
+// credentials is limited at whatever path the contract declares it.
 describe('credentialPaths', () => {
-  it('finds the credential routes of each served major, under its own prefix', () => {
-    expect(credentialPaths(frozenV1Document, '/v1').sort()).toEqual(['/v1/auth/login', '/v1/auth/refresh'])
+  it('finds the credential routes of the served major, under its prefix', () => {
     expect(credentialPaths(openapiDocument, '/v2').sort()).toEqual(['/v2/auth/login'])
   })
-
   // A path item legitimately holds members that are not operations (OpenAPI allows `parameters`,
   // `summary`, a `$ref`), and an operation may carry no operationId. Neither is a credential route, and
   // neither may throw while the limited set is being built — an exception here would take startup down.
@@ -154,12 +132,10 @@ describe('credentialPaths', () => {
     expect(credentialPaths(document, '/v9')).toEqual([])
   })
 
-  it('has no entry for an operation neither served document declares', () => {
+  it('has no entry for an operation the served document does not declare', () => {
     const declared = new Set(
-      [frozenV1Document, openapiDocument].flatMap((document) =>
-        Object.values((document as { paths: Record<string, Record<string, { operationId?: string }>> }).paths).flatMap(
-          (pathItem) => Object.values(pathItem).map((operation) => operation?.operationId),
-        ),
+      Object.values((openapiDocument as { paths: Record<string, Record<string, { operationId?: string }>> }).paths).flatMap(
+        (pathItem) => Object.values(pathItem).map((operation) => operation?.operationId),
       ),
     )
     expect([...CREDENTIAL_OPERATIONS].filter((operationId) => !declared.has(operationId))).toEqual([])

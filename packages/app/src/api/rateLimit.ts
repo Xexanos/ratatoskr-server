@@ -16,7 +16,6 @@ import { TooManyRequestsError } from './errorHandler.js'
 // the limit follows the operation wherever a major mounts it.
 export const CREDENTIAL_OPERATIONS: ReadonlySet<string> = new Set([
   'login', // username and password
-  'refresh', // a refresh token, which is a credential in its own right
 ])
 
 // Conservative in the sense SPEC section 14 asks for: far above what a person mistyping a password

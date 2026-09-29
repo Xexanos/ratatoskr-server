@@ -141,26 +141,22 @@ must build on:
   each mount derives it from the `servers.url` of the very document it registers. A major's routes
   and the URLs its responses hand out therefore cannot drift apart, and no build-wide prefix can
   give one major's answer to both.
-- Two majors are served side by side, from one process, each from its own document:
-  **2.0.0 under `/v2`** — the auth surface of
+- One major is served: **2.0.0 under `/v2`** - the auth surface of
   [ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), cut in one breaking step with no
-  deprecation markers, since `/v1` clients read the frozen 1.4.0 tag — and **1.4.0 under `/v1`**,
-  frozen, until its sunset (then an unauthenticated 410 `UPGRADE_REQUIRED` stub). One
-  `fastify-openapi-glue` registration per major, each with its own document, mount prefix, service,
-  security handlers and contract-derived token guard; assembling that list is the only place that knows
-  there is more than one, so sunsetting `/v1` is removing an entry. The two majors' **auth models are
-  genuinely different**, which is what those per-major slots are for: both name the same bearer scheme
-  and mean a different credential by it — an Audiobookshelf access token proved upstream on `/v1`, an
-  opaque Ratatoskr token resolved in process on `/v2` (section 8) — and each major's guard therefore
-  exempts a different set of operations. Everything a client does *with* its token is shared code, and
-  runs on whichever Audiobookshelf token that major's guard put on the request.
-- `/v1` is frozen at the **`contract-1.4.0`** tag, and what it mounts is a tracked copy of that
-  document at `contract/v1/openapi.yaml`. The `contract-freeze` CI job is what makes that a freeze
-  rather than a duplicate: it holds the copy byte-identical to the tag. The accident it exists for is
-  not a deliberate edit but a sweep — a reformat, a lint rule, a search-and-replace across
-  `contract/**` — silently reshaping the surface installed app versions talk to. The copy exists at
-  all because generating the served artifacts must need no git history: `.git` is deliberately
-  outside the image build context, and keeping that hermetic is worth more than avoiding a copy.
+  deprecation markers. It is registered with `fastify-openapi-glue` from its own document, with its own
+  mount prefix, service, security handlers and contract-derived token guard; assembling that list
+  (`servedMajors` in `api/app.ts`) is the only place that knows which majors are served, so a further
+  major would be one more entry.
+- **`/v1` is sunset.** The old major (contract 1.4.0, the shared-token model with its rotation handover)
+  is no longer served, and no document of it is kept in the repo: its text lives on in the immutable
+  `contract-1.4.0` git tag. Every route under `/v1` - any method, any path - answers an
+  **unauthenticated `410 Gone`** in the contract's error shape, with `code: "UPGRADE_REQUIRED"` and a
+  "please update the app" message, **indefinitely**. It is a plain catch-all route outside the
+  contract, the security handlers and the token guard (`api/sunsetV1.ts`): the old app has to be able
+  to surface it even without a valid token (where it shows as its generic sign-in failure), and it
+  never reaches Audiobookshelf. It accepts and ignores any request body, and it is not rate limited
+  (it takes no credential and costs nothing to serve). The sunset commit is deliberately not a
+  `feat!:`, so that the server's major version stays in step with the API major it serves.
 - Backwards compatibility must hold in both directions: an older app must work against a
   newer server, and a newer app must degrade gracefully against an older server. In
   practice for the server: never remove or repurpose a field within a served major, only
@@ -168,9 +164,7 @@ must build on:
 - A CI job runs oasdiff between the PR's base and head and fails the build on a breaking
   change. It reads `info.version` on both sides and skips itself when the major differs,
   which is exactly the case this rule allows — so a major cut needs no manual flag, and
-  everything else stays gated. It grades the contract under development only: the other served
-  major is frozen rather than versioned, and `contract-freeze` gates that one more strictly than any
-  breaking-change check could.
+  everything else stays gated.
 - **`info.version` names the contract text, one-to-one.** Any change to `contract/openapi.yaml`
   must move `info.version` strictly forward, to a version that has never been tagged. The
   `contract-version` CI job enforces this on every PR: oasdiff (above) decides whether the *shape*
@@ -179,8 +173,8 @@ must build on:
 - **Each version is frozen under an immutable `contract-<x.y.z>` git tag, cut automatically.** When a
   version lands on `main`, `contract-tag.yml` tags that commit `contract-<version>` and pushes it; the
   same job re-verifies an existing tag byte-for-byte, so a released version's text can never drift.
-  Clients pin against these tags — the app generates its types from one, and a frozen major is served
-  from the tagged document itself (ADR-0001; the tag *is* the freeze). The tag is therefore an *identity*
+  Clients pin against these tags - the app generates its types from one, and a superseded major's
+  text stays readable at its tag after it is no longer served (ADR-0001). The tag is therefore an *identity*
   statement, not a build certificate, and is cut on push rather than gated on a green run — unlike the
   server image's `v<x.y.z>` tags, which certify tested bytes and hang behind E2E (`promote.yml`).
   See [ADR-0002](./adr/0002-automatic-contract-version-tagging.md).
@@ -266,10 +260,6 @@ if something required is missing:
   entrypoint also refuses to start when that directory is not a mounted volume: it would be
   writable either way, and the store would then silently disappear on the next container
   recreation.
-- `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` (optional, default 300) — how far before the listening
-  user's access token expires the sync loop renews it, so the rotated pair reaches the client while
-  its old access token is still valid. Serves the `/v1` rotation-handover protocol only (frozen
-  1.4.0 contract, see section 8) and is removed together with `/v1`.
 - `KEEP_ALIVE_REFRESH_INTERVAL_MS` (optional, default 86400000 — a day) — how often the keep-alive
   loop renews every stored Audiobookshelf chain (section 8), and with it the boot pass's staleness
   cutoff, since a chain is stale exactly when it missed a sweep. The daily default is what ADR-0001
@@ -293,11 +283,9 @@ to the person who is actually listening. The client credential, however, is
 **Ratatoskr-issued**: the server is the sole holder of ABS token pairs
 ([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), decided in
 [#125](https://github.com/Xexanos/ratatoskr-server/issues/125)). This section describes the
-model of contract 2.0.0 under `/v2` — cut in the contract, with the server-side pieces
-landing in follow-up issues (section 6). The previous shared-token model and its
-rotation-handover protocol stay served under `/v1`, frozen at the 1.4.0 contract tag,
-until the sunset described in the ADR — the old protocol's specification lives in that
-tag, not here.
+model of contract 2.0.0 under `/v2`. The previous shared-token model and its
+rotation-handover protocol were served under `/v1` until the sunset described in the ADR
+(section 6); the old protocol's specification lives in the `contract-1.4.0` tag, not here.
 
 The hard requirement this model exists to meet: **the user stays signed in until an
 explicit sign-out.** Server restarts and arbitrarily long usage pauses must never force a
@@ -424,41 +412,22 @@ re-login.
   progress during long unattended playback without any client involvement. A playback session
   is bound to the **entry**, not to the chain as it stood when playback started: it reads the
   access token again on every write-back, so a chain the keep-alive loop renews mid-book
-  reaches a session that is already running. `/v1` keeps the opposite binding, and is entitled
-  to it — there the bearer *is* the upstream token and the sync loop rotates the pair itself. The media URLs
+  reaches a session that is already running. The media URLs
   handed to the speakers carry the dedicated streamer identity's API key instead, because
   those URLs are readable by anyone on the LAN (section 14).
 
-**What `/v1` still runs.** The frozen major keeps every part of the old model, unchanged, in
-a service of its own: the `POST /v1/auth/login` and `POST /v1/auth/refresh` proxies that hand
-ABS token pairs to the device, the optional `refreshToken` on `PUT /v1/sessions/current` that
-arms the sync loop's renewal (`LISTENING_TOKEN_REFRESH_MARGIN_SECONDS`, section 7 — that knob
-serves this route alone), and the rotation handover, including the
-`DELETE /v1/sessions/current` that answers 200 with a final `Session` when a rotated pair was
-still owed. Everything else is implemented once and inherited by both majors, so the shared
-operations cannot drift apart by accident — with the consequence that **a change to a shared
-method changes `/v1` too**. `/v2`'s move from the caller's bearer to a session-resolved
-upstream token is exactly such a change, and it is kept out of the shared body by living in
-the **token guard each mount is built with**: `/v2`'s resolves the bearer to a device session,
-renews its chain when the access token is due, and leaves the resulting upstream token — plus
-a way to read it again later, for a playback session that outlives the request — where every
-shared handler already looks. One major's auth model can therefore be replaced without
-touching the other's, and without either appearing in the operations they share.
-
-**The one thing the two majors share.** Not the handover — it cannot be armed or delivered
-under `/v2`, which has no field for it — but the single active playback session, of which there
-is still exactly one. A `/v2` caller presenting the same Audiobookshelf access token a `/v1`
-client is listening with can stop that session, and a rotated pair the `/v1` client had not yet
-collected is discarded with it, because `/v2`'s stop hands nothing back. The `/v1` client then
-re-authenticates. This needs one device speaking both majors with the same upstream token, and
-it stops being expressible once `/v2` bearers are Ratatoskr tokens. It is recorded here, and at
-the `/v2` stop itself, rather than papered over: the alternative would be a `/v2` response
-carrying an upstream credential under a field its own contract does not declare.
+**Shared operations.** The operations a client performs *with* its token are implemented once, in a
+shared service the `/v2` service extends; the auth model itself (`login`, `logout`) lives in the `/v2`
+service alone. The move from the caller's bearer to a session-resolved upstream token lives in the
+**token guard the mount is built with**: it resolves the bearer to a device session, renews its chain
+when the access token is due, and leaves the resulting upstream token - plus a way to read it again
+later, for a playback session that outlives the request - where every shared handler already looks.
+The auth model can therefore be replaced without touching the operations it serves.
 
 The client-side half is specified in the app's SPEC, section 5, and degenerates to:
 attach the token; on 401 + `UPSTREAM_SESSION_LOST` show a targeted re-login prompt; on any
-other 401 treat the device as signed out. The entire rotation-adoption protocol on the app
-side drops with `/v1`.
+other 401 treat the device as signed out. The rotation-adoption protocol on the app
+side went with `/v1`; a `/v1` answer of 410 `UPGRADE_REQUIRED` means the app itself is too old.
 
 Progress and user data still live in ABS only (section 11); the session store persists
 **credentials**, not domain state. There are no Ratatoskr-native accounts — identity is
@@ -613,9 +582,8 @@ ratatoskr-server/
 │   │   │                       #   contract-shaped library and session values are built, and
 │   │   │                       #   the only place a cover URL is minted; domainShapeAssertion.ts
 │   │   │                       #   makes skipping that step a build error rather than a wrong URL
-│   │   │   └── v1/             #   what contract 2.0.0 dropped, served frozen under /v1 until its
-│   │   │                       #   sunset: the credential proxies and the rotation handover. Extends
-│   │   │                       #   the shared service; deleted whole when /v1 goes (section 8)
+│   │   │                       #   sunsetV1.ts is the unauthenticated 410 stub every /v1 route
+│   │   │                       #   answers (section 6)
 │   │   └── main.ts             #   startup wiring
 │   │
 │   ├── fake-sonos/           # @ratatoskr/fake-sonos — the UPnP/SOAP speaker double (test-only):
@@ -697,28 +665,21 @@ Decisions (binding for the implementation):
   — for setups that terminate TLS in a reverse proxy or accept the risk knowingly.
 - **Log redaction is normative.** Never log `Authorization` headers, query strings
   containing `token`, the request bodies of the `/auth/*` endpoints, or response bodies
-  that carry credentials — the Ratatoskr token returned by `/v2/auth/login`, and on the
-  frozen `/v1` surface the `AuthTokens` from `/auth/*` and the `rotatedTokens` object on a
-  `Session`, until `/v1` sunsets. The error mapper strips URLs from upstream errors before
+  that carry credentials - the Ratatoskr token returned by `/v2/auth/login`. The error mapper strips URLs from upstream errors before
   they reach responses or logs. (Also note: ABS and any proxy in between will log
   media-URL query strings — one more reason those URLs carry only the streamer API key.)
-- **The credential endpoints are rate-limited.** `/auth/login` on every served major, and `/v1`'s
-  `/auth/refresh` while it is still served, carry a conservative per-source-address limit (10
+- **The credential endpoints are rate-limited.** `/auth/login` carries a conservative per-source-address limit (10
   attempts per minute) so Ratatoskr is not a free brute-force funnel in front of ABS — which cannot
   throttle by source itself, since every attempt reaches it from this server. The limited routes are
-  derived from each served document's operationIds, so an operation taking a credential is limited on
-  whichever major declares it. Refusals answer `429` in the contract's error shape, with a
+  derived from the served document's operationIds, so an operation taking a credential is limited
+  wherever it is declared. Refusals answer `429` in the contract's error shape, with a
   `Retry-After`. The other unauthenticated endpoints (`/health`, `GET /speakers`) take no credentials
   and stay unlimited — they serve cached local state and are polled legitimately, so a limit there
   would turn a monitoring loop into an outage. Unrouted paths are not counted either: a stranger
   spraying unknown URLs must not consume a real client's budget.
-  Two consequences worth knowing. The limit keys on the source address, so behind a reverse proxy —
-  which Ratatoskr neither configures nor trusts headers from — every client shares one bucket, so a
-  deployment that needs per-client limits should not put one in front of the credential routes. And
-  `429` is declared by the contract under development but **not** by the frozen `/v1` document, which
-  cannot gain a response: there the status is served undeclared, as a consequence of the freeze rather
-  than a choice. A `/v1` client that reads an unexpected `4xx` on login as "credentials rejected" will
-  prompt again instead of waiting — the one behaviour this costs.
+  One consequence worth knowing: the limit keys on the source address, so behind a reverse proxy -
+  which Ratatoskr neither configures nor trusts headers from - every client shares one bucket, so a
+  deployment that needs per-client limits should not put one in front of the credential routes.
 - **The session store is encrypted, keyed by the operator.** The per-user ABS chains and
   Ratatoskr token hashes (section 8) persist as a single AES-256-GCM file on the mounted
   volume, key from `SESSION_STORE_KEY` (mandatory — no key, no boot). A foreign container
@@ -770,15 +731,13 @@ Known accepted risks / open points:
   host answers but is not Audiobookshelf, so a misconfiguration fails loud instead of leaking
   credentials to the wrong host. (This is a fingerprint check, not authentication — the real
   guarantee against an impostor/MITM is HTTPS with a verified certificate.)
-- Refresh-token rotation across two consumers: resolved by decision, pending
-  implementation. The shared-chain model (contract 1.1.0 handover through
-  `Session.rotatedTokens`) proved structurally fragile — repeated silent re-logins and
-  second-order bugs — and is replaced by Ratatoskr-native sessions under `/v2`
+- Refresh-token rotation across two consumers: resolved. The shared-chain model (contract 1.1.0
+  handover through `Session.rotatedTokens`) proved structurally fragile - repeated silent re-logins and
+  second-order bugs - and was replaced by Ratatoskr-native sessions under `/v2`
   ([ADR-0001](./adr/0001-client-auth-ratatoskr-native-sessions.md), section 8): the server
   is the sole holder of ABS chains, one per ABS user
   ([ADR-0004](./adr/0004-one-abs-chain-per-user.md)), so no rotating token ever has two
-  consumers again. The handover protocol remains live on the frozen `/v1` surface until
-  its sunset.
+  consumers again. The handover protocol left with the `/v1` sunset (section 6).
 - `/health` is unauthenticated and currently triggers one upstream Audiobookshelf request
   per call, so a poller (or a hostile LAN device) amplifies 1:1 into ABS load. Deferred:
   cache the dependency status for a short TTL once the polling/reachability patterns exist

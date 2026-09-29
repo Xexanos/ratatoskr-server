@@ -27,10 +27,6 @@ export interface Config {
   seekToleranceSeconds: number
   seekRetries: number
   progressWriteThresholdSeconds: number
-  // How many seconds before the listening user's ABS access token expires the sync loop renews it
-  // (SPEC section 8: renew proactively, before expiry, so the client's still-valid old token can
-  // authenticate the request that fetches the rotated pair).
-  listeningTokenRefreshMarginSeconds: number
   // How often the keep-alive loop renews every stored Audiobookshelf chain (SPEC section 8). Also
   // the boot pass's staleness cutoff — a chain is stale when it missed a sweep — which is what makes
   // this one knob enough to provoke the dead-chain path in a test deployment by restarting the
@@ -297,7 +293,6 @@ export function loadConfig(env: Env = process.env): Config {
     seekToleranceSeconds: reader.positiveNumber('SEEK_TOLERANCE_SECONDS', 3),
     seekRetries: reader.positiveNumber('SEEK_RETRIES', 2),
     progressWriteThresholdSeconds: reader.positiveNumber('PROGRESS_WRITE_THRESHOLD_SECONDS', 5),
-    listeningTokenRefreshMarginSeconds: reader.positiveNumber('LISTENING_TOKEN_REFRESH_MARGIN_SECONDS', 300),
     keepAliveRefreshIntervalMs: reader.positiveNumber('KEEP_ALIVE_REFRESH_INTERVAL_MS', REFRESH_INTERVAL_MS),
     shutdownTimeoutMs: reader.positiveNumber('SHUTDOWN_TIMEOUT_MS', 5000),
     resumeRewindSeconds: reader.nonNegativeNumber('RESUME_REWIND_SECONDS', 10),

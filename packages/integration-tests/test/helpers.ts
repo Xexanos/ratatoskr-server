@@ -16,15 +16,10 @@ import { decodeStoreFile } from '../../app/dist/auth/sessionFile.js'
 
 export const DIST_MAIN = fileURLToPath(new URL('../../app/dist/main.js', import.meta.url))
 
-// The documents of the majors the spawned server serves, one per mount (api/app.ts). A response has
-// to be graded against the contract that promised it, and which contract that is follows from the
-// path it came in on: schema names mean different things per major — a /v1 Session may carry the
-// rotation handover, a /v2 one has no such field, and AuthTokens exists only in 1.4.0. Grading
-// everything against one document would check shapes the other never promised, and fail outright on
-// the ones 2.0.0 dropped. Conformance for /v1 is therefore conformance to the frozen copy, which the
-// contract-freeze CI job holds identical to the contract-1.4.0 tag.
+// The contract document of the one API major the spawned server serves (api/app.ts). A response is
+// graded against it, never against the server's own schema copies. /v1 is sunset and has no document:
+// it answers a bare 410 outside the contract (api/sunsetV1.ts).
 export const CONTRACTS = {
-  '/v1': fileURLToPath(new URL('../../../contract/v1/openapi.yaml', import.meta.url)),
   '/v2': fileURLToPath(new URL('../../../contract/openapi.yaml', import.meta.url)),
 } as const
 
@@ -50,7 +45,6 @@ export const CONFIG_KEYS = [
   'SEEK_TOLERANCE_SECONDS',
   'SEEK_RETRIES',
   'PROGRESS_WRITE_THRESHOLD_SECONDS',
-  'LISTENING_TOKEN_REFRESH_MARGIN_SECONDS',
   'SHUTDOWN_TIMEOUT_MS',
   'RESUME_REWIND_SECONDS',
   'WRITE_POSITION_BACKOFF_SECONDS',
@@ -211,7 +205,7 @@ export function spawnServer(env: NodeJS.ProcessEnv): SpawnedServer {
   return { child, stdout: () => out, stderr: () => err }
 }
 
-// Poll /v1/health until the server answers. Races against the child's exit so a
+// Poll /v2/health until the server answers. Races against the child's exit so a
 // misconfigured server surfaces its stderr instead of an opaque timeout.
 export async function waitUntilReady(server: SpawnedServer, port: number, deadlineMs = 15_000): Promise<void> {
   let exited = false
@@ -223,7 +217,7 @@ export async function waitUntilReady(server: SpawnedServer, port: number, deadli
       throw new Error(`server process exited before becoming ready.\nstderr:\n${server.stderr()}`)
     }
     try {
-      await fetch(`http://127.0.0.1:${port}/v1/health`, { signal: AbortSignal.timeout(1000) })
+      await fetch(`http://127.0.0.1:${port}/v2/health`, { signal: AbortSignal.timeout(1000) })
       return
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 100))
@@ -271,15 +265,11 @@ export function assertServerBuilt(): void {
 // format: double) that plain Ajv rejects; note this *ignores* nullable rather than honoring
 // it, which is fine for the shapes asserted here (their required fields are never null).
 //
-// One Ajv per major, built on first use: two documents define different schemas under the same names,
-// so they cannot share a registry.
-//
-// `major` has no default on purpose. It names the mount the response came from, and a wrong answer
-// here does not fail — it grades the response against a different major's idea of the schema and
-// passes. Making every call site say which surface it is testing is the whole safeguard.
+// One Ajv per major, built on first use, so a future major's document can never share a registry
+// with this one. `major` defaults to '/v2', the only major left.
 const contractAjvs = new Map<ServedMajor, Ajv>()
 
-export function contractValidator(schemaName: string, major: ServedMajor): ValidateFunction {
+export function contractValidator(schemaName: string, major: ServedMajor = '/v2'): ValidateFunction {
   let ajv = contractAjvs.get(major)
   if (!ajv) {
     ajv = new Ajv({ strict: false })

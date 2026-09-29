@@ -176,10 +176,15 @@ silent token exfiltration.
   cost the build its hermetic property — `.git` is deliberately outside the build context — and given
   the generate step a second code path; one CI gate is the cheaper half of that trade. It may be
   removed in the first
-  release ≥ 1 month after the `/v2` app is published; the removal commit is `feat!:`, so
-  the server major falls out automatically. After sunset, every `/v1` route answers from an
+  release ≥ 1 month after the `/v2` app is published. After sunset, every `/v1` route answers from an
   unauthenticated catch-all **410 Gone** with the contract error shape, code
   `UPGRADE_REQUIRED`, and a "please update the app" message — indefinitely.
+  *Amended at the sunset ([#137](https://github.com/Xexanos/ratatoskr-server/issues/137)): the removal
+  commit is **not** `feat!:` — the server's major then stays in step with the API major it serves,
+  instead of jumping past it. The sunset was carried out as decided: the tracked copy
+  `contract/v1/openapi.yaml`, its `contract-freeze` CI job, `V1ApiService`, the ABS-token bearer
+  handling, the rotation handover and `LISTENING_TOKEN_REFRESH_MARGIN_SECONDS` are gone; the
+  `contract-1.4.0` tag remains the record of the old surface.*
 - **Removed without deprecation markers** (2.0.0; `/v1` clients read the frozen tag):
   `POST /auth/refresh`, `Session.rotatedTokens`, the `RotatedTokens` schema,
   `StartSessionRequest.refreshToken`, and the stopSession 200-with-final-Session case —

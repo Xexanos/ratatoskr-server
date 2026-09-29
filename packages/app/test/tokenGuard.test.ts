@@ -1,9 +1,8 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
-import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
+import { openapiDocument } from '@ratatoskr/contract'
 import {
   createTokenGuard,
-  SELF_VALIDATING_OPERATIONS,
   UNKNOWN_TOKEN_TOLERANT_OPERATIONS,
 } from '../src/api/tokenGuard.js'
 
@@ -89,32 +88,11 @@ describe('createTokenGuard', () => {
     expect(() => createTokenGuard(DOCUMENT, prove, new Set(['openOp']))).toThrow(/openOp/)
   })
 
-  it('accepts the real contract and the real exemption set', () => {
-    // The startup assertion must hold for the shipped contract — this is the test that fails
-    // when an operation in SELF_VALIDATING_OPERATIONS is renamed or its security changes.
-    expect(() => createTokenGuard(frozenV1Document, vi.fn(), SELF_VALIDATING_OPERATIONS)).not.toThrow()
-    // The exemptions are exactly the handlers that present the caller's token to ABS themselves.
-    expect([...SELF_VALIDATING_OPERATIONS].sort()).toEqual([
-      'getLibraryItem',
-      'getLibraryItemCover',
-      'listInProgressItems',
-      'listLibraryItems',
-      'startSession',
-    ])
-  })
-
-  // /v2's own set, and the reason it is a different one: no handler there forwards the caller's
-  // bearer upstream, so nothing is self-validating and every operation needs the resolved session.
-  // What is left is the one operation the contract defines as idempotent.
-  it('accepts the /v2 contract with its own exemption set, and exempts only sign-out', () => {
+  // No handler forwards the caller's bearer upstream, so nothing is self-validating and every
+  // operation needs the resolved session. What is left is the one operation the contract defines as
+  // idempotent.
+  it('accepts the real contract with the real exemption set, and exempts only sign-out', () => {
     expect(() => createTokenGuard(openapiDocument, vi.fn(), UNKNOWN_TOKEN_TOLERANT_OPERATIONS)).not.toThrow()
     expect([...UNKNOWN_TOKEN_TOLERANT_OPERATIONS]).toEqual(['logout'])
-  })
-
-  // The two sets are not interchangeable: on /v2 the guard is also what resolves the caller's chain,
-  // so exempting the library operations there would leave them running with no absToken at all rather
-  // than rejecting. Pinning the difference is cheaper than discovering it from a 500.
-  it('keeps the two majors exemption sets distinct', () => {
-    expect([...SELF_VALIDATING_OPERATIONS].sort()).not.toEqual([...UNKNOWN_TOKEN_TOLERANT_OPERATIONS].sort())
   })
 })

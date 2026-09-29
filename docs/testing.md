@@ -27,7 +27,6 @@ Runner: **Vitest** (TypeScript/ESM-native).
 - DIDL-Lite metadata building for the transport URI
 - config / environment validation
 - log redaction (no secret ever reaches a log line)
-- token-rotation bookkeeping (the frozen `/v1` handover; no `/v2` request arms it)
 - the encrypted session store (`test/sessionStore.test.ts`, against a temp directory — like the
   config tests it needs real files): the AES-256-GCM envelope, atomic replacement of the file,
   detection of a second writer via the payload revision, and its refusal to continue on a wrong
@@ -36,8 +35,8 @@ Runner: **Vitest** (TypeScript/ESM-native).
 
 ### Component — one subsystem against a simulated neighbor
 - **ABS client** against a **fake ABS** HTTP server: login / logout / refresh (all three used
-  upstream, though `/v2` proxies none of them — login and logout serve its own session model,
-  refresh serves `/v1`'s handover), library projection, progress read/write.
+  upstream, though `/v2` proxies none of them - login and logout serve its own session model,
+  refresh serves the keep-alive loop), library projection, progress read/write.
 - **Sonos control** against the **fake Sonos** (see [Fakes](#the-fakes)):
   `SetAVTransportURI`, `Play`/`Pause`/`Seek`, `GetPositionInfo`/`GetTransportInfo`;
   asserts the DIDL-Lite requirement and that `RelTime` is trusted while the
@@ -53,18 +52,15 @@ fake Sonos, including the sync loop (poll position → write progress back to AB
 
 - **Security:** HTTPS enforced unless `ALLOW_PLAIN_HTTP=true`; the streamer API key
   appears only in the media URLs handed to speakers; secrets never appear in logs
-  (redaction); bearer auth + refresh-token rotation; the session store persists only the
+  (redaction); bearer auth; the session store persists only the
   Ratatoskr token's hash, never the token.
 - **Contract runtime-conformance:** the running server's responses are validated against the
-  contract (Ajv / response validation) **per served major** — a response is graded against the
-  document that promised it, `contract/v1/openapi.yaml` for `/v1` and `contract/openapi.yaml` for
-  `/v2`. The same schema name means different things in the two (`AuthTokens` exists only in 1.4.0,
-  and only its `Session` carries the rotation handover), so one registry cannot serve both, and
-  `contractValidator` takes the mount with no default: naming the wrong major would not fail, it
-  would grade the response against the other major's shapes and pass. Conformance for `/v1` is
-  therefore conformance to the frozen tag, which `contract-freeze` holds the copy identical to.
+  contract (Ajv / response validation) - a response is graded against `contract/openapi.yaml`, the
+  document of the one served major (`/v2`). `/v1` has no document any more: it is a sunset stub that
+  answers every route with an unauthenticated 410 `UPGRADE_REQUIRED` (`test/v1Sunset.test.ts`, and
+  once against the built image in the `container.yml` smoke step).
   CI also runs `oasdiff` between a PR's base and head to fail on breaking changes that do not bump
-  the contract's major version — for the contract under development only.
+  the contract's major version.
   There is deliberately **no separate contract-test level** — both sides generate
   from the shared spec, so the type contract holds by construction (see the
   central concept, §3).
@@ -107,7 +103,7 @@ The strategy above is the target. Current state:
   creates its own end user + a stream-only streamer account whose ABS API key it embeds in the
   media URLs (progress in ABS is per-user) and spawns its own compiled server. `absLive.integration.test.ts` drives the ABS-backed endpoints
   (library list/detail) with Ajv contract-conformance, and exercises sign-in through the server's
-  own `/v1/auth/login` and `/v2/auth/login` against the live ABS. **Version
+  own `/v2/auth/login` against the live ABS. **Version
   coverage lives in CI:** the `integration` job is a two-leg blocking matrix — the pinned
   2.26.0 minimum and the deliberately **unpinned `:latest`** tag as a drift canary for new
   ABS releases — selected via `ABS_IT_IMAGE`; locally the default is the pinned current
@@ -134,10 +130,8 @@ The strategy above is the target. Current state:
   cross-file isolation on the shared container comes from this file's own ABS users, not from
   per-test resets. The double runs in-process here via `SONOS_SEED_HOST=host:port` +
   `SONOS_DISABLE_EVENTS=1`.
-- **Phase 4, playback slice 3 (token rotation / shutdown / streamer identity) — present:** the
-  **token-rotation handover** (§8) — unit-tested with fake timers + fake JWTs (renew-before-expiry,
-  owner-gated redelivery until adoption); its client-facing half went with contract 2.0.0,
-  so only the frozen `/v1` surface can deliver a pair; **graceful shutdown**
+- **Phase 4, playback slice 3 (shutdown / streamer identity) — present:** the token-rotation
+  handover of the old `/v1` model went with its sunset; **graceful shutdown**
   (§5) — an integration test SIGTERMs the spawned server and asserts the reached position was
   written (Linux-only, so CI exercises it); and the **stream-only ABS API key** in media URLs (§14)
   — the session-flow integration test fetches the enqueued media URL from real ABS to prove the key

@@ -11,13 +11,13 @@ import {
   waitUntilReady,
   type SpawnedServer,
 } from './helpers.js'
-import { createAbsUser, createStreamerApiKey, seedFetch } from './absSeed.js'
+import { absLogin, createAbsUser, createStreamerApiKey } from './absSeed.js'
 
 // Live-Audiobookshelf integration (SPEC section 15). The abs/ client is otherwise only exercised
 // against fetch stubs, which verify our own parsing but not that our request/response shapes match
 // a real ABS. The shared container is booted + seeded once per run in globalSetup; here we create
 // this file's own users, spawn the compiled server against the live ABS, and drive the ABS-backed
-// /v1 endpoints end to end. Complements smoke.integration.test.ts (no Docker); does not replace it.
+// /v2 endpoints end to end. Complements smoke.integration.test.ts (no Docker); does not replace it.
 //
 // Version coverage lives in CI: two parallel jobs pass ABS_IT_IMAGE (pinned 2.26.0 minimum and the
 // unpinned :latest drift canary); locally the default is the pinned current digest (absSeed.ts).
@@ -36,9 +36,10 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
   let server: SpawnedServer | undefined
   let serverBase = ''
   let seededItemId = ''
-  // A valid token pair from the server's /v1/auth/login, reused by the authenticated tests.
+  // A genuine ABS token pair for LIVE_USER, logged in straight against ABS (never through the server):
+  // the credential the server must refuse as a bearer, and the one that writes progress in ABS directly.
   let auth: { accessToken: string; refreshToken: string } = { accessToken: '', refreshToken: '' }
-  // The /v2 equivalent: an opaque Ratatoskr token, minted by the server against the same live ABS.
+  // An opaque Ratatoskr token, minted by the server against the same live ABS (POST /v2/auth/login).
   let v2Token = ''
 
   beforeAll(async () => {
@@ -65,18 +66,9 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     )
     await waitUntilReady(server, port)
 
-    // A valid pair for the authenticated tests below. Retried through the server's upstream path,
-    // which returns 502 while ABS is still settling right after boot.
-    const loginRes = await seedFetch('server /v1/auth/login', `${serverBase}/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: LIVE_USER, password: LIVE_PASS }),
-    })
-    if (!loginRes.ok) throw new Error(`server login failed: ${loginRes.status} ${await loginRes.text()}`)
-    const tokens = (await loginRes.json()) as { accessToken: string; refreshToken: string }
-    auth = { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken }
-    // A separate sign-in on /v2, which opens its own private ABS chain for this "device" — the two
-    // majors share no session, so each needs its own credential.
+    auth = await absLogin(absBase, LIVE_USER, LIVE_PASS)
+    // Sign in on the server, which opens its own private ABS chain for this "device", separate from
+    // the pair above (absLogin retried through ABS's warm-up, so ABS is answering by now).
     v2Token = await signIn(serverBase, LIVE_USER, LIVE_PASS)
   })
 
@@ -85,52 +77,19 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     if (server) await stopServer(server)
   })
 
-  it('POST /v1/auth/login returns a contract-valid token pair from the real ABS', async () => {
-    const res = await fetch(`${serverBase}/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: LIVE_USER, password: LIVE_PASS }),
+  // The live library through /v2, graded against the contract. The bearer here is the Ratatoskr token,
+  // and the ABS call behind it runs on the chain the server opened at sign-in - so this also proves
+  // that resolution works against a real ABS, not just a stub.
+  it('GET /v2/library/items lists the seeded book, conformant to the contract', async () => {
+    const res = await fetch(`${serverBase}/v2/library/items`, {
+      headers: { authorization: `Bearer ${v2Token}` },
     })
     expect(res.status).toBe(200)
-    const body = (await res.json()) as Record<string, unknown>
+    const body = (await res.json()) as {
+      items: { id: string; title: string; durationSeconds: number; coverUrl: string | null }[]
+    }
 
-    expect(typeof body.accessToken).toBe('string')
-    expect(typeof body.refreshToken).toBe('string')
-    expect(body.user).toMatchObject({ username: LIVE_USER })
-
-    const validate = contractValidator('AuthTokens', '/v1')
-    expect(validate(body)).toBe(true)
-    expect(validate.errors).toBeNull()
-  })
-
-  it('POST /v1/auth/refresh exchanges the refresh token for a fresh contract-valid pair', async () => {
-    const res = await fetch(`${serverBase}/v1/auth/refresh`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ refreshToken: auth.refreshToken }),
-    })
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as Record<string, unknown>
-
-    const validate = contractValidator('AuthTokens', '/v1')
-    expect(validate(body)).toBe(true)
-    expect(validate.errors).toBeNull()
-    expect(typeof body.accessToken).toBe('string')
-    expect(typeof body.refreshToken).toBe('string')
-    expect(body.user).toMatchObject({ username: LIVE_USER })
-    // Note: whether ABS *rotates* the refresh token on use is version-dependent (2.26.0 returns the
-    // same token; newer versions rotate), so we assert the contract shape — a usable pair — rather
-    // than rotation. The rotation-handover in SPEC section 8 degrades safely either way.
-  })
-
-  it('GET /v1/library/items lists the seeded book', async () => {
-    const res = await fetch(`${serverBase}/v1/library/items`, {
-      headers: { authorization: `Bearer ${auth.accessToken}` },
-    })
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { items: { id: string; title: string; durationSeconds: number }[] }
-
-    const validate = contractValidator('LibraryItemPage', '/v1')
+    const validate = contractValidator('LibraryItemPage')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -140,42 +99,21 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     expect(seeded?.title.length).toBeGreaterThan(0)
     // Duration comes from ABS's scan of the fixture audio (a real, non-zero-length file).
     expect(seeded?.durationSeconds).toBeGreaterThan(0)
-  })
-
-  // The same live data through the other mount, graded against 2.0.0. /v2's library operations are the
-  // shared service's, so this is what would catch a mapping that conforms under one major and not the
-  // other — /health alone cannot, since its shape is identical in both documents.
-  //
-  // The bearer here is the Ratatoskr token, and the ABS call behind it runs on the chain the server
-  // opened at sign-in — so this also proves that resolution works against a real ABS, not just a stub.
-  it('GET /v2/library/items serves the same seeded book, conformant to 2.0.0', async () => {
-    const res = await fetch(`${serverBase}/v2/library/items`, {
-      headers: { authorization: `Bearer ${v2Token}` },
-    })
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { items: { id: string; coverUrl: string | null }[] }
-
-    const validate = contractValidator('LibraryItemPage', '/v2')
-    expect(validate(body)).toBe(true)
-    expect(validate.errors).toBeNull()
-
-    const seeded = body.items.find((item) => item.id === seededItemId)
-    expect(seeded).toBeDefined()
     // The seeded fixture is a bare audio file with no cover art, so the honest expectation here is
-    // null rather than a URL — ABS reports no coverPath and the mapping turns that into null. The
-    // per-mount prefix on a book that *does* have a cover is pinned in the app's majorMounts test,
-    // where the projection's input is controlled.
+    // null rather than a URL - ABS reports no coverPath and the mapping turns that into null. The
+    // /v2 prefix on a book that *does* have a cover is pinned in the app's unit tests, where the
+    // projection's input is controlled.
     expect(seeded?.coverUrl).toBeNull()
   })
 
-  it('GET /v1/library/items/{itemId} returns detail with zero stored progress', async () => {
-    const res = await fetch(`${serverBase}/v1/library/items/${encodeURIComponent(seededItemId)}`, {
-      headers: { authorization: `Bearer ${auth.accessToken}` },
+  it('GET /v2/library/items/{itemId} returns detail with zero stored progress', async () => {
+    const res = await fetch(`${serverBase}/v2/library/items/${encodeURIComponent(seededItemId)}`, {
+      headers: { authorization: `Bearer ${v2Token}` },
     })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { id: string; progress: { positionSeconds: number; isFinished: boolean } }
 
-    const validate = contractValidator('LibraryItem', '/v1')
+    const validate = contractValidator('LibraryItem')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -188,8 +126,8 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
   // Ordered after the zero-progress detail test: this one records progress for the file's user,
   // so it must run last. Verifies the list join's upstream shape dependency (GET /api/me →
   // mediaProgress) against a real ABS, not just the unit tests' fetch stubs (issue #108).
-  it('GET /v1/library/items joins the stored progress into the list once the user has listened', async () => {
-    // Record progress directly in ABS — the server's accessToken IS the user's ABS token.
+  it('GET /v2/library/items joins the stored progress into the list once the user has listened', async () => {
+    // Record progress directly in ABS, with the user's own ABS access token.
     const patchRes = await fetch(`${abs!.absBase}/api/me/progress/${encodeURIComponent(seededItemId)}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.accessToken}` },
@@ -197,15 +135,15 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     })
     expect(patchRes.ok).toBe(true)
 
-    const res = await fetch(`${serverBase}/v1/library/items`, {
-      headers: { authorization: `Bearer ${auth.accessToken}` },
+    const res = await fetch(`${serverBase}/v2/library/items`, {
+      headers: { authorization: `Bearer ${v2Token}` },
     })
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
       items: { id: string; progress?: { positionSeconds: number; isFinished: boolean } }[]
     }
 
-    const validate = contractValidator('LibraryItemPage', '/v1')
+    const validate = contractValidator('LibraryItemPage')
     expect(validate(body)).toBe(true)
     expect(validate.errors).toBeNull()
 
@@ -232,7 +170,7 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       expect(validate(body)).toBe(true)
       expect(validate.errors).toBeNull()
       expect(body.user).toMatchObject({ username: LIVE_USER })
-      // The /v1 pair for the same ABS user is at hand, so this is a real check rather than a shape one.
+      // The ABS pair for the same user is at hand, so this is a real check rather than a shape one.
       expect(raw).not.toContain(auth.accessToken)
       expect(raw).not.toContain(auth.refreshToken)
       expect(body).not.toHaveProperty('accessToken')
@@ -249,7 +187,8 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
       expect(((await res.json()) as { code: string }).code).toBe('unauthorized')
     })
 
-    // A genuine, current Audiobookshelf access token — valid on /v1 right now — must buy nothing here.
+    // A genuine, current Audiobookshelf access token - valid against ABS itself right now - must buy
+    // nothing here.
     it('does not accept an Audiobookshelf access token as a /v2 bearer', async () => {
       const res = await fetch(`${serverBase}/v2/library/items`, {
         headers: { authorization: `Bearer ${auth.accessToken}` },
@@ -284,22 +223,16 @@ describe.skipIf(abs === null)(`live Audiobookshelf integration [${abs?.imageLabe
     // the token naming them at POST /logout did not (advplyr/audiobookshelf#5253). Probed: 2.26.0,
     // 2.29.0, 2.31.0 and 2.35.0 collide, 2.35.1 does not. ADR-0001 carries the amended fact.
     it('ends the Audiobookshelf chain upstream, and only that one where ABS keeps them apart', async () => {
-      const v1Login = async () =>
-        (await (
-          await fetch(`${serverBase}/v1/auth/login`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ username: LIVE_USER, password: LIVE_PASS }),
-          })
-        ).json()) as { accessToken: string; refreshToken: string }
       const absRefresh = (refreshToken: string) =>
         fetch(`${abs!.absBase}/auth/refresh`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-refresh-token': refreshToken },
         })
 
-      const control = await v1Login()
-      const doomed = await v1Login()
+      // Two independent ABS sign-ins for the same user, straight against ABS: each is its own chain
+      // there, which is all this test needs of them.
+      const control = await absLogin(abs!.absBase, LIVE_USER, LIVE_PASS)
+      const doomed = await absLogin(abs!.absBase, LIVE_USER, LIVE_PASS)
 
       // Exactly the call AbsClient.logout makes.
       const ended = await fetch(`${abs!.absBase}/logout`, {

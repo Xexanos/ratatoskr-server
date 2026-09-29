@@ -1,19 +1,16 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { describe, expect, it } from 'vitest'
 import { MissingBearerError } from '../src/api/bearer.js'
-import { absBearerHandlers, ratatoskrBearerHandlers } from '../src/api/security.js'
+import { ratatoskrBearerHandlers } from '../src/api/security.js'
 
 function requestWith(headers: Record<string, string>): FastifyRequest {
   return { headers } as unknown as FastifyRequest
 }
 const reply = {} as FastifyReply
 
-// Both majors name the same security scheme and mean a different credential by it, so the shared
-// property is tested once and the difference twice.
-describe.each([
-  ['absBearerHandlers', absBearerHandlers],
-  ['ratatoskrBearerHandlers', ratatoskrBearerHandlers],
-])('%s: presence checking', (_name, handlers) => {
+describe('ratatoskrBearerHandlers: presence checking', () => {
+  const handlers = ratatoskrBearerHandlers
+
   it('throws MissingBearerError when the Authorization header is absent', () => {
     expect(() => handlers.bearerAuth?.(requestWith({}), reply, [])).toThrow(MissingBearerError)
   })
@@ -31,13 +28,7 @@ describe.each([
   })
 })
 
-describe('the credential each major stashes', () => {
-  it('/v1 puts the bearer straight onto absToken — it IS the Audiobookshelf token', () => {
-    const request = requestWith({ authorization: 'Bearer tok-123' })
-    absBearerHandlers.bearerAuth?.(request, reply, [])
-    expect(request.absToken).toBe('tok-123')
-  })
-
+describe('the credential /v2 stashes', () => {
   // The distinction the whole /v2 model rests on: the bearer is stashed unresolved, and absToken
   // stays empty until the guard has turned it into a device session (app.ts). An operation that
   // somehow reached its handler unproven must not have an ABS credential to forward.
