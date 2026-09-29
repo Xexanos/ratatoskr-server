@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 2.0.0
+  version: 2.0.1
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -14,8 +14,8 @@ info:
     compatible across a range of versions. Therefore:
 
       - The API is versioned in the URL path, kept in one place (servers.url).
-        Breaking changes go into a new major version and a new path, served alongside
-        the old one during a transition window.
+        Breaking changes go into a new major version and a new path, which may be served
+        alongside the old one during a transition window.
       - Backwards-compatible additions (new optional fields, new endpoints) are minor
         version bumps within the current major. Clients must ignore unknown fields.
       - A CI check (oasdiff) fails any change that breaks compatibility without a
@@ -23,9 +23,10 @@ info:
 
     This document is the /v2 surface: Ratatoskr-native sessions, where the server is the
     sole holder of Audiobookshelf tokens and the client holds one opaque Ratatoskr token
-    (ADR-0001). Its predecessor /v1 — a shared Audiobookshelf token pair with a
-    refresh-token handover protocol — is served in parallel until its sunset and is
-    specified by the frozen contract 1.4.0 git tag, not by this file.
+    (ADR-0001). Its predecessor /v1 - a shared Audiobookshelf token pair with a
+    refresh-token handover protocol - is sunset: every /v1 route answers 410 Gone with
+    code UPGRADE_REQUIRED, and the old protocol is specified by the contract-1.4.0 git
+    tag, not by this file.
   license:
     name: GPL-3.0-or-later
     url: https://www.gnu.org/licenses/gpl-3.0.html
