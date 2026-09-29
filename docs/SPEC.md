@@ -323,6 +323,16 @@ re-login.
   old per-device `{ entries }` shape, is migrated on load rather than refused (each user's live
   per-device chains collapse to the freshest, dead devices dropped), so an upgrade keeps the
   deployed devices signed in instead of bricking the boot.
+- **Device session list** (issue #138, contract 2.1.0): a signed-in user can list their own device
+  sessions (`GET /auth/device-sessions`) and end any one (`DELETE /auth/device-sessions/{id}`) -
+  session hygiene, self-service only, no operator or cross-user view. Ending one has exactly
+  sign-out's effect on that device; an unknown id and another user's id are both 404. Each device
+  row carries a random public id (separate from the token hash), an optional client-supplied
+  `deviceName` (sent at login, never inherited by a re-authentication) and **last used**: the
+  device's own guarded requests only (keep-alive and the sync loop do not count). Last used is exact
+  in memory, persisted only when the stored value is over an hour old, and flushed once on graceful
+  shutdown (a failed flush only warns). Rows from before this feature get a generated id on load,
+  which is written back at once so a listed id survives a restart; no forced re-login.
 - **Keep-alive**: the server renews every stored ABS chain on three schedules, which between
   them answer three different ways of losing one.
   - **Daily, jittered**: one sweep a day, at a jittered offset, renewing every stored chain

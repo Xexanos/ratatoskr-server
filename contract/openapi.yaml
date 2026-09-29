@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Ratatoskr API
-  version: 2.0.1
+  version: 2.1.0
   description: |
     Ratatoskr bridges an Audiobookshelf (ABS) server and Sonos speakers. This
     document describes the HTTP API that Ratatoskr's own clients (the Android app,
@@ -121,6 +121,50 @@ paths:
         "204":
           description: Signed out. The token is no longer valid.
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/device-sessions:
+    get:
+      operationId: listDeviceSessions
+      summary: List the caller's own device sessions
+      description: |
+        The signed-in user's own device sessions - every device that is currently signed in as
+        this user, the caller's included. A hygiene overview, for spotting a device that was
+        reset or retired but still holds a session; it is not a threat-detection tool. A device
+        session is one sign-in, not a physical device: a phone that was reset and signed in
+        again appears twice. Another user's sessions are never listed.
+
+        Ordered most recently signed in first.
+      tags: [system]
+      responses:
+        "200":
+          description: The caller's device sessions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceSessionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/device-sessions/{id}:
+    delete:
+      operationId: endDeviceSession
+      summary: End one of the caller's own device sessions
+      description: |
+        Has exactly the effect sign-out has on that device: its token is invalid immediately,
+        and the Audiobookshelf session Ratatoskr holds for the user is released only when this
+        was the user's last device. The caller may end its own entry this way too, with the
+        same effect as `POST /auth/logout`.
+
+        Unlike `POST /auth/logout` this is **not** idempotent: an id that names no device
+        session answers 404. So does the id of another user's device session, in the same
+        way, so the existence of foreign ids is not revealed.
+      tags: [system]
+      parameters:
+        - $ref: "#/components/parameters/DeviceSessionId"
+      responses:
+        "204":
+          description: The device session was ended.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /speakers:
     get:
@@ -376,6 +420,13 @@ components:
         Required on every endpoint except /health, /auth/login, and GET /speakers.
 
   parameters:
+    DeviceSessionId:
+      name: id
+      in: path
+      required: true
+      description: Device session id, as listed by `GET /auth/device-sessions`.
+      schema: { type: string }
+
     ItemId:
       name: itemId
       in: path
@@ -554,6 +605,14 @@ components:
       properties:
         username: { type: string }
         password: { type: string, format: password }
+        deviceName:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: |
+            Optional label for this device (for example "Pixel 8"), shown in the device session
+            list. Display text only. It belongs to this sign-in alone: a client that signs in
+            again sends it again, as a re-authentication does not inherit it.
 
     User:
       type: object
@@ -579,6 +638,46 @@ components:
             restarts and arbitrarily long pauses, so a client never has to re-authenticate
             on its own initiative. Never logged (server SPEC section 14).
         user: { $ref: "#/components/schemas/User" }
+
+    DeviceSession:
+      type: object
+      required: [id, createdAt, current]
+      description: |
+        One sign-in of the caller's user, as listed by `GET /auth/device-sessions`. Unrelated to
+        the playback Session: this is about who is signed in where, that is about what is playing.
+      properties:
+        id:
+          type: string
+          description: |
+            Public identifier of this device session, for `DELETE /auth/device-sessions/{id}`.
+            Unrelated to the bearer token, which it does not reveal.
+        deviceName:
+          type: string
+          description: |
+            The label the device sent at sign-in. Absent when it sent none, and for sign-ins that
+            predate this field; a client shows "unknown device" and `createdAt` then.
+        createdAt:
+          type: string
+          format: date-time
+          description: When this device signed in.
+        lastUsedAt:
+          type: string
+          format: date-time
+          description: |
+            When this device last made a request that proved its bearer. Only the device's own
+            requests count. Absent when it has not been used since sign-in was recorded, and for
+            sign-ins that predate this field.
+        current:
+          type: boolean
+          description: True for the caller's own device session.
+
+    DeviceSessionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceSession" }
 
     StartSessionRequest:
       type: object

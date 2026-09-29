@@ -1,10 +1,11 @@
 import type { components } from '@ratatoskr/contract'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
-import type { DeviceSession } from '../auth/authService.js'
+import type { DeviceSession, DeviceSessionSummary } from '../auth/authService.js'
 import type { PlaybackSession } from '../playback/sessionManager.js'
 import type { SonosSpeaker } from '../sonos/client.js'
 
 type AuthSession = components['schemas']['AuthSession']
+type DeviceSessionList = components['schemas']['DeviceSessionList']
 type LibraryItemSummary = components['schemas']['LibraryItemSummary']
 type LibraryItem = components['schemas']['LibraryItem']
 type LibraryItemList = components['schemas']['LibraryItemList']
@@ -85,6 +86,20 @@ export function toAuthSession(session: DeviceSession): AuthSession {
   return {
     token: session.token,
     user: { id: session.user.id, username: session.user.username },
+  }
+}
+
+// The caller's device session list. Built field by field from DeviceSessionSummary, which carries no
+// credential, so the response cannot pick one up.
+export function toDeviceSessionList(sessions: readonly DeviceSessionSummary[]): DeviceSessionList {
+  return {
+    items: sessions.map((session) => ({
+      id: session.id,
+      createdAt: session.createdAt,
+      current: session.current,
+      ...(session.deviceName !== undefined ? { deviceName: session.deviceName } : {}),
+      ...(session.lastUsedAt !== undefined ? { lastUsedAt: session.lastUsedAt } : {}),
+    })),
   }
 }
 
