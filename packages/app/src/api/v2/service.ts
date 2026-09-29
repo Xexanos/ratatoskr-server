@@ -9,8 +9,7 @@ type AuthSession = components['schemas']['AuthSession']
 type LoginRequest = components['schemas']['LoginRequest']
 
 export interface V2ApiServiceDeps extends ApiServiceDeps {
-  // Device sign-in, sign-out and bearer resolution (SPEC section 8). Only this major has one: /v1
-  // proxies Audiobookshelf credentials instead and holds no sessions of its own.
+  // Device sign-in, sign-out and bearer resolution (SPEC section 8).
   auth: AuthService
 }
 
@@ -19,9 +18,8 @@ export interface V2ApiServiceDeps extends ApiServiceDeps {
 // everything a client does *with* that token is inherited from the shared service, which by then acts
 // on the Audiobookshelf chain the token guard resolved (app.ts).
 //
-// Symmetrical with v1/service.ts, and a subclass for the same reason it gives: an auth operation in
-// the shared body would answer both majors' /auth/login, and here that would hand a frozen client a
-// Ratatoskr token it cannot use.
+// A subclass rather than part of the shared body, so that the auth model of a major stays replaceable
+// without touching the operations it serves.
 export class V2ApiService extends ApiService {
   private readonly auth: AuthService
 

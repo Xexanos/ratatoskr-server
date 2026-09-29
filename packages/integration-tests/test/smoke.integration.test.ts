@@ -19,7 +19,7 @@ import {
 
 // Process-level smoke tests: the real compiled server, spawned as a child process,
 // spoken to over real HTTP — no inject(), no fetch stubbing. This is the automated
-// version of the manual "boot it and curl /v1/health" verification, and it pins down
+// version of the manual "boot it and curl /v2/health" verification, and it pins down
 // the one file no unit test executes: main.ts. The shared harness lives in helpers.ts.
 
 // An ABS that refuses the connection: a network error is tolerated at startup (the server degrades
@@ -32,13 +32,13 @@ const UNREACHABLE_ABS = {
   ALLOW_PLAIN_HTTP: 'true',
 }
 
-// Poll /v1/health until Sonos is no longer reported as probing (its `detail` moves on from
+// Poll /v2/health until Sonos is no longer reported as probing (its `detail` moves on from
 // "probing, retry shortly"), so the test can assert the eventual, settled state rather than
 // only the immediate post-boot one.
 async function pollUntilSettled(port: number, deadlineMs = 15_000): Promise<Record<string, unknown>> {
   const deadline = Date.now() + deadlineMs
   while (Date.now() < deadline) {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    const res = await fetch(`http://127.0.0.1:${port}/v2/health`)
     const body = (await res.json()) as { sonos?: { detail?: string } }
     if (body.sonos?.detail !== 'probing, retry shortly') return body as Record<string, unknown>
     await new Promise((resolve) => setTimeout(resolve, 200))
@@ -65,7 +65,7 @@ describe('server process smoke test', () => {
     }
   })
 
-  it('boots, serves /health on both majors over real HTTP, and conforms to each contract', async () => {
+  it('boots, serves /v2/health over real HTTP, and conforms to the contract', async () => {
     // A real HTTP upstream standing in for Audiobookshelf: answer /ping like ABS so the startup
     // probe and the health check treat it as a genuine, reachable ABS. No streamer login happens at
     // startup anymore — the media path uses a static API key — so only /ping needs answering.
@@ -86,7 +86,7 @@ describe('server process smoke test', () => {
     )
     await waitUntilReady(running, port)
 
-    const res = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    const res = await fetch(`http://127.0.0.1:${port}/v2/health`)
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
 
@@ -100,25 +100,19 @@ describe('server process smoke test', () => {
     // SPEC section 14: /health must not leak the server version to unauthenticated callers.
     expect(body.version).toBeUndefined()
 
-    // Independent contract conformance (see helpers.contractValidator).
-    const validate = contractValidator('Health', '/v1')
+    // Independent contract conformance (see helpers.contractValidator). This is also the one check
+    // that the contract document reached the real compiled build - for the container, through
+    // `COPY contract ./contract` and the generate step, with no git history in the build context.
+    const validate = contractValidator('Health')
     const valid = validate(body)
     expect(validate.errors).toBeNull()
     expect(valid).toBe(true)
 
-    // The second mount, on the same process, graded against its own document (SPEC section 6). This
-    // is the one check that the real compiled server — not an injected Fastify instance — actually
-    // serves both majors: the frozen /v1 document has to have reached the build, which for the
-    // container means through `COPY contract ./contract` and the generate step, with no git history
-    // in the build context.
-    const v2 = await fetch(`http://127.0.0.1:${port}/v2/health`)
-    expect(v2.status).toBe(200)
-    const v2Body = (await v2.json()) as Record<string, unknown>
-    expect(v2Body.abs).toEqual({ reachable: true })
-    const validateV2 = contractValidator('Health', '/v2')
-    const v2Valid = validateV2(v2Body)
-    expect(validateV2.errors).toBeNull()
-    expect(v2Valid).toBe(true)
+    // The sunset major, on the same process: /v1 is not served any more, and answers 410 to anyone,
+    // token or not, so an installed old app can tell its user to update (SPEC section 6, ADR-0001).
+    const v1 = await fetch(`http://127.0.0.1:${port}/v1/health`)
+    expect(v1.status).toBe(410)
+    expect(((await v1.json()) as { code: string }).code).toBe('UPGRADE_REQUIRED')
 
     // Once the first probe actually settles - no real Sonos on the CI/test network, so discovery
     // finds nothing - the now-confirmed-unreachable Sonos does drag the overall status down.

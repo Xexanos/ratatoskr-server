@@ -6,9 +6,9 @@ import { tempSessionStore } from './helpers/tempSessionStore.js'
 import { testConfig } from './helpers/testConfig.js'
 
 // The clients are never touched: the bearer preHandler and the not-found handler both run before
-// any ApiService method. (Both majors currently implement everything they declare, so the
-// NotImplementedError fallback is not reachable through a mounted route; errorHandler.test.ts
-// covers its mapping as a unit.)
+// any ApiService method. (/v2 implements everything it declares, so the NotImplementedError
+// fallback is not reachable through a mounted route; errorHandler.test.ts covers its mapping as a
+// unit.)
 async function buildTestApp() {
   return buildApp(testConfig(), {
     absClient: {} as AbsClient,
@@ -24,7 +24,7 @@ describe('routing fallbacks', () => {
 
   it('enforces the bearer token on a session operation (401 without it, before any handler)', async () => {
     const app = await buildTestApp()
-    const res = await app.inject({ method: 'POST', url: '/v1/sessions/current/pause' })
+    const res = await app.inject({ method: 'POST', url: '/v2/sessions/current/pause' })
     expect(res.statusCode).toBe(401)
     expect(res.json().code).toBe('unauthorized')
     await app.close()
@@ -32,7 +32,7 @@ describe('routing fallbacks', () => {
 
   it('returns a contract-shaped 404 not_found for an unknown path', async () => {
     const app = await buildTestApp()
-    const res = await app.inject({ method: 'GET', url: '/v1/nope', headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: '/v2/nope', headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ code: 'not_found', message: expect.any(String) })
     await app.close()

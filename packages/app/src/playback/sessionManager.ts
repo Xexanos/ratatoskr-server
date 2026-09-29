@@ -1,6 +1,5 @@
 import { planPlayback, planSeek, trackToAbsolute, type SeekTuning } from '@ratatoskr/position'
 import type { AbsClient, PlaybackTrack, ProgressUpdate } from '../abs/client.js'
-import { jwtExpSeconds } from '../abs/jwt.js'
 import type { LibraryBook } from '../abs/library.js'
 import type { Config } from '../config/index.js'
 import type { SonosClient } from '../sonos/client.js'
@@ -9,14 +8,6 @@ import { NoActiveSessionError } from './errors.js'
 // What the transport is doing, as this module understands it. `finished` is not a transport state
 // the speaker reports — it is this module's reading of "stopped within the end-of-book window".
 export type PlaybackPhase = 'playing' | 'paused' | 'buffering' | 'stopped' | 'finished'
-
-// A renewed ABS token pair the server holds for the listening user. Whether it is ever handed to a
-// client is a per-major decision, so it is not a contract type: /v1 delivers it on Session
-// responses (SPEC section 8), and a major with opaque server-side tokens would not.
-export interface RotatedTokenPair {
-  accessToken: string
-  refreshToken: string
-}
 
 // What the manager reports about the one active session. The playing book travels as the domain
 // LibraryBook, so its cover URL is minted per response at the edge rather than frozen into the
@@ -29,15 +20,13 @@ export interface PlaybackSession {
   positionSeconds: number
   durationSeconds: number
   updatedAt: string
-  rotatedTokens: RotatedTokenPair | undefined
 }
 
 // Where the sync loop reads the listening user's Audiobookshelf access token, asked afresh at each
 // use instead of captured once at start(). The indirection is what lets a chain renewed *during*
-// playback reach a session that is already running (SPEC section 8): under /v2 this reads the
-// device session's stored chain, which the keep-alive loop renews under it, so a session that
-// outlives its access token keeps writing progress. Under /v1 the pair is the manager's own to
-// rotate, so its supplier is a constant that this class replaces on each rotation.
+// playback reach a session that is already running (SPEC section 8): it reads the device session's
+// stored chain, which the keep-alive loop renews under it, so a session that outlives its access
+// token keeps writing progress.
 export type ListeningToken = () => Promise<string>
 
 // How close to the end counts as "finished". Independent of the seek tuning (seekToleranceSeconds
@@ -56,15 +45,11 @@ export interface SessionManagerDeps {
 interface ActiveSession {
   itemId: string
   speakerId: string
-  // The listening user's tokens — used for ABS progress read/write so progress is per-user. Never
+  // The listening user's token - used for ABS progress read/write so progress is per-user. Never
   // embedded in media URLs (those carry the streamer token). `listeningToken` is asked for the
   // current access token at each use (see ListeningToken), so a chain renewed elsewhere reaches
-  // this session. `refreshToken` is the /v1 rotation handover's own: the sync loop renews the pair
-  // proactively before expiry (SPEC section 8) and replaces the supplier with the result. It is
-  // undefined on /v2 and whenever the client handed none to startSession, and then no rotation
-  // happens here — on /v2 because renewing the chain is the keep-alive loop's job, not this one's.
+  // this session; renewing it is the keep-alive loop's job, not this one's.
   listeningToken: ListeningToken
-  refreshToken: string | undefined
   trackDurations: number[]
   totalDurationSeconds: number
   // The queue's media URLs, so the sync loop can tell our book from a LAN takeover (a household
@@ -92,26 +77,12 @@ export class SessionManager {
   // bails (won't run, won't reschedule) once it no longer matches — so a tick that fired just before
   // a replace-start()/stop can't spawn a second, orphaned poll chain.
   private loopGeneration = 0
-  // A rotated ABS token pair the sync loop obtained for the listening user, awaiting delivery to the
-  // client (SPEC section 8), plus the access token the owner still held when we rotated. The pair is
-  // attached to a Session response ONLY for a caller presenting that pre-rotation token — so on a
-  // multi-user ABS a different user polling the session can't receive the owner's refresh token — and
-  // only until the client authenticates with the new access token (adoption). Both are discarded
-  // whenever the session ends.
-  private pendingRotatedTokens: RotatedTokenPair | undefined
-  private preRotationToken: string | undefined
-
   constructor(private readonly deps: SessionManagerDeps) {}
 
   // Start (or replace) playback: build the queue from ABS track metadata + the streamer token, play
   // it, and resume from the position stored in ABS. Throws ItemNotPlayableError (400) / AbsAuthError
   // (401) for a bad book or an invalid token — validated BEFORE any active session is touched.
-  async start(
-    listeningToken: ListeningToken,
-    refreshToken: string | undefined,
-    itemId: string,
-    speakerId: string,
-  ): Promise<PlaybackSession> {
+  async start(listeningToken: ListeningToken, itemId: string, speakerId: string): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const userToken = await listeningToken()
       // Validate the token and confirm the book is playable first: getPlaybackManifest presents the
@@ -155,94 +126,66 @@ export class SessionManager {
         itemId,
         speakerId,
         listeningToken,
-        refreshToken,
         trackDurations: [...plan.trackDurations],
         totalDurationSeconds: plan.totalDurationSeconds,
         mediaUrls: plan.tracks.map((track) => track.url),
         item: manifest.item,
       }
       this.lastWrittenSeconds = resumeSeconds
-      // Fresh session baseline: `userToken` is the client's current access token, so any pending pair
-      // from a previous session is stale.
-      this.pendingRotatedTokens = undefined
-      this.preRotationToken = undefined
       this.startLoop()
-      return this.toSession(userToken, 'playing', resumeSeconds)
+      return this.toSession('playing', resumeSeconds)
     })
   }
 
   // Pause playback and write the current position immediately (SPEC section 5). The sync loop keeps
   // running so a later resume — or a device-side action — is still reflected.
-  async pause(callerToken: string): Promise<PlaybackSession> {
+  async pause(): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
-      this.noteCaller(callerToken)
       await this.deps.sonos.pause(session.speakerId)
       const absolute = await this.readAbsolute(session)
       if (absolute !== undefined) await this.writeBack(session, absolute)
-      return this.toSession(callerToken, 'paused', absolute ?? this.lastWrittenSeconds)
+      return this.toSession('paused', absolute ?? this.lastWrittenSeconds)
     })
   }
 
   // Resume playback on the existing queue.
-  async resume(callerToken: string): Promise<PlaybackSession> {
+  async resume(): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
-      this.noteCaller(callerToken)
       await this.deps.sonos.play(session.speakerId)
       const absolute = await this.readAbsolute(session)
-      return this.toSession(callerToken, 'playing', absolute ?? this.lastWrittenSeconds)
+      return this.toSession('playing', absolute ?? this.lastWrittenSeconds)
     })
   }
 
   // Seek to an absolute book position and write it back immediately.
-  async seek(callerToken: string, positionSeconds: number): Promise<PlaybackSession> {
+  async seek(positionSeconds: number): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
-      this.noteCaller(callerToken)
       const target = Math.min(Math.max(positionSeconds, 0), session.totalDurationSeconds)
       await this.deps.sonos.seek(session.speakerId, planSeek([...session.trackDurations], target, this.seekTuning()))
       await this.writeBack(session, target)
-      return this.toSession(callerToken, await this.readState(session), target)
+      return this.toSession(await this.readState(session), target)
     })
   }
 
   // The active session with a live position/state read from the coordinator (so a device-side pause
   // is already reflected here). Throws NoActiveSessionError (404) when nothing is playing.
-  async current(callerToken: string): Promise<PlaybackSession> {
+  async current(): Promise<PlaybackSession> {
     return this.serialize(async () => {
       const session = this.requireSession()
-      this.noteCaller(callerToken)
       const { absolute, state } = await this.readLive(session)
-      return this.toSession(callerToken, state, absolute)
+      return this.toSession(state, absolute)
     })
   }
 
   // Stop playback, writing the final position back to ABS. Throws NoActiveSessionError (404) if
-  // nothing is playing. Returns a final Session (200) when a rotated token pair was still pending at
-  // stop — the last chance to deliver it, since the tokens are discarded on stop (SPEC section 8) —
-  // and undefined (204) otherwise. `callerToken` is optional so the onClose shutdown hook can stop
-  // without a caller.
-  async stop(callerToken?: string): Promise<PlaybackSession | undefined> {
+  // nothing is playing.
+  async stop(): Promise<void> {
     return this.serialize(async () => {
-      const session = this.requireSession()
-      if (callerToken !== undefined) this.noteCaller(callerToken)
-      const pending = callerToken === undefined ? undefined : this.rotatedTokensFor(callerToken)
-      const { itemId, item, speakerId, totalDurationSeconds } = session
-      const reached = await this.stopInternal() // writes the final position, then clears the session
-      if (pending === undefined) return undefined
-      const position = reached ?? this.lastWrittenSeconds
-      const finished = totalDurationSeconds - position <= END_OF_BOOK_TOLERANCE_SECONDS
-      return {
-        itemId,
-        item,
-        speakerId,
-        state: finished ? 'finished' : 'stopped',
-        positionSeconds: finished ? totalDurationSeconds : position,
-        durationSeconds: totalDurationSeconds,
-        updatedAt: new Date().toISOString(),
-        rotatedTokens: pending,
-      }
+      this.requireSession()
+      await this.stopInternal() // writes the final position, then clears the session
     })
   }
 
@@ -251,26 +194,20 @@ export class SessionManager {
     return this.session !== undefined
   }
 
-  // Write the final position and tear down. Returns the reached absolute position when it was read
-  // from our own queue (for the caller's final Session), or undefined when the read failed or the
-  // speaker was on foreign content — in which case nothing is written either (writeProgress stores
-  // exactly what it is given, so a fallback or foreign position would wipe the real stored position).
-  private async stopInternal(): Promise<number | undefined> {
+  // Write the final position and tear down. Nothing is written when the read failed or the speaker was
+  // on foreign content (writeProgress stores exactly what it is given, so a fallback or foreign
+  // position would wipe the real stored position).
+  private async stopInternal(): Promise<void> {
     const session = this.session
-    if (session === undefined) return undefined
-    let reached: number | undefined
+    if (session === undefined) return
     let write: ProgressUpdate | undefined
     try {
       const live = await this.readLive(session)
-      if (this.isOurTrack(session, live.trackUri)) {
-        reached = live.absolute
-        write = this.progressAt(session, live.absolute)
-      }
+      if (this.isOurTrack(session, live.trackUri)) write = this.progressAt(session, live.absolute)
     } catch {
-      reached = undefined
+      write = undefined
     }
     await this.finalize(session, write)
-    return reached
   }
 
   // Write the given payload (best-effort), cancel the sync loop, stop the speaker, and clear the
@@ -292,10 +229,6 @@ export class SessionManager {
       // best effort — the session is ending regardless
     }
     this.session = undefined
-    // A pair still pending here was already handed back in stop()'s final Session (or is lost on
-    // shutdown, by design).
-    this.pendingRotatedTokens = undefined
-    this.preRotationToken = undefined
   }
 
   // --- Sync loop (SPEC section 5): poll the coordinator, write progress back on movement, and
@@ -324,10 +257,6 @@ export class SessionManager {
   private async syncOnce(): Promise<void> {
     const session = this.session
     if (session === undefined) return
-
-    // Renew the listening token first (independent of the Sonos read below), so a rotation is not
-    // skipped by a transient speaker hiccup and the write-back/finalize that follow use a fresh token.
-    await this.maybeRotateTokens(session)
 
     let live: { absolute: number; state: PlaybackPhase; trackUri: string }
     try {
@@ -390,45 +319,6 @@ export class SessionManager {
   private relinquish(): void {
     this.stopLoop()
     this.session = undefined
-    this.pendingRotatedTokens = undefined
-    this.preRotationToken = undefined
-  }
-
-  // Adoption (SPEC section 8): once the client authenticates with the rotated access token, delivery
-  // is confirmed and we stop redelivering the pair. The old access token stays valid until its own
-  // expiry, so pre-adoption requests (carrying the old token) still match `validateToken` upstream.
-  private noteCaller(callerToken: string): void {
-    if (this.pendingRotatedTokens !== undefined && callerToken === this.pendingRotatedTokens.accessToken) {
-      this.pendingRotatedTokens = undefined
-    }
-  }
-
-  // Renew the listening user's ABS tokens proactively, before the access token expires, so the sync
-  // loop's own writes keep working and the rotated pair can be handed to the client while its old
-  // access token is still valid (SPEC section 8). Runs each tick; the network refresh only fires in
-  // the margin before expiry. No-op without a stored refresh token, or when the access token carries
-  // no decodable `exp` (older ABS / non-JWT) — then proactive renewal simply does not engage.
-  private async maybeRotateTokens(session: ActiveSession): Promise<void> {
-    // Rotate at most one pair ahead of the client: while a pair is still awaiting delivery/adoption,
-    // don't rotate again. This bounds a mis-set margin (>= the token lifetime) to a single rotation
-    // instead of one per tick, and keeps `preRotationToken` equal to the token the client still holds
-    // (so the delivery gate can't be outrun by back-to-back rotations).
-    if (this.pendingRotatedTokens !== undefined) return
-    if (session.refreshToken === undefined) return
-    const current = await session.listeningToken()
-    const exp = jwtExpSeconds(current)
-    if (exp === undefined) return
-    if (Date.now() / 1000 < exp - this.deps.config.listeningTokenRefreshMarginSeconds) return
-    try {
-      const rotated = await this.deps.abs.refresh(session.refreshToken)
-      this.preRotationToken = current // the token the owner still holds until it expires
-      session.listeningToken = () => Promise.resolve(rotated.accessToken)
-      session.refreshToken = rotated.refreshToken
-      this.pendingRotatedTokens = { accessToken: rotated.accessToken, refreshToken: rotated.refreshToken }
-    } catch {
-      // best-effort: the refresh token may already be invalid; writes then fail and drop (as before
-      // this handover), and the client re-logs-in. Never wedge the loop.
-    }
   }
 
   // Write an in-progress position back to ABS (never `isFinished` — the book is not done until the
@@ -514,7 +404,7 @@ export class SessionManager {
     return trackToAbsolute(session.trackDurations, boundedIndex, relTimeSeconds)
   }
 
-  private toSession(callerToken: string, state: PlaybackPhase, positionSeconds: number): PlaybackSession {
+  private toSession(state: PlaybackPhase, positionSeconds: number): PlaybackSession {
     const session = this.requireSession()
     return {
       itemId: session.itemId,
@@ -524,16 +414,7 @@ export class SessionManager {
       positionSeconds,
       durationSeconds: session.totalDurationSeconds,
       updatedAt: new Date().toISOString(),
-      rotatedTokens: this.rotatedTokensFor(callerToken),
     }
-  }
-
-  // Deliver a pending rotated pair (SPEC section 8) only to the caller presenting the pre-rotation
-  // access token — the session owner, whose old token stays valid until its own expiry. Ties the
-  // handover to the owner so a different valid ABS user can't collect it. Never logged: the server
-  // does not log response bodies, and the request serializer strips the URL query (section 14).
-  private rotatedTokensFor(callerToken: string): RotatedTokenPair | undefined {
-    return callerToken === this.preRotationToken ? this.pendingRotatedTokens : undefined
   }
 
   private requireSession(): ActiveSession {

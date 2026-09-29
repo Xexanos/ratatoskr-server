@@ -1,8 +1,7 @@
 import type { components } from '@ratatoskr/contract'
-import type { AbsTokenPair } from '../abs/client.js'
 import type { LibraryBook, LibraryBookDetail, LibraryBookPage } from '../abs/library.js'
 import type { DeviceSession } from '../auth/authService.js'
-import type { PlaybackSession, RotatedTokenPair } from '../playback/sessionManager.js'
+import type { PlaybackSession } from '../playback/sessionManager.js'
 import type { SonosSpeaker } from '../sonos/client.js'
 
 type AuthSession = components['schemas']['AuthSession']
@@ -22,16 +21,10 @@ type Speaker = components['schemas']['Speaker']
 // promising anything new.
 type MappedSummary = LibraryItemSummary & { coverUrl: string | null }
 type MappedItem = LibraryItem & { coverUrl: string | null; progress: Progress }
-// A session as a surface puts it on the wire. Note what is *not* here: the rotated Audiobookshelf
-// pair. Minting it unconditionally would leave "no upstream credential leaves on a surface that does
-// not promise one" — the property SPEC section 8 exists for — resting on fast-json-stringify dropping
-// a field absent from the response schema, and a serializer is the wrong place to hold a security
-// guarantee: it holds only as long as every response has a declared schema.
+// A session as the surface puts it on the wire. Note what is *not* here: any Audiobookshelf token.
+// The domain session carries none, so "no upstream credential on the wire" (SPEC section 8) does not
+// rest on the serializer dropping a field absent from the response schema.
 export type MappedSession = Session & { item: MappedSummary }
-// The addition made by the one surface that does promise it (toV1SessionResponse). Declared here for
-// the same reason as V1AuthTokens, and optional because a pair exists only while a handover is in
-// flight.
-export type MappedV1Session = MappedSession & { rotatedTokens?: RotatedTokenPair | undefined }
 
 // The cover image is served by Ratatoskr's own cover-proxy route, so coverUrl points there rather
 // than at ABS. A path relative to the server origin, carrying the mount prefix of the major that
@@ -85,31 +78,9 @@ export function toSpeaker(speaker: SonosSpeaker): Speaker {
   }
 }
 
-// Contract 1.4.0's AuthTokens, spelled out rather than derived: 2.0.0 dropped the schema, and the
-// frozen /v1 document is generated without types (see the contract package's index), so the shapes
-// that major alone needs are declared where they are used. Frozen, like the surface it belongs to.
-export interface V1AuthTokens {
-  accessToken: string
-  refreshToken: string
-  user: { id: string; username: string }
-}
-
-// ABS's own token pair, which /v1 hands to the client as-is. The shapes coincide today; they are
-// mapped rather than passed through because they are not the same thing — what this major promises
-// is V1AuthTokens, AbsTokenPair is what upstream issued, and a later major replaces the former
-// without ABS changing at all.
-export function toAuthTokens(pair: AbsTokenPair): V1AuthTokens {
-  return {
-    accessToken: pair.accessToken,
-    refreshToken: pair.refreshToken,
-    user: { id: pair.user.id, username: pair.user.username },
-  }
-}
-
-// A signed-in device as its client sees it. The mirror image of toAuthTokens: same identity, but the
-// credential handed over is the Ratatoskr token and no Audiobookshelf token appears at all — the one
-// difference between the two majors' auth models, in one function. Takes the DeviceSession rather
-// than a store entry, so a caller has nothing to hand it that carries a chain.
+// A signed-in device as its client sees it: the Ratatoskr token and the identity, and no Audiobookshelf
+// token at all. Takes the DeviceSession rather than a store entry, so a caller has nothing to hand it
+// that carries a chain.
 export function toAuthSession(session: DeviceSession): AuthSession {
   return {
     token: session.token,
@@ -126,15 +97,5 @@ export function toSessionResponse(session: PlaybackSession, apiPrefix: string): 
     positionSeconds: session.positionSeconds,
     durationSeconds: session.durationSeconds,
     updatedAt: session.updatedAt,
-  }
-}
-
-// The same session, plus the handover field. Reached only through the /v1 service's mapSession
-// override, which is what confines a pending pair to the surface that documents it (see
-// MappedSession).
-export function toV1SessionResponse(session: PlaybackSession, apiPrefix: string): MappedV1Session {
-  return {
-    ...toSessionResponse(session, apiPrefix),
-    ...(session.rotatedTokens !== undefined ? { rotatedTokens: session.rotatedTokens } : {}),
   }
 }

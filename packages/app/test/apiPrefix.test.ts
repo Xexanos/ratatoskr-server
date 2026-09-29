@@ -1,4 +1,4 @@
-import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
+import { openapiDocument } from '@ratatoskr/contract'
 import { describe, expect, it } from 'vitest'
 import { versionPrefix } from '../src/api/apiPrefix.js'
 
@@ -11,10 +11,8 @@ describe('versionPrefix', () => {
     expect(versionPrefix({ servers: [{ url: 'http://{host}:{port}/v2' }] })).toBe('/v2')
   })
 
-  // Both served documents, read the way the mount reads them: the two majors have to land on two
-  // different paths, or one of them is not reachable at all.
-  it('gives each served major its own prefix', () => {
-    expect(versionPrefix(frozenV1Document)).toBe('/v1')
+  // The served document, read the way the mount reads it.
+  it('gives the served major its prefix', () => {
     expect(versionPrefix(openapiDocument)).toBe('/v2')
   })
 
@@ -30,7 +28,7 @@ describe('versionPrefix', () => {
     ['an origin with no path', { servers: [{ url: 'http://{host}:{port}' }] }],
     ['a root path', { servers: [{ url: 'http://{host}:{port}/' }] }],
     // OpenAPI allows a relative servers.url, and this rejects one rather than reading it as a prefix.
-    // Pinned as a known limitation, not an accident: both served documents carry an absolute template,
+    // Pinned as a known limitation, not an accident: the served document carries an absolute template,
     // and a contract that switched to `/v2` should fail loudly at startup here — where the message
     // names servers[0].url — instead of being parsed by a looser rule that would also accept a path
     // that is not a version prefix at all.

@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { frozenV1Document, openapiDocument } from '@ratatoskr/contract'
+import { openapiDocument } from '@ratatoskr/contract'
 import type { AbsClient } from '../src/abs/client.js'
 import { AbsAuthError } from '../src/abs/errors.js'
-import { SELF_VALIDATING_OPERATIONS } from '../src/api/tokenGuard.js'
 import type { SonosClient } from '../src/sonos/client.js'
 import { buildTestApp } from './helpers/testApp.js'
 
@@ -25,38 +24,18 @@ function rejectingAbs(): AbsClient {
   } as unknown as AbsClient
 }
 
-// The sweep runs per served major, each against its own document and its own mount. The invariant is
-// the same for all of them — no bearer-protected operation acts on an unproven token — but the set of
-// operations is not, and neither is the guard, since each is built from its own document. A sweep over
-// one major would leave the others' operations outside the mechanism that enforces this.
+// The invariant: no bearer-protected operation acts on an unproven token. The sweep runs against the
+// one served major, its document and its mount.
 //
-// `expectedProtected` is written out rather than derived a second time: for the frozen major it is a
-// fact that cannot change, and for the one under development it is something a contract edit should
-// have to state on purpose.
+// `expectedProtected` is written out rather than derived a second time: a contract edit should have
+// to state on purpose that the set of protected operations changed.
 //
 // `tolerated` names operations that are *defined* to answer normally for a bearer naming no session,
-// so 401 is the wrong expectation for them — sign-out is idempotent by contract, so that a client can
+// so 401 is the wrong expectation for them - sign-out is idempotent by contract, so that a client can
 // always complete a sign-out locally (tokenGuard.ts's UNKNOWN_TOKEN_TOLERANT_OPERATIONS). They still
 // require a bearer, and they still touch nothing upstream on an unknown one, which is what keeps them
-// inside the invariant rather than an exception to it — the assertions below check exactly that.
+// inside the invariant rather than an exception to it - the assertions below check exactly that.
 const MAJORS = [
-  {
-    prefix: '/v1',
-    document: frozenV1Document,
-    expectedProtected: [
-      'getCurrentSession',
-      'getLibraryItem',
-      'getLibraryItemCover',
-      'listInProgressItems',
-      'listLibraryItems',
-      'pauseSession',
-      'resumeSession',
-      'seekSession',
-      'startSession',
-      'stopSession',
-    ],
-    tolerated: [] as string[],
-  },
   {
     prefix: '/v2',
     document: openapiDocument,
@@ -118,7 +97,7 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
 
   it('protects exactly the operations this major is expected to', () => {
     // A newly protected endpoint cannot dodge the sweep, and one that quietly stops being protected
-    // cannot slip past either — on /v1 that would be a change to a frozen surface.
+    // cannot slip past either.
     expect(bearerProtectedOperationIds(major.document)).toEqual([...major.expectedProtected].sort())
   })
 
@@ -130,8 +109,7 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
     const fixture = FIXTURES[operationId]
     if (fixture === undefined) throw new Error(`no fixture for ${operationId}`)
     const abs = rejectingAbs()
-    // No device signed in, and an empty store: the bearer below names no session on /v2 and is not a
-    // valid ABS token on /v1, so it is unproven on either surface — one request, one invariant.
+    // No device signed in, and an empty store: the bearer below names no session, so it is unproven.
     const { app } = await buildTestApp({ absClient: abs, sonosClient: {} as SonosClient }, { signedIn: false })
     const res = await app.inject({
       method: fixture.method,
@@ -144,8 +122,6 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
       expect(res.statusCode).toBe(204)
       // A tolerated operation is exempt from *rejecting* an unknown token, not from acting on one:
       // sign-out has no chain to end when the token names no session, so nothing goes upstream.
-      // (On /v1 the opposite is true by design — proving the bearer there *is* an ABS call — so this
-      // assertion belongs to the tolerated path alone.)
       for (const method of Object.values(abs as unknown as Record<string, unknown>)) {
         if (typeof method === 'function') expect(method).not.toHaveBeenCalled()
       }
@@ -157,27 +133,9 @@ describe.each(MAJORS)('$prefix: every bearer-protected operation refuses an unpr
   })
 })
 
-// Guards the fixture table itself: an operation that no major protects any more should lose its
-// fixture, or the table drifts into describing a surface that no longer exists.
-it('has no fixture for an operation neither major protects', () => {
-  const protectedSomewhere = new Set(MAJORS.flatMap((major) => bearerProtectedOperationIds(major.document)))
-  expect(Object.keys(FIXTURES).filter((id) => !protectedSomewhere.has(id))).toEqual([])
-})
-
-// SELF_VALIDATING_OPERATIONS is the one piece of the guard every major shares, and createTokenGuard
-// checks each entry against the document it is built for — so an entry that holds for only one major
-// does not fail that major, it throws while building another one and takes the whole process down at
-// startup. A frozen document cannot gain an operationId to resolve such a mismatch.
-//
-// Its own assertion rather than a boot crash: this names the constraint and says which major lacks the
-// operation, and it fails in one test instead of in every test that builds an app.
-it('shares no self-validating exemption that only one major protects', () => {
-  const perMajor = MAJORS.map((major) => ({
-    prefix: major.prefix,
-    protectedIds: new Set(bearerProtectedOperationIds(major.document)),
-  }))
-  const unsupported = [...SELF_VALIDATING_OPERATIONS].flatMap((operationId) =>
-    perMajor.filter((major) => !major.protectedIds.has(operationId)).map((major) => `${major.prefix}:${operationId}`),
-  )
-  expect(unsupported).toEqual([])
+// Guards the fixture table itself: an operation that is no longer protected should lose its fixture,
+// or the table drifts into describing a surface that no longer exists.
+it('has no fixture for an operation the major does not protect', () => {
+  const protectedIds = new Set(MAJORS.flatMap((major) => bearerProtectedOperationIds(major.document)))
+  expect(Object.keys(FIXTURES).filter((id) => !protectedIds.has(id))).toEqual([])
 })

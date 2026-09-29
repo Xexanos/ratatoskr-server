@@ -18,7 +18,7 @@ export interface AbsUser {
 
 // An ABS token pair as ABS itself issues it: a short-lived access token plus the longer-lived
 // refresh token, which ABS rotates on every use. An upstream fact, deliberately not a contract type
-// — how (or whether) a pair is handed to a client is per-major and belongs to api/.
+// — how (or whether) a pair is handed to a client belongs to api/.
 export interface AbsTokenPair {
   accessToken: string
   refreshToken: string

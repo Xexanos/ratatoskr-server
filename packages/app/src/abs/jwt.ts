@@ -3,8 +3,7 @@
 // validity. Returns undefined for a non-JWT / unparseable token, so a caller degrades to "no
 // proactive renewal" rather than guessing.
 //
-// Shared by the two places that renew on a clock: the /v1 sync loop's rotation handover
-// (playback/sessionManager.ts) and the /v2 keep-alive's on-demand refresh (auth/keepAlive.ts).
+// Used by the keep-alive's on-demand refresh (auth/keepAlive.ts).
 export function jwtExpSeconds(token: string): number | undefined {
   const parts = token.split('.')
   if (parts.length !== 3) return undefined

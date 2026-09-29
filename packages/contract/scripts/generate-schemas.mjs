@@ -1,14 +1,12 @@
-// Emits each served major's OpenAPI document as a runtime TypeScript module for
+// Emits the served major's OpenAPI document as a runtime TypeScript module for
 // fastify-openapi-glue's `specification` option (glue dereferences the refs itself, so no rewriting
 // is needed). Doing this at generate time — not at server boot — removes any runtime dependency on
 // the repo layout or on reading the YAML, so the built package is self-contained for the container
 // deployment (SPEC section 12).
 //
-// Two majors are served side by side during the transition window (SPEC section 6): the contract
-// under development, and contract 1.4.0 frozen under /v1. Both are read from a YAML file in the
-// build context rather than from the git tag the freeze is named after, so the image build needs no
-// history and stays hermetic; what keeps the frozen copy honest is the contract-freeze CI job,
-// which diffs it against that tag.
+// One major is served (SPEC section 6): /v1 was sunset and has no document any more, so there is a
+// single entry. The list shape stays, so that the next major to be served alongside one is an entry
+// here and not a rewrite.
 //
 // Run via `pnpm --filter @ratatoskr/contract run generate`. Output is gitignored and
 // regenerated, exactly like the type definitions next to it.
@@ -21,16 +19,9 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const outDir = join(here, '..', 'src', 'generated')
 
-// One entry per served major. `pinnedVersion` is set for a frozen document: its whole point is that
-// it never moves, so the version it has to report is stated here rather than trusted.
+// One entry per served major.
 const documents = [
   { source: join(repoRoot, 'contract', 'openapi.yaml'), out: 'openapi-document.ts', name: 'openapiDocument' },
-  {
-    source: join(repoRoot, 'contract', 'v1', 'openapi.yaml'),
-    out: 'openapi-document-v1.ts',
-    name: 'frozenV1Document',
-    pinnedVersion: '1.4.0',
-  },
 ]
 
 mkdirSync(outDir, { recursive: true })
@@ -58,9 +49,6 @@ function check(doc, document, source) {
   const version = doc?.info?.version
   if (typeof version !== 'string') {
     fail(source, `info.version is missing or not a string (${JSON.stringify(version)})`)
-  }
-  if (document.pinnedVersion !== undefined && version !== document.pinnedVersion) {
-    fail(source, `expected the frozen contract ${document.pinnedVersion}, found ${version}`)
   }
   const url = doc?.servers?.[0]?.url
   const path = typeof url === 'string' ? /^[a-z][a-z0-9+.-]*:\/\/[^/]+(\/[^?#]*)/i.exec(url)?.[1] : undefined
