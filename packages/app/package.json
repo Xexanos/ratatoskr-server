@@ -26,7 +26,7 @@
   "devDependencies": {
     "@fastify/response-validation": "^3.0.4",
     "@ratatoskr/fake-sonos": "workspace:*",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@vitest/coverage-v8": "^4.1.11",
     "ajv": "^8.17.1",
     "tsx": "^4.23.15",
