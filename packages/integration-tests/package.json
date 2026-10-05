@@ -17,6 +17,6 @@
     "js-yaml": "^5.4.2",
     "testcontainers": "^12.1.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.2"
   }
 }
