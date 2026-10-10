@@ -18,7 +18,7 @@
     "@ratatoskr/contract": "workspace:*",
     "@ratatoskr/position": "workspace:*",
     "@svrooij/sonos": "^2.5.0",
-    "fast-xml-parser": "^5.11.1",
+    "fast-xml-parser": "^5.11.2",
     "fastify": "^5.12.5",
     "fastify-openapi-glue": "^4.11.5",
     "undici": "^8.10.2"
@@ -26,7 +26,7 @@
   "devDependencies": {
     "@fastify/response-validation": "^3.0.4",
     "@ratatoskr/fake-sonos": "workspace:*",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.4",
     "@vitest/coverage-v8": "^4.1.11",
     "ajv": "^8.17.1",
     "tsx": "^4.23.15",
