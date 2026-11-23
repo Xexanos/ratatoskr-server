@@ -144,7 +144,7 @@ jobs:
             echo "::notice::contract major $base -> $head: breaking changes are expected at a major cut, skipping the oasdiff breaking check"
           fi
       - if: steps.contract-major.outputs.base == steps.contract-major.outputs.head
-        uses: oasdiff/oasdiff-action/breaking@b9325c9e0a27ab65b0da3b766522cedec6be81dc # v0.1.18
+        uses: oasdiff/oasdiff-action/breaking@0546e2ebdc9d3589d594cfcef445c61ca02cabf1 # v0.2.0
         with:
           base: "origin/${{ github.base_ref }}:contract/openapi.yaml"
           revision: "HEAD:contract/openapi.yaml"
